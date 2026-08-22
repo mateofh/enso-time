@@ -21,6 +21,16 @@ describe("automation blueprint preview golden vectors", () => {
     expect(blueprint).toMatchObject({ status: "ready", completeness: { score: 100 }, estimates: { weeklyBaselineMinutes: 300, weeklyResidualMinutes: 100, weeklySavingsMinutes: 200, effort: 44, operationalRisk: 17, confidence: 89 } });
   });
 
+  it("keeps a complete intake as a draft until a second observed repetition", () => {
+    const sourceIntake = intake();
+    const draft = {
+      ...emptyBlueprintDraft(sourceIntake), runsPerWeek: 5, dataSensitivity: "low" as const, sideEffectLevel: "reversible" as const, verificationMode: "every-run" as const, verificationMinutesPerRun: 5, recoveryPlan: "Review the CSV and repeat validation",
+      stepBoundaries: ["automatable", "automatable", "automatable", "human-required"].map((disposition, index) => ({ stepId: `step-${String(index + 1).padStart(2, "0")}`, disposition: disposition as "automatable" | "human-required", rationale: "Documented boundary" })),
+    };
+    const blueprint = buildPreviewBlueprint(sourceIntake, draft, { observed: ["one observation"], declared: ["intake"], repeatedObservations: 1 });
+    expect(blueprint).toMatchObject({ status: "draft", completeness: { score: 100 } });
+  });
+
   it("scores classified boundaries proportionally and never reports negative savings", () => {
     const sourceIntake = intake(["Export", "Resolve"], 30);
     const draft = { ...emptyBlueprintDraft(sourceIntake), runsPerWeek: 2, dataSensitivity: "moderate" as const, sideEffectLevel: "none" as const, verificationMode: "every-run" as const, verificationMinutesPerRun: 0, recoveryPlan: "Escalate unresolved rows", stepBoundaries: [{ stepId: "step-01", disposition: "automatable" as const, rationale: "Repeatable" }, { stepId: "step-02", disposition: "unassessed" as const }] };
