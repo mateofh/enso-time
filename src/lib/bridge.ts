@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { demoCheckIns, demoDiagnostic, demoSettings, demoStudy, demoTimeline, demoTrackingStatus } from "./demo";
 import { buildPrompt, createDiagnostic } from "./diagnostics";
-import { normalizeWorkflowIntakes, upsertWorkflowIntake } from "./workflowIntakes";
+import { migrateWorkflowIntakes, upsertWorkflowIntake } from "./workflowIntakes";
 import type {
   CheckInAnswer,
   CheckInV1,
@@ -32,7 +32,14 @@ function isTauri(): boolean {
 function loadWebState(): WebState {
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored) return JSON.parse(stored) as WebState;
+    if (stored) {
+      const state = JSON.parse(stored) as WebState;
+      if (!Array.isArray(state.workflowIntakes)) return state;
+      const workflowIntakes = migrateWorkflowIntakes(state.workflowIntakes);
+      const migrated = { ...state, workflowIntakes };
+      if (JSON.stringify(migrated) !== stored) saveWebState(migrated);
+      return migrated;
+    }
   } catch {
     // A corrupt preview state should never prevent the UI from loading.
   }
@@ -115,7 +122,7 @@ export const bridge = {
   },
 
   async listWorkflowIntakes(): Promise<WorkflowIntakeV1[]> {
-    return isTauri() ? invoke("list_workflow_intakes") : normalizeWorkflowIntakes(loadWebState().workflowIntakes ?? []);
+    return isTauri() ? invoke("list_workflow_intakes") : loadWebState().workflowIntakes ?? [];
   },
 
   async saveWorkflowIntake(intake: WorkflowIntakeV1): Promise<WorkflowIntakeV1> {

@@ -43,8 +43,36 @@ describe("automation diagnosis", () => {
   });
 
   it("matches the shared FNV-1a candidate id for Unicode and emoji", () => {
-    expect(candidateId("  Café semanal  ")).toBe("candidate-0e357a784791391c");
-    expect(candidateId("🤖 Reporte 📊")).toBe("candidate-98d85f5650810211");
+    const vectors = [
+      ["  Café semanal  ", "candidate-f329e559e8fa0e7c"],
+      ["🤖 Reporte 📊", "candidate-b5d6eca88706b271"],
+      ["hello", "candidate-a430d84680aabd0b"],
+      ["ÁRBOL", "candidate-69684103a78f978a"],
+      ["Conciliación 💸", "candidate-311f7ffd34d13298"],
+      ["Enviar 🚀", "candidate-c46550dd53ba9a5f"],
+      ["日本語💡", "candidate-e1b1c5d6a1fc81ff"],
+      ["PREPARAR reporte 🚀", "candidate-dd9d3a169690844a"],
+    ] as const;
+    for (const [label, expected] of vectors) expect(candidateId(label)).toBe(expected);
+    expect(candidateId(" Preparar ")).toBe(candidateId("preparar"));
+    expect(candidateId("ÁRBOL")).toBe(candidateId("Árbol"));
+    expect(candidateId("Árbol")).not.toBe(candidateId("árbol"));
+  });
+
+  it("groups ASCII casing and chooses the bytewise-smallest original label", () => {
+    const mixedCase = ["preparar", "Preparar", "PREPARAR"].map((activityLabel, index) => ({
+      ...checkIns[0]!,
+      id: `mixed-${index}`,
+      activityLabel,
+    }));
+    for (const values of [mixedCase, [...mixedCase].reverse()]) {
+      const [candidate] = scoreCandidate(values, 3);
+      expect(candidate).toMatchObject({
+        id: "candidate-7ef2468d3a5dcd66",
+        activityLabel: "PREPARAR",
+        weeklyFrequency: 5,
+      });
+    }
   });
 
   it("breaks equal-priority ties by candidate id", () => {
@@ -55,9 +83,14 @@ describe("automation diagnosis", () => {
       intervalStart: `2026-08-0${day}T10:00:00Z`,
       intervalEnd: `2026-08-0${day}T10:15:00Z`,
     })));
-    const candidates = scoreCandidate(tied, 2);
-    expect(candidates).toHaveLength(2);
-    expect(candidates[0]!.priorityScore).toBe(candidates[1]!.priorityScore);
-    expect(candidates.map((candidate) => candidate.id)).toEqual([...candidates.map((candidate) => candidate.id)].sort());
+    const expectedIds = scoreCandidate(tied, 2).map((candidate) => candidate.id);
+    for (let offset = 0; offset < tied.length; offset += 1) {
+      const rotated = [...tied.slice(offset), ...tied.slice(0, offset)];
+      const candidates = scoreCandidate(rotated, 2);
+      expect(candidates).toHaveLength(2);
+      expect(candidates[0]!.priorityScore).toBe(candidates[1]!.priorityScore);
+      expect(candidates.map((candidate) => candidate.id)).toEqual(expectedIds);
+    }
+    expect(expectedIds).toEqual([...expectedIds].sort());
   });
 });
