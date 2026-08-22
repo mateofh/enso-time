@@ -4,6 +4,7 @@ import test from "node:test";
 
 const workflow = readFileSync(new URL("../../.github/workflows/release.yml", import.meta.url), "utf8");
 const provenanceDocs = readFileSync(new URL("../../docs/RELEASE_PROVENANCE.md", import.meta.url), "utf8");
+const tauriConfig = JSON.parse(readFileSync(new URL("../../src-tauri/tauri.conf.json", import.meta.url), "utf8"));
 
 test("manual release is a fail-closed beta.2 backfill", () => {
   assert.match(workflow, /type: choice\s+options:\s+- v0\.1\.0-beta\.2/);
@@ -83,6 +84,28 @@ test("Windows uses a real VBScript smoke test without mutating optional features
   assert.match(workflow, /& \$cscript\.Source \/\/B \/\/NoLogo \$probe/);
   assert.doesNotMatch(workflow, /WindowsOptionalFeature|\bDISM\b/i);
   assert.doesNotMatch(workflow, /windows-2025/);
+});
+
+test("Windows packaging uses an ASCII product name without changing the macOS brand", () => {
+  const configureStart = workflow.indexOf("- name: Configure release packaging");
+  const buildStart = workflow.indexOf("- name: Build Tauri installers", configureStart);
+  assert.ok(configureStart > 0 && buildStart > configureStart);
+  const configure = workflow.slice(configureStart, buildStart);
+  const windowsStart = configure.indexOf('if (process.platform === "win32")');
+  assert.ok(windowsStart > 0);
+  const windows = configure.slice(windowsStart);
+  const windowsName = windows.match(/const windowsProductName = "([^"]+)"/)?.[1];
+
+  assert.equal(windowsName, "Enso Time");
+  assert.match(windowsName, /^[\x20-\x7E]+$/);
+  assert.match(windows, /config\.productName = windowsProductName/);
+  assert.match(windows, /Windows productName must be printable ASCII/);
+
+  const macStart = configure.indexOf('if (process.platform === "darwin")');
+  assert.ok(macStart > 0 && macStart < windowsStart);
+  const mac = configure.slice(macStart, windowsStart);
+  assert.doesNotMatch(mac, /productName/);
+  assert.equal(tauriConfig.productName, "Ensō Time");
 });
 
 test("every external action is pinned to a full commit SHA", () => {

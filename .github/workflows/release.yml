@@ -262,6 +262,14 @@ jobs:
             if (!match) {
               throw new Error(`Expected a beta version for Windows packaging, received ${packageVersion}`);
             }
+            // WiX/MSI stores strings through a package code page. Keep the
+            // Windows installer identity ASCII while the app window title and
+            // non-Windows brand remain the configured “Ensō Time”.
+            const windowsProductName = "Enso Time";
+            if (!/^[\x20-\x7E]+$/.test(windowsProductName)) {
+              throw new Error(`Windows productName must be printable ASCII, received ${windowsProductName}`);
+            }
+            config.productName = windowsProductName;
             config.version = `${match[1]}-${match[2]}`;
           }
           fs.writeFileSync("src-tauri/ci-bundle.json", JSON.stringify(config));
