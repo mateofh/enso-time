@@ -1,0 +1,13 @@
+# Legal texts are hashed and bundled verbatim. Keep their checkout representation
+# stable on Windows as well as Unix hosts.
+LICENSE text eol=lf
+LICENSES/** text eol=lf
+COMMERCIAL.md text eol=lf
+CONTRIBUTING.md text eol=lf
+PRIVACY.md text eol=lf
+README.md text eol=lf
+SECURITY.md text eol=lf
+THIRD_PARTY_NOTICES.md text eol=lf
+TRADEMARKS.md text eol=lf
+src-tauri/resources/legal/** text eol=lf
+scripts/license-check.mjs text eol=lf
