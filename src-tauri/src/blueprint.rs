@@ -246,8 +246,8 @@ pub fn draft_from_input(
     {
         return Err("Los campos fuente del blueprint no pueden modificarse".into());
     }
-    let now = iso_now();
     let mut draft = existing.cloned().unwrap_or_else(|| ephemeral_draft(intake));
+    let now = iso_now();
     draft.source_intake_updated_at = intake.updated_at.clone();
     draft.workflow_intake_id = intake.id.clone();
     draft.runs_per_week = input.runs_per_week;
