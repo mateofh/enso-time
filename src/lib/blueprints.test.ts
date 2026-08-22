@@ -45,6 +45,28 @@ describe("automation blueprint preview golden vectors", () => {
     expect(blueprint).toMatchObject({ status: "draft", completeness: { score: 100 } });
   });
 
+  it("exposes the declared repetition days component for the 3/2 evidence vector", () => {
+    const sourceIntake = intake();
+    const draft = { ...emptyBlueprintDraft(sourceIntake), runsPerWeek: 2 };
+    const estimates = computeEstimates(draft, sourceFromIntake(sourceIntake), {
+      observed: ["interval-01", "interval-02", "interval-03"],
+      declared: ["two repetitions confirmed"],
+      repeatedObservations: 2,
+      observedDays: 3,
+      declaredRepeatedDays: 2,
+      rulesQuality: 0.5,
+      observedWeeklyFrequency: 7,
+    });
+
+    expect(new Set(Object.keys(estimates.components))).toEqual(new Set([
+      "toolComplexity", "stepComplexity", "humanShare", "effortSensitivity", "effortEffect",
+      "riskSensitivity", "riskEffect", "verification", "recoveryAbsent", "observations",
+      "observedDays", "declaredRepeatedDays", "rulesQuality", "observedWeeklyFrequency",
+      "frequencyAgreement", "completeness",
+    ]));
+    expect(estimates.components.declaredRepeatedDays).toBe(2);
+  });
+
   it("scores classified boundaries proportionally and never reports negative savings", () => {
     const sourceIntake = intake(["Export", "Resolve"], 30);
     sourceIntake.tools = ["Ledger"];
