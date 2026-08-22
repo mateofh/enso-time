@@ -233,6 +233,163 @@ pub struct AutomationCandidateV1 {
     pub evidence: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowIntakeV1 {
+    pub id: String,
+    pub candidate_id: String,
+    pub candidate_label: String,
+    pub trigger: String,
+    pub tools: Vec<String>,
+    pub steps: Vec<String>,
+    pub human_decisions: String,
+    pub inputs: String,
+    pub desired_output: String,
+    pub frequency: String,
+    pub minutes_per_run: u16,
+    pub pain_points: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl WorkflowIntakeV1 {
+    pub fn normalize_and_validate(mut self) -> Result<Self, String> {
+        self.validate_raw_bounds()?;
+        self.id = normalize_text(&self.id);
+        self.candidate_id = normalize_text(&self.candidate_id);
+        self.candidate_label = normalize_text(&self.candidate_label);
+        self.trigger = normalize_text(&self.trigger);
+        self.human_decisions = normalize_text(&self.human_decisions);
+        self.inputs = normalize_text(&self.inputs);
+        self.desired_output = normalize_text(&self.desired_output);
+        self.frequency = normalize_text(&self.frequency);
+        self.pain_points = normalize_text(&self.pain_points);
+        self.created_at = parse_utc(&self.created_at)?.to_rfc3339();
+        self.updated_at = parse_utc(&self.updated_at)?.to_rfc3339();
+        self.tools = normalize_unique_list(self.tools);
+        self.steps = self
+            .steps
+            .into_iter()
+            .map(|value| normalize_text(&value))
+            .collect();
+        self.validate()?;
+        Ok(self)
+    }
+
+    fn validate_raw_bounds(&self) -> Result<(), String> {
+        for (value, max, label) in [
+            (self.id.as_str(), 128, "El id del intake"),
+            (self.candidate_id.as_str(), 128, "El id del candidato"),
+            (
+                self.candidate_label.as_str(),
+                200,
+                "El nombre del candidato",
+            ),
+            (self.trigger.as_str(), 500, "El disparador"),
+            (
+                self.human_decisions.as_str(),
+                2_000,
+                "Las decisiones humanas",
+            ),
+            (self.inputs.as_str(), 2_000, "Las entradas"),
+            (self.desired_output.as_str(), 2_000, "El resultado deseado"),
+            (self.frequency.as_str(), 200, "La frecuencia"),
+            (self.pain_points.as_str(), 2_000, "Los puntos de dolor"),
+            (self.created_at.as_str(), 64, "createdAt"),
+            (self.updated_at.as_str(), 64, "updatedAt"),
+        ] {
+            if value.chars().count() > max {
+                return Err(format!("{label} excede {max} caracteres"));
+            }
+        }
+        if self.tools.len() > 25 || self.tools.iter().any(|tool| tool.chars().count() > 100) {
+            return Err("Las herramientas exceden el tamaño permitido".into());
+        }
+        if self.steps.len() > 50 || self.steps.iter().any(|step| step.chars().count() > 500) {
+            return Err("Los pasos exceden el tamaño permitido".into());
+        }
+        Ok(())
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        validate_identifier(&self.id, "El id del intake")?;
+        validate_identifier(&self.candidate_id, "El id del candidato")?;
+        validate_required_text(&self.candidate_label, 200, "El nombre del candidato")?;
+        validate_required_text(&self.trigger, 500, "El disparador")?;
+        validate_required_text(&self.human_decisions, 2_000, "Las decisiones humanas")?;
+        validate_required_text(&self.inputs, 2_000, "Las entradas")?;
+        validate_required_text(&self.desired_output, 2_000, "El resultado deseado")?;
+        validate_required_text(&self.frequency, 200, "La frecuencia")?;
+        validate_required_text(&self.pain_points, 2_000, "Los puntos de dolor")?;
+        if !(1..=1_440).contains(&self.minutes_per_run) {
+            return Err("Los minutos por ejecución deben estar entre 1 y 1440".into());
+        }
+        if self.tools.is_empty() || self.tools.len() > 25 {
+            return Err("Debe declarar entre 1 y 25 herramientas".into());
+        }
+        for tool in &self.tools {
+            validate_required_text(tool, 100, "Una herramienta")?;
+        }
+        if self.steps.is_empty() || self.steps.len() > 50 {
+            return Err("Debe declarar entre 1 y 50 pasos".into());
+        }
+        for step in &self.steps {
+            validate_required_text(step, 500, "Un paso")?;
+        }
+        let created_at = parse_utc(&self.created_at)?;
+        let updated_at = parse_utc(&self.updated_at)?;
+        if updated_at < created_at {
+            return Err("updatedAt no puede ser anterior a createdAt".into());
+        }
+        let latest_allowed = Utc::now() + chrono::Duration::minutes(5);
+        if created_at > latest_allowed || updated_at > latest_allowed {
+            return Err("Las fechas del intake no pueden estar en el futuro".into());
+        }
+        Ok(())
+    }
+}
+
+fn normalize_text(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn normalize_unique_list(values: Vec<String>) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for value in values {
+        let value = normalize_text(&value);
+        if !normalized
+            .iter()
+            .any(|existing: &String| existing.eq_ignore_ascii_case(&value))
+        {
+            normalized.push(value);
+        }
+    }
+    normalized
+}
+
+fn validate_identifier(value: &str, label: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+    {
+        return Err(format!(
+            "{label} debe tener entre 1 y 128 caracteres ASCII seguros"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_required_text(value: &str, max: usize, label: &str) -> Result<(), String> {
+    if value.is_empty() || value.chars().count() > max || value.chars().any(char::is_control) {
+        return Err(format!(
+            "{label} debe tener entre 1 y {max} caracteres sin controles"
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiagnosticV1 {
@@ -276,6 +433,7 @@ pub struct ExportEnvelope {
     pub settings: SettingsV1,
     pub check_ins: Vec<CheckInV1>,
     pub timeline: Vec<TimelineBlockV1>,
+    pub workflows: Vec<WorkflowIntakeV1>,
 }
 
 pub fn iso_now() -> String {
@@ -291,6 +449,25 @@ pub fn parse_utc(value: &str) -> Result<DateTime<Utc>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn workflow() -> WorkflowIntakeV1 {
+        WorkflowIntakeV1 {
+            id: " workflow-1 ".into(),
+            candidate_id: " candidate-report ".into(),
+            candidate_label: "  Preparar   reporte semanal ".into(),
+            trigger: " Cada   viernes\npor la tarde ".into(),
+            tools: vec![" Sheets ".into(), "sheets".into(), " Slack ".into()],
+            steps: vec![" Extraer  datos ".into(), " Revisar totales ".into()],
+            human_decisions: " Aprobar excepciones ".into(),
+            inputs: " Ventas y costos ".into(),
+            desired_output: " Resumen validado ".into(),
+            frequency: " Semanal ".into(),
+            minutes_per_run: 45,
+            pain_points: " Copiar y pegar ".into(),
+            created_at: "2025-01-01T10:00:00-05:00".into(),
+            updated_at: "2025-01-02T10:00:00-05:00".into(),
+        }
+    }
 
     #[test]
     fn capture_issue_codes_have_stable_wire_values() {
@@ -316,5 +493,48 @@ mod tests {
                 code
             );
         }
+    }
+
+    #[test]
+    fn workflow_intake_normalizes_and_uses_camel_case_wire_keys() {
+        let intake = workflow().normalize_and_validate().unwrap();
+        assert_eq!(intake.id, "workflow-1");
+        assert_eq!(intake.candidate_label, "Preparar reporte semanal");
+        assert_eq!(intake.trigger, "Cada viernes por la tarde");
+        assert_eq!(intake.tools, ["Sheets", "Slack"]);
+        assert_eq!(intake.created_at, "2025-01-01T15:00:00+00:00");
+        let json = serde_json::to_value(&intake).unwrap();
+        assert_eq!(json["candidateId"], "candidate-report");
+        assert_eq!(json["minutesPerRun"], 45);
+        assert!(json.get("candidate_id").is_none());
+    }
+
+    #[test]
+    fn workflow_intake_rejects_unsafe_or_unbounded_values() {
+        let mut invalid_id = workflow();
+        invalid_id.id = "workflow/../../official".into();
+        assert!(invalid_id.normalize_and_validate().is_err());
+
+        let mut invalid_minutes = workflow();
+        invalid_minutes.minutes_per_run = 0;
+        assert!(invalid_minutes.normalize_and_validate().is_err());
+
+        let mut empty_steps = workflow();
+        empty_steps.steps = vec![" \n ".into()];
+        assert!(empty_steps.normalize_and_validate().is_err());
+
+        let mut reversed_dates = workflow();
+        reversed_dates.updated_at = "2024-12-31T10:00:00Z".into();
+        assert!(reversed_dates.normalize_and_validate().is_err());
+
+        let mut oversized = workflow();
+        oversized.pain_points = "x".repeat(2_001);
+        assert!(oversized.normalize_and_validate().is_err());
+
+        let mut oversized_before_normalization = workflow();
+        oversized_before_normalization.tools = vec!["Sheets".into(); 26];
+        assert!(oversized_before_normalization
+            .normalize_and_validate()
+            .is_err());
     }
 }

@@ -2,7 +2,7 @@ use crate::activitywatch::{completed_interval, ActivityWatchRuntime};
 use crate::diagnostics::create_diagnostic;
 use crate::models::{
     iso_now, parse_utc, CheckInAnswer, CheckInV1, DiagnosticV1, ExportEnvelope, SettingsV1,
-    StudyProgress, TimelineBlockV1, TrackingStatus, UpdateInfo,
+    StudyProgress, TimelineBlockV1, TrackingStatus, UpdateInfo, WorkflowIntakeV1,
 };
 use crate::storage::LocalStore;
 use chrono::{Datelike, Duration, Timelike, Utc};
@@ -306,6 +306,7 @@ pub fn get_study_progress(state: State<'_, AppState>) -> Result<StudyProgress, S
 
 #[tauri::command]
 pub fn generate_diagnostic(state: State<'_, AppState>, days: u16) -> Result<DiagnosticV1, String> {
+    let operation = state.capture_gate.operation()?;
     if !matches!(days, 7 | 14 | 28) {
         return Err("El diagnóstico debe cubrir 7, 14 o 28 días".into());
     }
@@ -322,9 +323,45 @@ pub fn generate_diagnostic(state: State<'_, AppState>, days: u16) -> Result<Diag
     let checkins = state
         .store
         .checkins_between(&start.to_rfc3339(), &now.to_rfc3339())?;
+    let workflows = state.store.list_workflow_intakes()?;
     let blocks = state.activity.timeline(start, now, &settings, &checkins)?;
     let observed = ((now - start).num_seconds().max(0) as f64 / 86_400.0).min(f64::from(days));
-    Ok(create_diagnostic(&blocks, &checkins, observed, &settings))
+    operation.ensure_current()?;
+    Ok(create_diagnostic(
+        &blocks, &checkins, observed, &settings, &workflows,
+    ))
+}
+
+#[tauri::command]
+pub fn list_workflow_intakes(state: State<'_, AppState>) -> Result<Vec<WorkflowIntakeV1>, String> {
+    list_workflow_intakes_inner(&state.store, &state.capture_gate)
+}
+
+#[tauri::command]
+pub fn save_workflow_intake(
+    state: State<'_, AppState>,
+    intake: WorkflowIntakeV1,
+) -> Result<WorkflowIntakeV1, String> {
+    save_workflow_intake_inner(&state.store, &state.capture_gate, intake)
+}
+
+fn list_workflow_intakes_inner(
+    store: &LocalStore,
+    capture_gate: &CaptureGate,
+) -> Result<Vec<WorkflowIntakeV1>, String> {
+    let operation = capture_gate.operation()?;
+    operation.ensure_current()?;
+    store.list_workflow_intakes()
+}
+
+fn save_workflow_intake_inner(
+    store: &LocalStore,
+    capture_gate: &CaptureGate,
+    intake: WorkflowIntakeV1,
+) -> Result<WorkflowIntakeV1, String> {
+    let operation = capture_gate.operation()?;
+    operation.ensure_current()?;
+    store.save_workflow_intake(intake)
 }
 
 #[tauri::command]
@@ -360,6 +397,7 @@ pub fn resume_tracking(state: State<'_, AppState>) -> Result<TrackingStatus, Str
 
 #[tauri::command]
 pub fn export_data(state: State<'_, AppState>, format: String) -> Result<String, String> {
+    let operation = state.capture_gate.operation()?;
     if !matches!(format.as_str(), "json" | "csv") {
         return Err("El formato de exportación debe ser json o csv".into());
     }
@@ -372,21 +410,16 @@ pub fn export_data(state: State<'_, AppState>, format: String) -> Result<String,
     let checkins = state
         .store
         .checkins_between(&start.to_rfc3339(), &now.to_rfc3339())?;
+    let workflows = state.store.list_workflow_intakes()?;
     let timeline = state.activity.timeline(start, now, &settings, &checkins)?;
     let export_dir = state.app_data_dir.join("exports");
     std::fs::create_dir_all(&export_dir)
         .map_err(|error| format!("No se pudo crear el directorio de exportación: {error}"))?;
     let filename = format!("enso-time-{}.{}", now.format("%Y%m%d-%H%M%S"), format);
     let path = export_dir.join(filename);
+    operation.ensure_current()?;
     let contents = if format == "json" {
-        serde_json::to_string_pretty(&ExportEnvelope {
-            schema_version: 1,
-            exported_at: now.to_rfc3339(),
-            settings,
-            check_ins: checkins,
-            timeline,
-        })
-        .map_err(|error| format!("No se pudo preparar la exportación: {error}"))?
+        json_export(&settings, &checkins, &timeline, &workflows, &now)?
     } else {
         timeline_csv(&timeline)
     };
@@ -399,6 +432,24 @@ pub fn export_data(state: State<'_, AppState>, format: String) -> Result<String,
             .map_err(|error| format!("No se pudo proteger la exportación: {error}"))?;
     }
     Ok(path.to_string_lossy().into_owned())
+}
+
+fn json_export(
+    settings: &SettingsV1,
+    checkins: &[CheckInV1],
+    timeline: &[TimelineBlockV1],
+    workflows: &[WorkflowIntakeV1],
+    exported_at: &chrono::DateTime<Utc>,
+) -> Result<String, String> {
+    serde_json::to_string_pretty(&ExportEnvelope {
+        schema_version: 1,
+        exported_at: exported_at.to_rfc3339(),
+        settings: settings.clone(),
+        check_ins: checkins.to_vec(),
+        timeline: timeline.to_vec(),
+        workflows: workflows.to_vec(),
+    })
+    .map_err(|error| format!("No se pudo preparar la exportación: {error}"))
 }
 
 #[tauri::command]
@@ -831,6 +882,25 @@ mod tests {
             answered_at: None,
         };
         store.create_checkin(&private_checkin).unwrap();
+        let private_workflow = WorkflowIntakeV1 {
+            id: "private-workflow".into(),
+            candidate_id: "candidate-private".into(),
+            candidate_label: "private-workflow-marker".into(),
+            trigger: "Cada viernes".into(),
+            tools: vec!["Sheets".into()],
+            steps: vec!["Extraer datos".into()],
+            human_decisions: "Aprobar excepciones".into(),
+            inputs: "Ventas".into(),
+            desired_output: "Reporte".into(),
+            frequency: "Semanal".into(),
+            minutes_per_run: 45,
+            pain_points: "Trabajo manual".into(),
+            created_at: "2025-01-01T10:00:00Z".into(),
+            updated_at: "2025-01-02T10:00:00Z".into(),
+        };
+        store
+            .save_workflow_intake(private_workflow.clone())
+            .unwrap();
 
         let activity = Arc::new(
             ActivityWatchRuntime::start(
@@ -872,6 +942,7 @@ mod tests {
                 let _ = tick_activity.start_watchers(false);
                 tick_late_writes.fetch_add(1, Ordering::Release);
                 let _ = tick_store.create_checkin(&private_checkin);
+                let _ = tick_store.save_workflow_intake(private_workflow);
             }
         });
         started_receiver.recv().unwrap();
@@ -882,13 +953,15 @@ mod tests {
         assert_eq!(late_writes.load(Ordering::Acquire), 0);
         assert_eq!(late_restarts.load(Ordering::Acquire), 0);
         assert!(store.checkins().unwrap().is_empty());
+        assert!(store.list_workflow_intakes().unwrap().is_empty());
         assert!(activity.test_activity_is_empty().unwrap());
         assert!(activity.test_watchers_are_stopped());
         assert!(!queue.exists());
         assert!(!logs.exists());
         assert!(!diagnostic.exists());
         for (path, marker) in [
-            (store_path, b"private-checkin-marker".as_slice()),
+            (store_path.clone(), b"private-checkin-marker".as_slice()),
+            (store_path, b"private-workflow-marker".as_slice()),
             (
                 activity.test_database_path(),
                 b"private-activity-marker".as_slice(),
@@ -1041,5 +1114,38 @@ mod tests {
         assert!(activity.test_watchers_are_stopped());
         assert_eq!(activity.capture_issue(), None);
         assert!(!queue.exists());
+    }
+
+    #[test]
+    fn json_export_includes_saved_workflow_intakes() {
+        let temp = TempDir::new().unwrap();
+        let store = LocalStore::open(&temp.path().join("enso-time.sqlite")).unwrap();
+        let workflow = WorkflowIntakeV1 {
+            id: "workflow-export".into(),
+            candidate_id: "candidate-report".into(),
+            candidate_label: "Preparar reporte".into(),
+            trigger: "Cada viernes".into(),
+            tools: vec!["Sheets".into()],
+            steps: vec!["Extraer datos".into()],
+            human_decisions: "Aprobar excepciones".into(),
+            inputs: "Ventas".into(),
+            desired_output: "Reporte aprobado".into(),
+            frequency: "Semanal".into(),
+            minutes_per_run: 45,
+            pain_points: "Trabajo manual".into(),
+            created_at: "2025-01-01T10:00:00Z".into(),
+            updated_at: "2025-01-02T10:00:00Z".into(),
+        };
+        let capture_gate = CaptureGate::new();
+        save_workflow_intake_inner(&store, &capture_gate, workflow).unwrap();
+        let workflows = list_workflow_intakes_inner(&store, &capture_gate).unwrap();
+        assert!(!store.settings().unwrap().onboarding_completed);
+        let exported =
+            json_export(&SettingsV1::default(), &[], &[], &workflows, &Utc::now()).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&exported).unwrap();
+        assert_eq!(json["schemaVersion"], 1);
+        assert_eq!(json["workflows"][0]["id"], "workflow-export");
+        assert_eq!(json["workflows"][0]["minutesPerRun"], 45);
+        assert!(json["workflows"][0].get("candidate_id").is_none());
     }
 }

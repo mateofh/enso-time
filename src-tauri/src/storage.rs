@@ -1,5 +1,6 @@
-use crate::models::{iso_now, CheckInAnswer, CheckInV1, SettingsV1};
-use rusqlite::{params, Connection, OptionalExtension};
+use crate::models::{iso_now, CheckInAnswer, CheckInV1, SettingsV1, WorkflowIntakeV1};
+use rusqlite::types::Type;
+use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -45,7 +46,27 @@ impl LocalStore {
                    answered_at TEXT,
                    UNIQUE(interval_start, interval_end)
                  );
-                 CREATE INDEX IF NOT EXISTS checkins_status_idx ON checkins(status);",
+                 CREATE INDEX IF NOT EXISTS checkins_status_idx ON checkins(status);
+                 CREATE TABLE IF NOT EXISTS workflow_intakes (
+                   id TEXT PRIMARY KEY,
+                   candidate_id TEXT NOT NULL,
+                   candidate_label TEXT NOT NULL,
+                   trigger TEXT NOT NULL,
+                   tools_json TEXT NOT NULL,
+                   steps_json TEXT NOT NULL,
+                   human_decisions TEXT NOT NULL,
+                   inputs TEXT NOT NULL,
+                   desired_output TEXT NOT NULL,
+                   frequency TEXT NOT NULL,
+                   minutes_per_run INTEGER NOT NULL CHECK(minutes_per_run BETWEEN 1 AND 1440),
+                   pain_points TEXT NOT NULL,
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL
+                 );
+                 CREATE UNIQUE INDEX IF NOT EXISTS workflow_intakes_candidate_unique
+                   ON workflow_intakes(candidate_id);
+                 CREATE INDEX IF NOT EXISTS workflow_intakes_updated_idx
+                   ON workflow_intakes(updated_at DESC);",
             )
             .map_err(|error| error.to_string())?;
         let store = Self {
@@ -248,6 +269,111 @@ impl LocalStore {
             .map_err(|error| error.to_string())
     }
 
+    pub fn list_workflow_intakes(&self) -> Result<Vec<WorkflowIntakeV1>, String> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT id, candidate_id, candidate_label, trigger, tools_json, steps_json,
+                        human_decisions, inputs, desired_output, frequency, minutes_per_run,
+                        pain_points, created_at, updated_at
+                 FROM workflow_intakes
+                 ORDER BY updated_at DESC, id ASC",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], workflow_intake_from_row)
+            .map_err(|error| error.to_string())?;
+        let items = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("Los intakes locales están dañados: {error}"))?;
+        for item in &items {
+            item.validate()
+                .map_err(|error| format!("Un intake local está dañado: {error}"))?;
+        }
+        Ok(items)
+    }
+
+    pub fn save_workflow_intake(
+        &self,
+        intake: WorkflowIntakeV1,
+    ) -> Result<WorkflowIntakeV1, String> {
+        let intake = intake.normalize_and_validate()?;
+        let tools_json = serde_json::to_string(&intake.tools).map_err(|error| error.to_string())?;
+        let steps_json = serde_json::to_string(&intake.steps).map_err(|error| error.to_string())?;
+        let stored = {
+            let connection = self.connection()?;
+            let exists = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM workflow_intakes WHERE candidate_id = ?1)",
+                    [&intake.candidate_id],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(|error| error.to_string())?;
+            if !exists {
+                let count = connection
+                    .query_row("SELECT COUNT(*) FROM workflow_intakes", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .map_err(|error| error.to_string())?;
+                if count >= 500 {
+                    return Err("No se pueden guardar más de 500 intakes de workflow".into());
+                }
+            }
+            connection
+                .execute(
+                    "INSERT INTO workflow_intakes
+                     (id, candidate_id, candidate_label, trigger, tools_json, steps_json,
+                      human_decisions, inputs, desired_output, frequency, minutes_per_run,
+                      pain_points, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                     ON CONFLICT(candidate_id) DO UPDATE SET
+                       candidate_label = excluded.candidate_label,
+                       trigger = excluded.trigger,
+                       tools_json = excluded.tools_json,
+                       steps_json = excluded.steps_json,
+                       human_decisions = excluded.human_decisions,
+                       inputs = excluded.inputs,
+                       desired_output = excluded.desired_output,
+                       frequency = excluded.frequency,
+                       minutes_per_run = excluded.minutes_per_run,
+                       pain_points = excluded.pain_points,
+                       updated_at = excluded.updated_at
+                     WHERE julianday(excluded.updated_at) >= julianday(workflow_intakes.updated_at)",
+                    params![
+                        intake.id,
+                        intake.candidate_id,
+                        intake.candidate_label,
+                        intake.trigger,
+                        tools_json,
+                        steps_json,
+                        intake.human_decisions,
+                        intake.inputs,
+                        intake.desired_output,
+                        intake.frequency,
+                        intake.minutes_per_run,
+                        intake.pain_points,
+                        intake.created_at,
+                        intake.updated_at,
+                    ],
+                )
+                .map_err(|error| error.to_string())?;
+            connection
+                .query_row(
+                    "SELECT id, candidate_id, candidate_label, trigger, tools_json, steps_json,
+                            human_decisions, inputs, desired_output, frequency, minutes_per_run,
+                            pain_points, created_at, updated_at
+                     FROM workflow_intakes WHERE candidate_id = ?1",
+                    [&intake.candidate_id],
+                    workflow_intake_from_row,
+                )
+                .map_err(|error| error.to_string())?
+        };
+        stored
+            .validate()
+            .map_err(|error| format!("El intake guardado está dañado: {error}"))?;
+        Ok(stored)
+    }
+
     pub fn delete_all(&self) -> Result<(), String> {
         {
             let mut connection = self.connection()?;
@@ -256,6 +382,9 @@ impl LocalStore {
                 .map_err(|error| error.to_string())?;
             transaction
                 .execute("DELETE FROM checkins", [])
+                .map_err(|error| error.to_string())?;
+            transaction
+                .execute("DELETE FROM workflow_intakes", [])
                 .map_err(|error| error.to_string())?;
             transaction
                 .execute("DELETE FROM app_state", [])
@@ -276,16 +405,63 @@ impl LocalStore {
     }
 }
 
+fn workflow_intake_from_row(row: &Row<'_>) -> rusqlite::Result<WorkflowIntakeV1> {
+    let tools_json: String = row.get(4)?;
+    let steps_json: String = row.get(5)?;
+    let tools = serde_json::from_str(&tools_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(4, Type::Text, Box::new(error))
+    })?;
+    let steps = serde_json::from_str(&steps_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(5, Type::Text, Box::new(error))
+    })?;
+    Ok(WorkflowIntakeV1 {
+        id: row.get(0)?,
+        candidate_id: row.get(1)?,
+        candidate_label: row.get(2)?,
+        trigger: row.get(3)?,
+        tools,
+        steps,
+        human_decisions: row.get(6)?,
+        inputs: row.get(7)?,
+        desired_output: row.get(8)?,
+        frequency: row.get(9)?,
+        minutes_per_run: row.get(10)?,
+        pain_points: row.get(11)?,
+        created_at: row.get(12)?,
+        updated_at: row.get(13)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{CheckInAnswer, CheckInV1};
+    use crate::models::{CheckInAnswer, CheckInV1, WorkflowIntakeV1};
+    use std::sync::{Arc, Barrier};
 
     fn store() -> LocalStore {
         let directory = tempfile::tempdir().unwrap();
         // Keep the directory for the duration of the process; the connection owns the file.
         let path = directory.keep().join("enso-time.sqlite");
         LocalStore::open(&path).unwrap()
+    }
+
+    fn workflow(id: &str, label: &str, updated_at: &str) -> WorkflowIntakeV1 {
+        WorkflowIntakeV1 {
+            id: id.into(),
+            candidate_id: "candidate-report".into(),
+            candidate_label: label.into(),
+            trigger: "Cada viernes".into(),
+            tools: vec!["Sheets".into(), "Email".into()],
+            steps: vec!["Extraer datos".into(), "Revisar excepciones".into()],
+            human_decisions: "Aprobar diferencias".into(),
+            inputs: "Ventas semanales".into(),
+            desired_output: "Reporte validado".into(),
+            frequency: "Semanal".into(),
+            minutes_per_run: 45,
+            pain_points: "Copiar y pegar".into(),
+            created_at: "2025-01-01T10:00:00Z".into(),
+            updated_at: updated_at.into(),
+        }
     }
 
     #[test]
@@ -312,9 +488,21 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("enso-time.sqlite");
         let store = LocalStore::open(&path).unwrap();
+        store
+            .save_workflow_intake(workflow(
+                "private-workflow",
+                "private-workflow-marker",
+                "2025-01-02T10:00:00Z",
+            ))
+            .unwrap();
         store.delete_all().unwrap();
+        assert!(store.list_workflow_intakes().unwrap().is_empty());
         assert!(!path.with_file_name("enso-time.sqlite-wal").exists());
         assert!(!path.with_file_name("enso-time.sqlite-shm").exists());
+        let bytes = std::fs::read(path).unwrap();
+        assert!(!bytes
+            .windows(b"private-workflow-marker".len())
+            .any(|window| window == b"private-workflow-marker"));
     }
 
     #[test]
@@ -345,5 +533,98 @@ mod tests {
         };
         assert_eq!(store.answer_checkin(&answer).unwrap().status, "answered");
         assert_eq!(store.pending_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn workflow_intake_crud_normalizes_and_preserves_creation_time() {
+        let store = store();
+        let mut first = workflow(
+            "workflow-1",
+            "  Preparar   reporte ",
+            "2025-01-02T10:00:00Z",
+        );
+        first.tools.push("sheets".into());
+        let stored = store.save_workflow_intake(first).unwrap();
+        assert_eq!(stored.candidate_label, "Preparar reporte");
+        assert_eq!(stored.tools, ["Sheets", "Email"]);
+        assert_eq!(store.list_workflow_intakes().unwrap(), [stored.clone()]);
+        assert!(!store.settings().unwrap().onboarding_completed);
+
+        let mut update = workflow(
+            "workflow-replacement-id",
+            "Preparar reporte ejecutivo",
+            "2025-01-03T10:00:00Z",
+        );
+        update.created_at = "2025-01-02T10:00:00Z".into();
+        let updated = store.save_workflow_intake(update).unwrap();
+        assert_eq!(updated.id, "workflow-1");
+        assert_eq!(updated.candidate_label, "Preparar reporte ejecutivo");
+        assert_eq!(updated.created_at, stored.created_at);
+
+        let stale = workflow(
+            "workflow-stale-id",
+            "Valor obsoleto",
+            "2025-01-02T12:00:00Z",
+        );
+        let unchanged = store.save_workflow_intake(stale).unwrap();
+        assert_eq!(unchanged.candidate_label, "Preparar reporte ejecutivo");
+    }
+
+    #[test]
+    fn concurrent_workflow_upserts_keep_the_newest_timestamp() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(LocalStore::open(&directory.path().join("enso-time.sqlite")).unwrap());
+        let barrier = Arc::new(Barrier::new(3));
+        let mut threads = Vec::new();
+        for (label, updated_at) in [
+            ("Versión anterior", "2025-01-02T10:00:00Z"),
+            ("Versión final", "2025-01-03T10:00:00Z"),
+        ] {
+            let thread_store = Arc::clone(&store);
+            let thread_barrier = Arc::clone(&barrier);
+            threads.push(std::thread::spawn(move || {
+                thread_barrier.wait();
+                thread_store
+                    .save_workflow_intake(workflow("workflow-race", label, updated_at))
+                    .unwrap();
+            }));
+        }
+        barrier.wait();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        let items = store.list_workflow_intakes().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].candidate_label, "Versión final");
+        assert_eq!(items[0].updated_at, "2025-01-03T10:00:00+00:00");
+    }
+
+    #[test]
+    fn opening_a_legacy_database_adds_workflows_without_rewriting_existing_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("enso-time.sqlite");
+        let legacy = Connection::open(&path).unwrap();
+        legacy
+            .execute_batch(
+                "CREATE TABLE app_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 CREATE TABLE checkins (id TEXT PRIMARY KEY, status TEXT NOT NULL);
+                 INSERT INTO app_state(key, value) VALUES('legacy-marker', 'preserved');",
+            )
+            .unwrap();
+        drop(legacy);
+
+        let store = LocalStore::open(&path).unwrap();
+        assert_eq!(
+            store.get_value("legacy-marker").unwrap().as_deref(),
+            Some("preserved")
+        );
+        store
+            .save_workflow_intake(workflow(
+                "workflow-migrated",
+                "Migrado",
+                "2025-01-02T10:00:00Z",
+            ))
+            .unwrap();
+        assert_eq!(store.list_workflow_intakes().unwrap().len(), 1);
     }
 }
