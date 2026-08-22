@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "vectors": [
+    {
+      "name": "empty intake is blocked",
+      "inputs": { "trigger": false, "inputs": false, "output": false, "tools": false, "steps": false, "humanDecisions": false, "frequency": false, "boundaries": 0, "totalSteps": 0, "sensitivity": false, "sideEffects": false, "verification": false, "recovery": false },
+      "expected": { "completeness": 0, "status": "blocked", "weeklyBaselineMinutes": 0, "weeklyResidualMinutes": 0, "weeklySavingsMinutes": 0 }
+    },
+    {
+      "name": "complete four-step workflow",
+      "inputs": { "trigger": true, "inputs": true, "output": true, "tools": true, "steps": true, "humanDecisions": true, "runsPerWeek": 5, "minutesPerRun": 60, "boundaries": 4, "totalSteps": 4, "sensitivity": true, "sideEffects": true, "verification": true, "verificationMinutesPerRun": 5, "recovery": true, "observations": 2, "sourceCurrent": true, "automatableSteps": 3 },
+      "expected": { "completeness": 100, "status": "ready", "weeklyBaselineMinutes": 300, "weeklyResidualMinutes": 100, "weeklySavingsMinutes": 200, "effort": 34, "operationalRisk": 22, "confidence": 88 }
+    },
+    {
+      "name": "one classified step is proportional",
+      "inputs": { "trigger": true, "inputs": true, "output": true, "tools": true, "steps": true, "humanDecisions": true, "runsPerWeek": 2, "minutesPerRun": 30, "boundaries": 1, "totalSteps": 2, "sensitivity": true, "sideEffects": true, "verification": true, "verificationMinutesPerRun": 0, "recovery": true, "observations": 2, "sourceCurrent": true, "automatableSteps": 1 },
+      "expected": { "completeness": 90, "status": "draft", "weeklyBaselineMinutes": 60, "weeklyResidualMinutes": 30, "weeklySavingsMinutes": 30 }
+    },
+    {
+      "name": "verification can exceed manual residual without negative savings",
+      "inputs": { "runsPerWeek": 1, "minutesPerRun": 10, "totalSteps": 1, "automatableSteps": 1, "verificationMinutesPerRun": 20 },
+      "expected": { "weeklyBaselineMinutes": 10, "weeklyResidualMinutes": 20, "weeklySavingsMinutes": 0 }
+    }
+  ],
+  "edgeCases": {
+    "bounds": { "scoreMin": 0, "scoreMax": 100, "revisionMin": 1, "minutesPerRunMax": 1440 },
+    "invalidEnums": ["unknown", "AUTOMATABLE", "oauth"],
+    "unicodeContent": "Aprobación: ñandú ✅ — 日本語",
+    "controlCharacter": "\u0000",
+    "oversizeDraftBytes": 40001
+  }
+}
