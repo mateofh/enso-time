@@ -137,6 +137,86 @@ export interface WorkflowIntakeV1 {
   updatedAt: string;
 }
 
+export type StepDispositionV1 = "unassessed" | "automatable" | "human-required";
+export type DataSensitivityV1 = "unassessed" | "low" | "moderate" | "high";
+export type SideEffectLevelV1 = "unassessed" | "none" | "reversible" | "irreversible";
+export type VerificationModeV1 = "unassessed" | "none" | "sample" | "every-run";
+export type AutomationBlueprintStatusV1 = "draft" | "ready" | "stale" | "blocked";
+
+export interface StepBoundaryV1 {
+  stepId: string;
+  disposition: StepDispositionV1;
+  rationale?: string;
+}
+
+export interface AutomationBlueprintDraftV1 {
+  schemaVersion: 1;
+  id: string;
+  candidateId: string;
+  workflowIntakeId: string;
+  sourceIntakeUpdatedAt: string;
+  revision: number;
+  runsPerWeek?: number;
+  stepBoundaries: StepBoundaryV1[];
+  dataSensitivity: DataSensitivityV1;
+  sideEffectLevel: SideEffectLevelV1;
+  verificationMode: VerificationModeV1;
+  verificationMinutesPerRun?: number;
+  recoveryPlan?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BlueprintSourceMapV1 {
+  trigger: string;
+  inputs: string;
+  desiredOutput: string;
+  tools: string[];
+  steps: Array<{ id: string; label: string }>;
+  humanDecisions: string;
+  minutesPerRun: number;
+  frequency: string;
+  painPoints: string;
+}
+
+export interface BlueprintEvidenceV1 {
+  observed: string[];
+  declared: string[];
+  repeatedObservations: number;
+}
+
+export interface BlueprintCompletenessV1 {
+  score: number;
+  missing: string[];
+}
+
+export interface BlueprintEstimatesV1 {
+  weeklyBaselineMinutes: number;
+  weeklyResidualMinutes: number;
+  weeklySavingsMinutes: number;
+  effort: number;
+  operationalRisk: number;
+  confidence: number;
+  components: Record<string, number>;
+}
+
+export interface AutomationBlueprintV1 {
+  schemaVersion: 1;
+  draft: AutomationBlueprintDraftV1;
+  source: BlueprintSourceMapV1;
+  evidence: BlueprintEvidenceV1;
+  status: AutomationBlueprintStatusV1;
+  completeness: BlueprintCompletenessV1;
+  estimates: BlueprintEstimatesV1;
+  renderedMarkdown: string;
+  conflict?: { currentRevision: number };
+}
+
+export interface SaveAutomationBlueprintInputV1 {
+  draft: AutomationBlueprintDraftV1;
+  expectedRevision?: number;
+}
+
 export interface DiagnosticV1 {
   schemaVersion: 1;
   rangeStart: string;
