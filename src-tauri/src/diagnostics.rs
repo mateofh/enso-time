@@ -1,6 +1,6 @@
 use crate::models::{
-    AutomationCandidateV1, CheckInV1, DiagnosticV1, MetricValue, SettingsV1, TimelineBlockV1,
-    WorkflowIntakeV1,
+    automation_candidate_id, AutomationCandidateV1, CheckInV1, DiagnosticV1, MetricValue,
+    SettingsV1, TimelineBlockV1, WorkflowIntakeV1,
 };
 use chrono::Utc;
 use std::collections::HashMap;
@@ -129,7 +129,7 @@ fn score_candidates(checkins: &[CheckInV1], days_observed: f64) -> Vec<Automatio
         else {
             continue;
         };
-        groups.entry(label.to_lowercase()).or_default().push(item);
+        groups.entry(label.to_owned()).or_default().push(item);
     }
     let mut candidates: Vec<_> = groups
         .into_iter()
@@ -156,8 +156,8 @@ fn score_candidates(checkins: &[CheckInV1], days_observed: f64) -> Vec<Automatio
             let feasibility_score = (18.0 + clear_ratio * 17.0).round() as i32;
             let risk_score = if clear_ratio > 0.6 { 6 } else { 14 };
             AutomationCandidateV1 {
-                id: format!("candidate-{}", slug(&key)),
-                activity_label: items[0].activity_label.clone().unwrap_or(key),
+                id: automation_candidate_id(&key),
+                activity_label: key,
                 estimated_weekly_hours,
                 weekly_frequency,
                 impact_score,
@@ -177,7 +177,13 @@ fn score_candidates(checkins: &[CheckInV1], days_observed: f64) -> Vec<Automatio
             }
         })
         .collect();
-    candidates.sort_by(|left, right| right.priority_score.cmp(&left.priority_score));
+    candidates.sort_by(|left, right| {
+        right
+            .priority_score
+            .cmp(&left.priority_score)
+            .then_with(|| left.id.cmp(&right.id))
+            .then_with(|| left.activity_label.cmp(&right.activity_label))
+    });
     candidates
 }
 
@@ -236,21 +242,6 @@ fn build_prompt(
     )
 }
 
-fn slug(value: &str) -> String {
-    let mut slug = String::new();
-    let mut separator = false;
-    for character in value.chars() {
-        if character.is_ascii_alphanumeric() {
-            slug.push(character.to_ascii_lowercase());
-            separator = false;
-        } else if !separator && !slug.is_empty() {
-            slug.push('-');
-            separator = true;
-        }
-    }
-    slug.trim_end_matches('-').to_string()
-}
-
 fn round(value: f64, digits: i32) -> f64 {
     let factor = 10_f64.powi(digits);
     (value * factor).round() / factor
@@ -262,13 +253,17 @@ mod tests {
     use crate::models::{iso_now, WorkflowIntakeV1};
 
     fn answered(id: &str) -> CheckInV1 {
+        answered_with_label(id, "Preparar reporte")
+    }
+
+    fn answered_with_label(id: &str, label: &str) -> CheckInV1 {
         CheckInV1 {
             id: id.into(),
             interval_start: iso_now(),
             interval_end: iso_now(),
             reason: "ambiguous".into(),
             status: "answered".into(),
-            activity_label: Some("Preparar reporte".into()),
+            activity_label: Some(label.into()),
             category: Some("admin".into()),
             project: None,
             repetitive: Some(true),
@@ -306,12 +301,48 @@ mod tests {
     }
 
     #[test]
+    fn tied_candidates_keep_a_stable_top_candidate() {
+        let mut checkins = vec![
+            answered_with_label("a-1", "Conciliación 💸"),
+            answered_with_label("a-2", "Conciliación 💸"),
+            answered_with_label("b-1", "Enviar informe 🚀"),
+            answered_with_label("b-2", "Enviar informe 🚀"),
+        ];
+        let expected_top = [
+            automation_candidate_id("Conciliación 💸"),
+            automation_candidate_id("Enviar informe 🚀"),
+        ]
+        .into_iter()
+        .min()
+        .unwrap();
+
+        for _ in 0..16 {
+            let candidates = score_candidates(&checkins, 7.0);
+            assert_eq!(candidates.len(), 2);
+            assert_eq!(candidates[0].priority_score, candidates[1].priority_score);
+            assert_eq!(candidates[0].id, expected_top);
+            assert!(candidates[0].id < candidates[1].id);
+            checkins.rotate_left(1);
+        }
+    }
+
+    #[test]
     fn prompt_includes_only_the_top_candidates_declared_intake_as_evidence() {
-        let matching = workflow("candidate-preparar-reporte", "matching-intake-pain-marker");
-        let unrelated = workflow("candidate-other", "unrelated-intake-marker");
+        let label = "Preparar reporte 🚀";
+        let matching = workflow(
+            &automation_candidate_id(label),
+            "matching-intake-pain-marker",
+        );
+        let unrelated = workflow(
+            &automation_candidate_id("Preparar reporte 🛠️"),
+            "unrelated-intake-marker",
+        );
         let diagnostic = create_diagnostic(
             &[],
-            &[answered("1"), answered("2")],
+            &[
+                answered_with_label("1", label),
+                answered_with_label("2", label),
+            ],
             7.0,
             &SettingsV1::default(),
             &[unrelated, matching],
