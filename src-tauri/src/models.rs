@@ -233,6 +233,17 @@ pub struct AutomationCandidateV1 {
     pub evidence: Vec<String>,
 }
 
+pub fn automation_candidate_id(label: &str) -> String {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    let mut hash = FNV_OFFSET_BASIS;
+    for byte in label.trim().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("candidate-{hash:016x}")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowIntakeV1 {
@@ -493,6 +504,38 @@ mod tests {
                 code
             );
         }
+    }
+
+    #[test]
+    fn candidate_ids_use_stable_fnv1a_over_trimmed_utf8() {
+        assert_eq!(
+            automation_candidate_id("hello"),
+            "candidate-a430d84680aabd0b"
+        );
+        assert_eq!(
+            automation_candidate_id("  hello  "),
+            automation_candidate_id("hello")
+        );
+        let stable_unicode = automation_candidate_id("Conciliación 💸");
+        for _ in 0..32 {
+            assert_eq!(automation_candidate_id("Conciliación 💸"), stable_unicode);
+        }
+        assert_ne!(
+            automation_candidate_id("Conciliación 💸"),
+            automation_candidate_id("Conciliacion 💸")
+        );
+        assert_ne!(
+            automation_candidate_id("Enviar 🚀"),
+            automation_candidate_id("Enviar 🛠️")
+        );
+        let id = automation_candidate_id("日本語💡");
+        assert_eq!(id.len(), "candidate-".len() + 16);
+        assert!(id["candidate-".len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')));
+        let mut intake = workflow();
+        intake.candidate_id = id;
+        assert!(intake.normalize_and_validate().is_ok());
     }
 
     #[test]
