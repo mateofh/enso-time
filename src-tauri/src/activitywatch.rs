@@ -22,6 +22,7 @@ const LEGACY_APP_NAME: &str = "activitywatch";
 const PROFILED_APP_NAME: &str = "activitywatch-enso-time";
 const WATCHER_REGISTRATION_TIMEOUT: StdDuration = StdDuration::from_secs(20);
 const WATCHER_STALE_TIMEOUT: StdDuration = StdDuration::from_secs(45);
+const CAPTURE_START_CANCELLED: &str = "La operación de captura fue cancelada";
 
 struct ManagedWatcher {
     child: Child,
@@ -389,7 +390,7 @@ impl ActivityWatchRuntime {
             .lock()
             .map_err(|_| "No se pudo coordinar el capturador".to_string())?;
         if self.cancellation.is_cancelled() || self.capture_suspended.load(Ordering::Acquire) {
-            return Err("El inicio de captura fue cancelado".into());
+            return Err(CAPTURE_START_CANCELLED.into());
         }
         self.start_watchers_with_timeout(capture_titles, WATCHER_REGISTRATION_TIMEOUT)
     }
@@ -401,7 +402,7 @@ impl ActivityWatchRuntime {
     ) -> Result<(), String> {
         let generation = self.capture_generation.load(Ordering::Acquire);
         if self.cancellation.is_cancelled() || self.capture_suspended.load(Ordering::Acquire) {
-            return Err("El inicio de captura fue cancelado".into());
+            return Err(CAPTURE_START_CANCELLED.into());
         }
         let port = self.ready_port().map_err(|error| {
             self.set_capture_issue(CaptureIssueCode::ServerUnavailable);
@@ -442,7 +443,7 @@ impl ActivityWatchRuntime {
             .map_err(|_| "No se pudo coordinar el capturador".to_string())?;
         let generation = self.capture_generation.load(Ordering::Acquire);
         if self.capture_cancelled(generation) {
-            return Err("El inicio de captura fue cancelado".into());
+            return Err(CAPTURE_START_CANCELLED.into());
         }
         // Never stop a healthy watcher until Rocket has confirmed that the private
         // loopback endpoint is ours. This also closes the bind/start TOCTOU window.
@@ -762,7 +763,7 @@ impl ActivityWatchRuntime {
         if self.capture_cancelled(generation) {
             return Err(WatcherStartError::unavailable(
                 kind,
-                "El inicio de captura fue cancelado".into(),
+                CAPTURE_START_CANCELLED.into(),
             ));
         }
         let slot = match kind {
@@ -820,7 +821,7 @@ impl ActivityWatchRuntime {
         if self.capture_cancelled(generation) {
             return Err(WatcherStartError::unavailable(
                 kind,
-                "El inicio de captura fue cancelado".into(),
+                CAPTURE_START_CANCELLED.into(),
             ));
         }
         let child = command.spawn().map_err(|error| {
@@ -844,7 +845,7 @@ impl ActivityWatchRuntime {
             let _ = terminate_slot(slot);
             return Err(WatcherStartError::unavailable(
                 kind,
-                "El inicio de captura fue cancelado".into(),
+                CAPTURE_START_CANCELLED.into(),
             ));
         }
         Ok(())
@@ -870,7 +871,7 @@ impl ActivityWatchRuntime {
                 || self.capture_generation.load(Ordering::Acquire) != generation
             {
                 self.stop_watchers_unlocked()?;
-                return Err("La espera de heartbeat fue cancelada".into());
+                return Err(CAPTURE_START_CANCELLED.into());
             }
             for (index, (kind, baseline)) in baselines.iter().enumerate() {
                 if healthy[index] {
@@ -928,7 +929,7 @@ impl ActivityWatchRuntime {
                 || self.capture_generation.load(Ordering::Acquire) != generation
             {
                 self.stop_watchers_unlocked()?;
-                return Err("La espera de heartbeat fue cancelada".into());
+                return Err(CAPTURE_START_CANCELLED.into());
             }
         }
     }
@@ -2092,16 +2093,53 @@ mod tests {
         let elapsed = shutdown_started.elapsed();
         let start_error = starter.join().unwrap().unwrap_err();
 
-        assert!(
-            start_error.contains("cancelada"),
-            "el inicio debe indicar cancelación tras el cierre, obtuvo: {start_error}"
-        );
+        assert_eq!(start_error, CAPTURE_START_CANCELLED);
         assert!(elapsed < StdDuration::from_secs(2), "elapsed: {elapsed:?}");
         assert!(runtime.test_watchers_are_stopped());
         assert_eq!(runtime.port_if_ready(), None);
         TcpListener::bind((Ipv4Addr::LOCALHOST, port)).unwrap();
         assert!(!sqlite_sidecar_path(&runtime.database_path, "-wal").exists());
         assert!(!sqlite_sidecar_path(&runtime.database_path, "-shm").exists());
+    }
+
+    #[test]
+    fn shutdown_cancels_watcher_start_waiting_for_lifecycle_lock() {
+        let temp = TempDir::new().unwrap();
+        let runtime = Arc::new(
+            ActivityWatchRuntime::start(
+                &temp.path().join("data"),
+                temp.path().join("empty-resources"),
+            )
+            .unwrap(),
+        );
+        wait_until_ready(&runtime);
+        let lifecycle = runtime.watcher_lifecycle.lock().unwrap();
+        let starter_runtime = Arc::clone(&runtime);
+        let (starter_started, starter_started_rx) = std::sync::mpsc::channel();
+        let starter = std::thread::spawn(move || {
+            starter_started.send(()).unwrap();
+            starter_runtime.start_watchers(false)
+        });
+        starter_started_rx
+            .recv_timeout(StdDuration::from_secs(1))
+            .unwrap();
+        let shutdown_runtime = Arc::clone(&runtime);
+        let shutdown = std::thread::spawn(move || shutdown_runtime.shutdown());
+
+        for _ in 0..100 {
+            if runtime.shutdown_requested() {
+                break;
+            }
+            std::thread::sleep(StdDuration::from_millis(10));
+        }
+        assert!(runtime.shutdown_requested());
+        drop(lifecycle);
+
+        assert_eq!(
+            starter.join().unwrap().unwrap_err(),
+            CAPTURE_START_CANCELLED
+        );
+        shutdown.join().unwrap().unwrap();
     }
 
     #[test]
