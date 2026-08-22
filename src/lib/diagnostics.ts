@@ -1,8 +1,9 @@
 import type { AutomationCandidateV1, CheckInV1, DiagnosticV1, TimelineBlockV1 } from "./types";
+import { candidateId, canonicalCandidateLabel, compareUtf8 } from "./candidateIdentity";
+
+export { candidateId } from "./candidateIdentity";
 
 const WEEK_DAYS = 5;
-const FNV_OFFSET = BigInt("0xcbf29ce484222325");
-const FNV_PRIME = BigInt("0x100000001b3");
 
 function round(value: number, digits = 1): number {
   const factor = 10 ** digits;
@@ -13,7 +14,8 @@ export function scoreCandidate(checkIns: CheckInV1[], daysObserved: number): Aut
   const groups = new Map<string, CheckInV1[]>();
   for (const checkIn of checkIns) {
     if (checkIn.status !== "answered" || !checkIn.activityLabel || !checkIn.repetitive) continue;
-    const key = checkIn.activityLabel.trim().toLowerCase();
+    const key = canonicalCandidateLabel(checkIn.activityLabel);
+    if (!key) continue;
     groups.set(key, [...(groups.get(key) ?? []), checkIn]);
   }
 
@@ -26,9 +28,10 @@ export function scoreCandidate(checkIns: CheckInV1[], daysObserved: number): Aut
       const clearRatio = values.filter((value) => value.rulesClear).length / values.length;
       const feasibilityScore = Math.round(18 + clearRatio * 17);
       const riskScore = clearRatio > 0.6 ? 6 : 14;
+      const activityLabel = values.map((value) => value.activityLabel!.trim()).sort(compareUtf8)[0] ?? key;
       return {
         id: candidateId(key),
-        activityLabel: values[0]?.activityLabel ?? key,
+        activityLabel,
         estimatedWeeklyHours,
         weeklyFrequency,
         impactScore,
@@ -42,15 +45,7 @@ export function scoreCandidate(checkIns: CheckInV1[], daysObserved: number): Aut
         ],
       };
     })
-    .sort((a, b) => b.priorityScore - a.priorityScore || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-}
-
-export function candidateId(label: string): string {
-  let hash = FNV_OFFSET;
-  for (const byte of new TextEncoder().encode(label.trim())) {
-    hash = BigInt.asUintN(64, (hash ^ BigInt(byte)) * FNV_PRIME);
-  }
-  return `candidate-${hash.toString(16).padStart(16, "0")}`;
+    .sort((a, b) => b.priorityScore - a.priorityScore || compareUtf8(a.id, b.id) || compareUtf8(a.activityLabel, b.activityLabel));
 }
 
 export function buildPrompt(candidate: AutomationCandidateV1 | undefined, role: string, goals: string[], daysObserved: number): string {

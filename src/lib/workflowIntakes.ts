@@ -1,4 +1,5 @@
 import type { WorkflowIntakeV1 } from "./types";
+import { candidateId, compareUtf8 } from "./candidateIdentity";
 
 export const MAX_WORKFLOW_INTAKES = 500;
 export const MAX_WORKFLOW_MINUTES = 1_440;
@@ -110,12 +111,31 @@ export function normalizeWorkflowIntake(intake: WorkflowIntakeV1, now = new Date
 export function normalizeWorkflowIntakes(intakes: WorkflowIntakeV1[], now = new Date()): WorkflowIntakeV1[] {
   return intakes.map((intake) => normalizeWorkflowIntake(intake, now)).sort((left, right) => {
     const timestamp = Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
-    return timestamp || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
+    return timestamp || compareUtf8(left.id, right.id);
   });
 }
 
+function migrationWinnerOrder(left: WorkflowIntakeV1, right: WorkflowIntakeV1): number {
+  return Date.parse(right.updatedAt) - Date.parse(left.updatedAt)
+    || compareUtf8(left.id, right.id)
+    || compareUtf8(JSON.stringify(left), JSON.stringify(right));
+}
+
+export function migrateWorkflowIntakes(intakes: WorkflowIntakeV1[], now = new Date()): WorkflowIntakeV1[] {
+  const migrated = intakes.map((intake) => {
+    const normalized = normalizeWorkflowIntake(intake, now);
+    return { ...normalized, candidateId: candidateId(normalized.candidateLabel) };
+  }).sort(migrationWinnerOrder);
+  const candidateIds = new Set<string>();
+  return migrated.filter((intake) => {
+    if (candidateIds.has(intake.candidateId)) return false;
+    candidateIds.add(intake.candidateId);
+    return true;
+  }).sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt) || compareUtf8(left.id, right.id));
+}
+
 export function upsertWorkflowIntake(current: WorkflowIntakeV1[], incoming: WorkflowIntakeV1, now = new Date()): { items: WorkflowIntakeV1[]; persisted: WorkflowIntakeV1 } {
-  const items = normalizeWorkflowIntakes(current, now);
+  const items = migrateWorkflowIntakes(current, now);
   const candidate = normalizeWorkflowIntake(incoming, now);
   const existingIndex = items.findIndex((item) => item.candidateId === candidate.candidateId);
   if (existingIndex < 0) {
