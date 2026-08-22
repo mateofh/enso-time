@@ -7,6 +7,7 @@ use crate::models::{
 };
 use rusqlite::types::Type;
 use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -610,8 +611,7 @@ impl LocalStore {
         let mut total = 0_u32;
         let mut repeated = 0_u32;
         let mut rules_clear = 0_u32;
-        let mut first_repeated_at = None;
-        let mut last_repeated_at = None;
+        let mut repeated_utc_days = HashSet::new();
         for row in rows {
             let (label, is_repetitive, has_clear_rules, interval_start) =
                 row.map_err(|error| error.to_string())?;
@@ -622,22 +622,11 @@ impl LocalStore {
                     if has_clear_rules.is_some_and(|value| value != 0) {
                         rules_clear = rules_clear.saturating_add(1);
                     }
-                    let observed_at = parse_utc(&interval_start)?;
-                    first_repeated_at = Some(
-                        first_repeated_at
-                            .map_or(observed_at, |current| std::cmp::min(current, observed_at)),
-                    );
-                    last_repeated_at = Some(
-                        last_repeated_at
-                            .map_or(observed_at, |current| std::cmp::max(current, observed_at)),
-                    );
+                    repeated_utc_days.insert(parse_utc(&interval_start)?.date_naive());
                 }
             }
         }
-        let observed_days = match (first_repeated_at, last_repeated_at) {
-            (Some(first), Some(last)) => ((last - first).num_seconds() as f64 / 86_400.0).max(1.0),
-            _ => 0.0,
-        };
+        let observed_days = repeated_utc_days.len() as f64;
         let rules_quality = if repeated == 0 {
             0.0
         } else {
@@ -1187,9 +1176,10 @@ mod tests {
     fn blueprint_evidence_aggregates_days_rule_quality_and_weekly_frequency() {
         let store = store();
         let candidate_id = automation_candidate_id("Reporte blueprint");
-        for (position, start, clear) in [
-            (1, "2025-01-01T10:00:00Z", true),
-            (2, "2025-01-08T10:00:00Z", false),
+        for (position, start, repetitive, clear) in [
+            (1, "2025-01-01T10:00:00Z", true, true),
+            (2, "2025-01-08T10:00:00Z", true, false),
+            (3, "2025-01-09T10:00:00Z", false, true),
         ] {
             let start_at = parse_utc(start).unwrap();
             let checkin = CheckInV1 {
@@ -1213,17 +1203,17 @@ mod tests {
                     activity_label: "Reporte blueprint".into(),
                     category: "admin".into(),
                     project: None,
-                    repetitive: true,
+                    repetitive,
                     rules_clear: clear,
                 })
                 .unwrap();
         }
         let evidence = store.blueprint_observation_counts(&candidate_id).unwrap();
-        assert_eq!(evidence.total, 2);
+        assert_eq!(evidence.total, 3);
         assert_eq!(evidence.repeated, 2);
-        assert_eq!(evidence.observed_days, 7.0);
+        assert_eq!(evidence.observed_days, 2.0);
         assert_eq!(evidence.rules_quality, 0.5);
-        assert_eq!(evidence.observed_weekly_frequency, 2.0);
+        assert_eq!(evidence.observed_weekly_frequency, 7.0);
     }
 
     #[test]

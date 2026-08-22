@@ -397,9 +397,12 @@ pub fn assess_blueprint(
         .step_boundaries
         .iter()
         .any(|step| step.disposition == StepDispositionV1::Automatable);
+    // `repeated_observations` comes only from check-ins that the user explicitly
+    // marked as repetitive. Recorded intervals alone never open the READY gate.
+    let user_confirmed_repetitions = repeated_observations;
     let status = if stale {
         BlueprintStatusV1::Stale
-    } else if completeness.score == 100 && repeated_observations >= 2 && has_automatable {
+    } else if completeness.score == 100 && user_confirmed_repetitions >= 2 && has_automatable {
         BlueprintStatusV1::Ready
     } else if intake.steps.is_empty() {
         BlueprintStatusV1::Blocked
@@ -428,21 +431,33 @@ pub fn assess_blueprint(
     let observed = if total_observations == 0 {
         Vec::new()
     } else if locale == "en" {
-        vec![format!(
-            "{repeated_observations} repeated check-in(s) among {total_observations} matching observation(s) across {observed_days} day(s)"
-        )]
+        vec![
+            format!("{total_observations} answered check-in interval(s) were recorded locally"),
+            format!("The selected recorded intervals cover {observed_days} distinct UTC day(s)"),
+        ]
     } else {
-        vec![format!(
-            "{repeated_observations} check-in(s) repetido(s) entre {total_observations} observación(es) coincidentes durante {observed_days} día(s)"
-        )]
+        vec![
+            format!("Se registraron localmente {total_observations} intervalo(s) de check-in respondido(s)"),
+            format!("Los intervalos registrados seleccionados cubren {observed_days} día(s) UTC distinto(s)"),
+        ]
+    };
+    let rules_percentage = (rules_quality.clamp(0.0, 1.0) * 100.0).round();
+    let declared = if locale == "en" {
+        vec![
+            "Workflow intake and activity-label association supplied by you".into(),
+            format!("You marked {user_confirmed_repetitions} linked check-in(s) as repetitive"),
+            format!("Your clear-rules confirmations yield {rules_percentage}% rules quality"),
+        ]
+    } else {
+        vec![
+            "Intake del workflow y asociación por etiqueta de actividad declarados por ti".into(),
+            format!("Marcaste {user_confirmed_repetitions} check-in(s) vinculado(s) como repetitivo(s)"),
+            format!("Tus confirmaciones de reglas claras producen {rules_percentage}% de calidad de reglas"),
+        ]
     };
     let evidence = BlueprintEvidenceV1 {
         observed,
-        declared: vec![if locale == "en" {
-            "Workflow intake supplied by you".into()
-        } else {
-            "Intake del workflow declarado por ti".into()
-        }],
+        declared,
         repeated_observations,
         observed_days,
         rules_quality,
@@ -1086,6 +1101,41 @@ mod tests {
                 .unwrap()
                 .status,
             BlueprintStatusV1::Stale
+        );
+    }
+
+    #[test]
+    fn evidence_separates_recorded_facts_from_user_declarations() {
+        let blueprint =
+            assess_blueprint(ready_draft(), &intake(), 4, 3, 2.0, 2.0 / 3.0, 10.5, "en").unwrap();
+        let observed = blueprint.evidence.observed.join(" ").to_lowercase();
+        assert!(observed.contains("recorded"));
+        assert!(observed.contains("interval"));
+        assert!(!observed.contains("repetitive"));
+        assert!(!observed.contains("rules"));
+        assert!(!observed.contains("label"));
+
+        let declared = blueprint.evidence.declared.join(" ").to_lowercase();
+        assert!(declared.contains("activity-label"));
+        assert!(declared.contains("repetitive"));
+        assert!(declared.contains("rules"));
+    }
+
+    #[test]
+    fn ready_gate_requires_two_user_confirmed_repetitions() {
+        let intake = intake();
+        let draft = ready_draft();
+        assert_eq!(
+            assess_blueprint(draft.clone(), &intake, 4, 0, 0.0, 0.0, 0.0, "en")
+                .unwrap()
+                .status,
+            BlueprintStatusV1::Draft
+        );
+        assert_eq!(
+            assess_blueprint(draft, &intake, 4, 2, 2.0, 1.0, 7.0, "en")
+                .unwrap()
+                .status,
+            BlueprintStatusV1::Ready
         );
     }
 
