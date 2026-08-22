@@ -389,7 +389,7 @@ impl ActivityWatchRuntime {
             .lock()
             .map_err(|_| "No se pudo coordinar el capturador".to_string())?;
         if self.cancellation.is_cancelled() || self.capture_suspended.load(Ordering::Acquire) {
-            return Err("El runtime de captura ya se cerró".into());
+            return Err("El inicio de captura fue cancelado".into());
         }
         self.start_watchers_with_timeout(capture_titles, WATCHER_REGISTRATION_TIMEOUT)
     }
@@ -2092,7 +2092,10 @@ mod tests {
         let elapsed = shutdown_started.elapsed();
         let start_error = starter.join().unwrap().unwrap_err();
 
-        assert!(start_error.contains("cancelada"));
+        assert!(
+            start_error.contains("cancelada"),
+            "el inicio debe indicar cancelación tras el cierre, obtuvo: {start_error}"
+        );
         assert!(elapsed < StdDuration::from_secs(2), "elapsed: {elapsed:?}");
         assert!(runtime.test_watchers_are_stopped());
         assert_eq!(runtime.port_if_ready(), None);
