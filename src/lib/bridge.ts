@@ -1,9 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
-import { demoCheckIns, demoDiagnostic, demoSettings, demoStatus, demoStudy, demoTimeline } from "./demo";
+import { demoCheckIns, demoDiagnostic, demoSettings, demoStudy, demoTimeline, demoTrackingStatus } from "./demo";
 import { createDiagnostic } from "./diagnostics";
 import type {
   CheckInAnswer,
   CheckInV1,
+  CaptureIssue,
   DiagnosticV1,
   SettingsV1,
   StudyProgress,
@@ -18,6 +19,7 @@ interface WebState {
   settings: SettingsV1;
   checkIns: CheckInV1[];
   pausedUntil?: string;
+  captureIssue?: CaptureIssue;
 }
 
 function isTauri(): boolean {
@@ -53,7 +55,12 @@ export const bridge = {
   async getTrackingStatus(): Promise<TrackingStatus> {
     if (isTauri()) return invoke("get_tracking_status");
     const state = loadWebState();
-    return { ...demoStatus, running: !state.pausedUntil || new Date(state.pausedUntil) <= new Date(), pausedUntil: state.pausedUntil, pendingCheckIns: state.checkIns.filter((item) => item.status === "pending").length };
+    return {
+      ...demoTrackingStatus(state.captureIssue),
+      running: !state.pausedUntil || new Date(state.pausedUntil) <= new Date(),
+      pausedUntil: state.pausedUntil,
+      pendingCheckIns: state.checkIns.filter((item) => item.status === "pending").length,
+    };
   },
 
   async getTimeline(from: string, to: string): Promise<TimelineBlockV1[]> {
@@ -117,4 +124,3 @@ export const bridge = {
     window.open(url, "_blank", "noopener,noreferrer");
   },
 };
-

@@ -15,6 +15,11 @@ export type CategoryId =
 
 export type CheckInReason = "unknown" | "afk" | "ambiguous";
 export type CheckInStatus = "pending" | "answered" | "dismissed";
+export type CaptureIssue =
+  | "server-unavailable"
+  | "window-watcher-unavailable"
+  | "afk-watcher-unavailable"
+  | "watcher-conflict";
 
 export interface WorkSchedule {
   start: string;
@@ -50,6 +55,7 @@ export interface TrackingStatus {
   running: boolean;
   pausedUntil?: string;
   serverPort?: number;
+  captureIssue?: CaptureIssue;
   windowWatcher: "running" | "missing" | "stopped" | "error";
   afkWatcher: "running" | "missing" | "stopped" | "error";
   lastEventAt?: string;
@@ -142,4 +148,3 @@ export interface UpdateInfo {
   latestVersion?: string;
   releaseUrl?: string;
 }
-

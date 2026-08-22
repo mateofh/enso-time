@@ -1,5 +1,5 @@
 import { createDiagnostic } from "./diagnostics";
-import type { CheckInV1, DiagnosticV1, SettingsV1, StudyProgress, TimelineBlockV1, TrackingStatus } from "./types";
+import type { CaptureIssue, CheckInV1, DiagnosticV1, SettingsV1, StudyProgress, TimelineBlockV1, TrackingStatus } from "./types";
 
 const now = new Date();
 const at = (hoursAgo: number) => new Date(now.getTime() - hoursAgo * 3_600_000).toISOString();
@@ -50,6 +50,10 @@ export const demoStatus: TrackingStatus = {
   dataStaysLocal: true,
 };
 
+export function demoTrackingStatus(captureIssue?: CaptureIssue): TrackingStatus {
+  return { ...demoStatus, captureIssue };
+}
+
 export const demoStudy: StudyProgress = {
   startedAt: at(24 * 5.4),
   selectedDays: 7,
@@ -60,4 +64,3 @@ export const demoStudy: StudyProgress = {
 };
 
 export const demoDiagnostic: DiagnosticV1 = createDiagnostic(demoTimeline, demoCheckIns, 5, demoSettings.role, demoSettings.goals);
-

@@ -30,6 +30,7 @@ import type {
   CategoryId,
   CheckInAnswer,
   CheckInV1,
+  CaptureIssue,
   DiagnosticV1,
   Locale,
   SettingsV1,
@@ -60,11 +61,36 @@ function BrandMark({ compact = false }: { compact?: boolean }) {
 
 function StatusPill({ status, locale }: { status: TrackingStatus; locale: Locale }) {
   const copy = messages(locale).common;
+  const state = status.captureIssue ? "is-degraded" : status.running ? "is-running" : "is-paused";
   return (
-    <span className={`status-pill ${status.running ? "is-running" : "is-paused"}`}>
+    <span className={`status-pill ${state}`}>
       <span className="status-dot" aria-hidden="true" />
-      {status.running ? copy.running : copy.paused}
+      {status.captureIssue ? copy.degraded : status.running ? copy.running : copy.paused}
     </span>
+  );
+}
+
+function CaptureIssueBanner({ issue, locale, onRetry }: { issue: CaptureIssue; locale: Locale; onRetry: () => Promise<void> }) {
+  const copy = messages(locale).captureIssue;
+  const [checking, setChecking] = useState(false);
+
+  async function retry() {
+    setChecking(true);
+    try { await onRetry(); } finally { setChecking(false); }
+  }
+
+  return (
+    <section className="capture-issue" aria-labelledby="capture-issue-title" aria-live="polite">
+      <AlertCircle size={20} aria-hidden="true" />
+      <div>
+        <p>{copy.label}</p>
+        <h2 id="capture-issue-title">{copy.title}</h2>
+        <span>{copy.details[issue]}</span>
+      </div>
+      <button type="button" className="secondary-button" disabled={checking} onClick={() => void retry()}>
+        <RefreshCw size={15} className={checking ? "is-spinning" : ""} aria-hidden="true" />{copy.retry}
+      </button>
+    </section>
   );
 }
 
@@ -425,6 +451,7 @@ export default function App() {
         <div className="sidebar-footer"><StatusPill status={status} locale={settings.locale} /><p><LockKeyhole size={13} aria-hidden="true" />{copy.common.local}</p><small>Ensō Time v0.1 beta</small></div>
       </aside>
       <main className="content" id="main-content" tabIndex={-1}>
+        {status.captureIssue && <CaptureIssueBanner issue={status.captureIssue} locale={settings.locale} onRetry={() => action(async () => { setStatus(await bridge.getTrackingStatus()); })} />}
         {view === "today" && <TodayView settings={settings} status={status} blocks={blocks} checkIns={checkIns} onNavigate={setView} onPause={() => action(async () => { setStatus(await bridge.pauseTracking(30)); }, copy.notices.paused)} onResume={() => action(async () => { setStatus(await bridge.resumeTracking()); }, copy.notices.resumed)} />}
         {view === "checkins" && <CheckInsView checkIns={checkIns} settings={settings} onAnswer={answer} />}
         {view === "study" && <StudyView progress={study} locale={settings.locale} onDays={selectDays} />}

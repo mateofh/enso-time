@@ -64,6 +64,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
 .status-pill.is-running .status-dot { background: var(--sage); box-shadow: 0 0 0 4px color-mix(in srgb, var(--sage) 14%, transparent); }
 .status-pill.is-paused .status-dot { background: var(--yellow); }
+.status-pill.is-degraded .status-dot { background: var(--danger); box-shadow: 0 0 0 4px color-mix(in srgb, var(--danger) 14%, transparent); }
 
 .content { width: min(1120px, 100%); padding: 62px clamp(32px, 5vw, 78px) 90px; margin: 0 auto; }
 .content:focus { outline: none; }
@@ -80,6 +81,14 @@ h2 { font-size: 25px; line-height: 1.15; }
 .secondary-button { border: 1px solid var(--border); background: var(--surface); color: var(--text); }
 .secondary-button:hover { border-color: var(--border-strong); background: var(--surface-raised); }
 .danger-button { border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border)); background: transparent; color: var(--danger); }
+
+.capture-issue { margin: -22px 0 32px; padding: 17px; border: 1px solid color-mix(in srgb, var(--danger) 42%, var(--border)); background: color-mix(in srgb, var(--danger) 7%, var(--surface)); border-radius: 9px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 14px; color: var(--danger); }
+.capture-issue > div { min-width: 0; }
+.capture-issue p { margin: 0 0 4px; color: var(--danger); font-size: 10px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; }
+.capture-issue h2 { color: var(--text); font-size: 18px; }
+.capture-issue span { display: block; margin-top: 5px; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+.capture-issue .secondary-button { align-self: center; }
+.is-spinning { animation: spin .8s linear infinite; }
 
 .context-callout { width: 100%; margin: 0 0 32px; padding: 15px 17px; border: 1px solid color-mix(in srgb, var(--blue) 42%, var(--border)); background: color-mix(in srgb, var(--blue) 7%, var(--surface)); border-radius: 9px; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 13px; cursor: pointer; text-align: left; }
 .context-callout:hover { border-color: var(--blue); }
@@ -234,6 +243,7 @@ input:hover, select:hover { border-color: var(--border-strong); }
 
 @keyframes loading { from { transform: translateX(-110%); } to { transform: translateX(320%); } }
 @keyframes toast-in { from { transform: translateY(8px); opacity: 0; } }
+@keyframes spin { to { transform: rotate(360deg); } }
 @media (max-width: 880px) {
   .app-shell { grid-template-columns: 76px minmax(0, 1fr); }
   .sidebar { padding-inline: 13px; align-items: center; }
@@ -253,6 +263,8 @@ input:hover, select:hover { border-color: var(--border-strong); }
   h1 { font-size: 35px; }
   .page-header { display: grid; gap: 20px; }
   .page-header > button { justify-self: start; }
+  .capture-issue { margin-top: -4px; grid-template-columns: auto 1fr; align-items: start; }
+  .capture-issue .secondary-button { grid-column: 2; justify-self: start; }
   .timeline-row { grid-template-columns: 48px 12px minmax(0, 1fr); }
   .category-tag { display: none; }
   .form-grid, .two-columns, .onboarding-fields { grid-template-columns: 1fr; }
