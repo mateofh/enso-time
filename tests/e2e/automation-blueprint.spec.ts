@@ -253,7 +253,7 @@ test.describe("Automation Blueprint v0.2 contract", () => {
     await expect(page.getByTestId("blueprint-completeness")).toHaveText(/100/);
     await expect(page.getByTestId("blueprint-copy")).toBeEnabled();
     await expect(page.getByTestId("blueprint-export")).toBeEnabled();
-    await expect(page.getByTestId("blueprint-assumptions")).toContainText(/igual.*tiempo|equal-time/i);
+    await expect(page.getByTestId("blueprint-assumptions")).toContainText(/mismo tiempo|equal[- ]time/i);
 
     const [save] = await invokeCalls(page, "save_automation_blueprint_v1") ?? [];
     expect(save.args).toMatchObject({ locale: "es-419", input: { expectedRevision: 0, draft: { candidateId, sourceIntakeUpdatedAt: intake.updatedAt } } });
@@ -290,7 +290,7 @@ test.describe("Automation Blueprint v0.2 contract", () => {
   test("a stale snapshot is derived from a newer intake and refreshes through Tauri", async ({ page }) => {
     await seedDesktop(page, { draft: { revision: 3, complete: true, sourceIntakeUpdatedAt: "2026-08-20T12:00:00.000Z" } });
     await openBlueprint(page);
-    await expect(page.getByTestId("blueprint-status")).toHaveText(/desactualizado|stale/i);
+    await expect(page.getByTestId("blueprint-status")).toContainText(/desactualizad[oa]|stale/i);
     await expect(page.getByTestId("blueprint-refresh")).toBeEnabled();
     await expect(page.getByTestId("blueprint-copy")).toBeDisabled();
     await expect(page.getByTestId("blueprint-export")).toBeDisabled();
