@@ -1,4 +1,4 @@
-import type { CategoryId, Locale } from "./types";
+import type { CaptureIssue, CategoryId, Locale } from "./types";
 
 interface UiCopy {
   nav: Record<"today" | "checkins" | "study" | "automate" | "settings", string>;
@@ -8,8 +8,15 @@ interface UiCopy {
     retry: string;
     running: string;
     paused: string;
+    degraded: string;
     saved: string;
     unexpectedError: string;
+  };
+  captureIssue: {
+    label: string;
+    title: string;
+    retry: string;
+    details: Record<CaptureIssue, string>;
   };
   onboarding: {
     progress: (step: number) => string;
@@ -175,7 +182,18 @@ const categories = {
 const copy: Record<Locale, UiCopy> = {
   "es-419": {
     nav: { today: "Hoy", checkins: "Check-ins", study: "Estudio", automate: "Automatizar", settings: "Configuración" },
-    common: { local: "Solo en este equipo", loading: "Organizando tu tiempo…", retry: "Intentar de nuevo", running: "Registrando", paused: "En pausa", saved: "Guardado", unexpectedError: "No pudimos completar la acción. Intenta de nuevo." },
+    common: { local: "Solo en este equipo", loading: "Organizando tu tiempo…", retry: "Intentar de nuevo", running: "Registrando", paused: "En pausa", degraded: "Registro incompleto", saved: "Guardado", unexpectedError: "No pudimos completar la acción. Intenta de nuevo." },
+    captureIssue: {
+      label: "Atención del registro",
+      title: "Ensō Time no está registrando todo.",
+      retry: "Volver a comprobar",
+      details: {
+        "server-unavailable": "El motor local no responde. Reinicia Ensō Time y vuelve a comprobar; tu información guardada permanece en este equipo.",
+        "window-watcher-unavailable": "No podemos ver qué aplicación está activa. Revisa los permisos de Ensō Time en el sistema y vuelve a comprobar.",
+        "afk-watcher-unavailable": "No podemos distinguir cuándo te ausentas. Mantén Ensō Time abierto y vuelve a comprobar para recuperar ese contexto.",
+        "watcher-conflict": "Hay otra sesión intentando registrar este equipo. Cierra la sesión duplicada y vuelve a comprobar.",
+      },
+    },
     onboarding: {
       progress: (step) => `Paso ${step} de 3`,
       steps: [
@@ -204,7 +222,18 @@ const copy: Record<Locale, UiCopy> = {
   },
   en: {
     nav: { today: "Today", checkins: "Check-ins", study: "Study", automate: "Automate", settings: "Settings" },
-    common: { local: "Only on this device", loading: "Organizing your time…", retry: "Try again", running: "Tracking", paused: "Paused", saved: "Saved", unexpectedError: "We couldn't complete that action. Try again." },
+    common: { local: "Only on this device", loading: "Organizing your time…", retry: "Try again", running: "Tracking", paused: "Paused", degraded: "Incomplete tracking", saved: "Saved", unexpectedError: "We couldn't complete that action. Try again." },
+    captureIssue: {
+      label: "Tracking needs attention",
+      title: "Ensō Time is not capturing everything.",
+      retry: "Check again",
+      details: {
+        "server-unavailable": "The local engine is not responding. Restart Ensō Time and check again; your saved information stays on this device.",
+        "window-watcher-unavailable": "We cannot see which app is active. Review Ensō Time's system permissions, then check again.",
+        "afk-watcher-unavailable": "We cannot tell when you are away. Keep Ensō Time open and check again to restore that context.",
+        "watcher-conflict": "Another session is trying to track this device. Close the duplicate session, then check again.",
+      },
+    },
     onboarding: {
       progress: (step) => `Step ${step} of 3`,
       steps: [
