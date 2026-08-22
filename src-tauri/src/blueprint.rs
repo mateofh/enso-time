@@ -190,6 +190,14 @@ pub fn source_step_id(position: usize) -> String {
     format!("step-{:02}", position + 1)
 }
 
+pub fn validate_blueprint_locale(locale: &str) -> Result<(), String> {
+    if matches!(locale, "es-419" | "en") {
+        Ok(())
+    } else {
+        Err("El idioma del blueprint no es compatible".into())
+    }
+}
+
 pub fn ephemeral_draft(intake: &WorkflowIntakeV1) -> AutomationBlueprintDraftV1 {
     let now = iso_now();
     AutomationBlueprintDraftV1 {
@@ -365,9 +373,7 @@ pub fn assess_blueprint(
     observed_weekly_frequency: f64,
     locale: &str,
 ) -> Result<AutomationBlueprintV1, String> {
-    if !matches!(locale, "es-419" | "en") {
-        return Err("El idioma del blueprint no es compatible".into());
-    }
+    validate_blueprint_locale(locale)?;
     validate_draft(&draft, intake)?;
     let completeness_score = completeness(&draft, intake);
     let completeness = BlueprintCompletenessV1 {
