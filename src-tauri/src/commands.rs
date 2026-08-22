@@ -9,7 +9,7 @@ use chrono::{Datelike, Duration, Timelike, Utc};
 use chrono_tz::Tz;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{mpsc, Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::thread::JoinHandle;
 use tauri::{AppHandle, State};
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
@@ -28,8 +28,11 @@ pub struct AppState {
 
 pub struct CaptureGate {
     access: RwLock<()>,
+    exclusive_serial: Mutex<()>,
     generation: AtomicU64,
     cancelling: AtomicBool,
+    #[cfg(test)]
+    exclusive_requests: AtomicU64,
 }
 
 pub(crate) struct CaptureOperation<'a> {
@@ -42,14 +45,18 @@ struct CaptureExclusive<'a> {
     gate: &'a CaptureGate,
     activity: &'a ActivityWatchRuntime,
     _access: RwLockWriteGuard<'a, ()>,
+    _serial: MutexGuard<'a, ()>,
 }
 
 impl CaptureGate {
     pub fn new() -> Self {
         Self {
             access: RwLock::new(()),
+            exclusive_serial: Mutex::new(()),
             generation: AtomicU64::new(0),
             cancelling: AtomicBool::new(false),
+            #[cfg(test)]
+            exclusive_requests: AtomicU64::new(0),
         }
     }
 
@@ -75,9 +82,13 @@ impl CaptureGate {
         &'a self,
         activity: &'a ActivityWatchRuntime,
     ) -> Result<CaptureExclusive<'a>, String> {
-        self.cancelling
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| "Ya hay una operación exclusiva cancelando la captura".to_string())?;
+        #[cfg(test)]
+        self.exclusive_requests.fetch_add(1, Ordering::AcqRel);
+        let serial = self
+            .exclusive_serial
+            .lock()
+            .map_err(|_| "No se pudo serializar el borrado privado".to_string())?;
+        self.cancelling.store(true, Ordering::Release);
         self.generation.fetch_add(1, Ordering::AcqRel);
         let _ = activity.cancel_pending_capture();
         let access = match self.access.write() {
@@ -92,7 +103,13 @@ impl CaptureGate {
             gate: self,
             activity,
             _access: access,
+            _serial: serial,
         })
+    }
+
+    #[cfg(test)]
+    fn exclusive_request_count(&self) -> u64 {
+        self.exclusive_requests.load(Ordering::Acquire)
     }
 }
 
@@ -114,6 +131,14 @@ impl Drop for CaptureExclusive<'_> {
         // prevents a scheduler reader from slipping through between both steps.
         self.activity.resume_pending_capture();
         self.gate.cancelling.store(false, Ordering::Release);
+    }
+}
+
+impl CaptureExclusive<'_> {
+    fn resume_for_rollback(&mut self) {
+        // A failed delete may restore the previous capture state, but it must do
+        // so before releasing either the writer gate or the delete serializer.
+        self.activity.resume_pending_capture();
     }
 }
 
@@ -389,26 +414,54 @@ fn delete_all_data_inner(
     activity: &ActivityWatchRuntime,
     capture_gate: &CaptureGate,
 ) -> Result<(), String> {
-    let exclusive = capture_gate.cancel_and_wait(activity)?;
-    let previous_settings = store.settings().ok();
-    let delete_result = (|| {
-        activity.stop_watchers()?;
-        activity.delete_queued_activity()?;
-        activity.delete_all_activity().map_err(|error| {
-            format!("No se pudo completar el borrado seguro del almacén de actividad: {error}")
-        })?;
-        store.delete_all()
-    })();
+    run_exclusive_delete(
+        activity,
+        capture_gate,
+        || {
+            let previous_settings = store.settings().ok();
+            let result = (|| {
+                activity.stop_watchers()?;
+                activity.delete_queued_activity()?;
+                activity.delete_all_activity().map_err(|error| {
+                    format!(
+                        "No se pudo completar el borrado seguro del almacén de actividad: {error}"
+                    )
+                })?;
+                store.delete_all()
+            })();
+            (result, previous_settings)
+        },
+        |previous_settings| {
+            if let Some(settings) =
+                previous_settings.filter(|settings| settings.onboarding_completed)
+            {
+                let _ = activity.start_watchers(settings.capture_window_titles);
+            }
+        },
+    )
+}
 
-    drop(exclusive);
-
-    if let Err(error) = delete_result {
-        if let Some(settings) = previous_settings.filter(|settings| settings.onboarding_completed) {
-            let _ = activity.start_watchers(settings.capture_window_titles);
-        }
-        return Err(error);
+fn run_exclusive_delete<T, Delete, Rollback>(
+    activity: &ActivityWatchRuntime,
+    capture_gate: &CaptureGate,
+    delete: Delete,
+    rollback: Rollback,
+) -> Result<(), String>
+where
+    Delete: FnOnce() -> (Result<(), String>, T),
+    Rollback: FnOnce(T),
+{
+    let mut exclusive = capture_gate.cancel_and_wait(activity)?;
+    let (delete_result, rollback_context) = delete();
+    if delete_result.is_err() {
+        exclusive.resume_for_rollback();
+        rollback(rollback_context);
     }
-    Ok(())
+    // CaptureExclusive keeps both the writer gate and delete serializer until
+    // rollback has fully completed. A later delete can therefore invalidate all
+    // state restored by an earlier failed attempt before it confirms success.
+    drop(exclusive);
+    delete_result
 }
 
 #[tauri::command]
@@ -460,6 +513,23 @@ pub fn start_scheduler(
         move || scheduler_tick(&app, &store, &activity, &capture_gate),
         std::time::Duration::from_secs(30),
     )
+}
+
+pub(crate) fn bootstrap_watchers_if_current(
+    store: &LocalStore,
+    activity: &ActivityWatchRuntime,
+    capture_gate: &CaptureGate,
+) -> Result<(), String> {
+    let operation = capture_gate.operation()?;
+    let settings = store.settings()?;
+    if !settings.onboarding_completed || !is_running(store)? {
+        return Ok(());
+    }
+    operation.ensure_current()?;
+    if activity.shutdown_requested() {
+        return Ok(());
+    }
+    activity.start_watchers(settings.capture_window_titles)
 }
 
 fn spawn_scheduler<F>(mut tick: F, interval: std::time::Duration) -> Result<SchedulerHandle, String>
@@ -827,5 +897,149 @@ mod tests {
             let bytes = std::fs::read(path).unwrap();
             assert!(!bytes.windows(marker.len()).any(|window| window == marker));
         }
+    }
+
+    #[test]
+    fn later_successful_delete_invalidates_an_earlier_failed_rollback() {
+        let temp = TempDir::new().unwrap();
+        let store = Arc::new(LocalStore::open(&temp.path().join("enso-time.sqlite")).unwrap());
+        let mut settings = SettingsV1::default();
+        settings.onboarding_completed = true;
+        store.save_settings(&settings).unwrap();
+        let activity = Arc::new(
+            ActivityWatchRuntime::start(
+                &temp.path().join("activity"),
+                temp.path().join("empty-resources"),
+            )
+            .unwrap(),
+        );
+        let capture_gate = Arc::new(CaptureGate::new());
+        let second_completed = Arc::new(AtomicBool::new(false));
+        let post_second_restarts = Arc::new(AtomicUsize::new(0));
+        let post_second_writes = Arc::new(AtomicUsize::new(0));
+        let (first_has_gate_sender, first_has_gate_receiver) = mpsc::channel();
+        let (allow_failure_sender, allow_failure_receiver) = mpsc::channel();
+        let (second_done_sender, second_done_receiver) = mpsc::channel();
+
+        let first_store = Arc::clone(&store);
+        let first_activity = Arc::clone(&activity);
+        let first_gate = Arc::clone(&capture_gate);
+        let first_second_completed = Arc::clone(&second_completed);
+        let first_post_restarts = Arc::clone(&post_second_restarts);
+        let first_post_writes = Arc::clone(&post_second_writes);
+        let first = std::thread::spawn(move || {
+            run_exclusive_delete(
+                &first_activity,
+                &first_gate,
+                || {
+                    first_has_gate_sender.send(()).unwrap();
+                    allow_failure_receiver.recv().unwrap();
+                    (Err("forced first-delete failure".into()), ())
+                },
+                |_| {
+                    // With the old ordering, the second delete could complete while
+                    // this rollback was pending. Waiting briefly makes that unsafe
+                    // ordering deterministic without allowing it in the fixed code.
+                    let completed_during_rollback = second_done_receiver
+                        .recv_timeout(std::time::Duration::from_secs(1))
+                        .is_ok()
+                        || first_second_completed.load(Ordering::Acquire);
+                    if completed_during_rollback {
+                        first_post_restarts.fetch_add(1, Ordering::Release);
+                    }
+                    let stale = CheckInV1 {
+                        id: "stale-rollback".into(),
+                        interval_start: "2026-08-21T12:00:00Z".into(),
+                        interval_end: "2026-08-21T12:15:00Z".into(),
+                        reason: "unknown".into(),
+                        status: "pending".into(),
+                        activity_label: Some("stale-rollback-marker".into()),
+                        category: None,
+                        project: None,
+                        repetitive: None,
+                        rules_clear: None,
+                        created_at: "2026-08-21T12:15:00Z".into(),
+                        answered_at: None,
+                    };
+                    first_store.create_checkin(&stale).unwrap();
+                    if completed_during_rollback {
+                        first_post_writes.fetch_add(1, Ordering::Release);
+                    }
+                },
+            )
+        });
+        first_has_gate_receiver.recv().unwrap();
+
+        let second_store = Arc::clone(&store);
+        let second_activity = Arc::clone(&activity);
+        let second_gate = Arc::clone(&capture_gate);
+        let second_completed_flag = Arc::clone(&second_completed);
+        let second = std::thread::spawn(move || {
+            let result = delete_all_data_inner(&second_store, &second_activity, &second_gate);
+            second_completed_flag.store(true, Ordering::Release);
+            let _ = second_done_sender.send(());
+            result
+        });
+        for _ in 0..1_000 {
+            if capture_gate.exclusive_request_count() == 2 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(capture_gate.exclusive_request_count(), 2);
+        allow_failure_sender.send(()).unwrap();
+
+        assert!(first.join().unwrap().is_err());
+        second.join().unwrap().unwrap();
+        assert!(second_completed.load(Ordering::Acquire));
+        assert_eq!(post_second_restarts.load(Ordering::Acquire), 0);
+        assert_eq!(post_second_writes.load(Ordering::Acquire), 0);
+        assert!(store.checkins().unwrap().is_empty());
+        assert!(activity.test_watchers_are_stopped());
+    }
+
+    #[test]
+    fn delayed_bootstrap_reloads_settings_after_confirmed_delete() {
+        let temp = TempDir::new().unwrap();
+        let store = Arc::new(LocalStore::open(&temp.path().join("enso-time.sqlite")).unwrap());
+        let mut settings = SettingsV1::default();
+        settings.onboarding_completed = true;
+        store.save_settings(&settings).unwrap();
+        let activity = Arc::new(
+            ActivityWatchRuntime::start(
+                &temp.path().join("activity"),
+                temp.path().join("empty-resources"),
+            )
+            .unwrap(),
+        );
+        activity
+            .seed_test_activity("delayed-bootstrap-private-marker")
+            .unwrap();
+        let queue = activity
+            .test_profile_root()
+            .join("data/activitywatch/aw-client/queued");
+        std::fs::create_dir_all(&queue).unwrap();
+        std::fs::write(queue.join("private.queue"), "private-bootstrap-queue").unwrap();
+        let capture_gate = Arc::new(CaptureGate::new());
+        let (release_sender, release_receiver) = mpsc::channel();
+
+        let bootstrap_store = Arc::clone(&store);
+        let bootstrap_activity = Arc::clone(&activity);
+        let bootstrap_gate = Arc::clone(&capture_gate);
+        let bootstrap = std::thread::spawn(move || {
+            release_receiver.recv().unwrap();
+            bootstrap_watchers_if_current(&bootstrap_store, &bootstrap_activity, &bootstrap_gate)
+        });
+
+        delete_all_data_inner(&store, &activity, &capture_gate).unwrap();
+        release_sender.send(()).unwrap();
+        bootstrap.join().unwrap().unwrap();
+
+        assert!(!store.settings().unwrap().onboarding_completed);
+        assert!(store.checkins().unwrap().is_empty());
+        assert!(activity.test_activity_is_empty().unwrap());
+        assert!(activity.test_watchers_are_stopped());
+        assert_eq!(activity.capture_issue(), None);
+        assert!(!queue.exists());
     }
 }

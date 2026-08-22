@@ -56,35 +56,30 @@ pub fn run() {
                 }
             }
             // The server starts in a dedicated thread; watchers retry briefly while
-            // Rocket binds its loopback socket.
-            let pause_is_active = store
-                .paused_until()?
-                .and_then(|value| models::parse_utc(&value).ok())
-                .is_some_and(|until| until > chrono::Utc::now());
-            if settings.onboarding_completed && !pause_is_active {
-                let watcher_activity = Arc::clone(&activity);
-                let watcher_gate = Arc::clone(&capture_gate);
-                std::thread::Builder::new()
-                    .name("enso-watcher-bootstrap".into())
-                    .spawn(move || {
-                        for _ in 0..20 {
-                            if watcher_activity.port_if_ready().is_some() {
-                                if let Ok(operation) = watcher_gate.operation() {
-                                    if operation.ensure_current().is_ok() {
-                                        if let Err(error) = watcher_activity
-                                            .start_watchers(settings.capture_window_titles)
-                                        {
-                                            eprintln!("Ensō Time watchers: {error}");
-                                        }
-                                    }
-                                }
-                                return;
+            // Rocket binds its loopback socket. The worker deliberately reads capture
+            // settings only after acquiring the gate so deletion cannot leave it with
+            // a stale onboarding snapshot.
+            let watcher_activity = Arc::clone(&activity);
+            let watcher_gate = Arc::clone(&capture_gate);
+            let watcher_store = Arc::clone(&store);
+            std::thread::Builder::new()
+                .name("enso-watcher-bootstrap".into())
+                .spawn(move || {
+                    for _ in 0..20 {
+                        if watcher_activity.port_if_ready().is_some() {
+                            if let Err(error) = commands::bootstrap_watchers_if_current(
+                                &watcher_store,
+                                &watcher_activity,
+                                &watcher_gate,
+                            ) {
+                                eprintln!("Ensō Time watchers: {error}");
                             }
-                            std::thread::sleep(std::time::Duration::from_millis(150));
+                            return;
                         }
-                        eprintln!("Ensō Time: el servicio local no respondió a tiempo");
-                    })?;
-            }
+                        std::thread::sleep(std::time::Duration::from_millis(150));
+                    }
+                    eprintln!("Ensō Time: el servicio local no respondió a tiempo");
+                })?;
             let scheduler = commands::start_scheduler(
                 app.handle().clone(),
                 Arc::clone(&store),
@@ -172,17 +167,17 @@ fn install_tray(app: &mut tauri::App) -> tauri::Result<()> {
             }
             "resume" => {
                 if let Some(state) = app.try_state::<AppState>() {
-                    if let (Ok(operation), Ok(settings)) =
-                        (state.capture_gate.operation(), state.store.settings())
-                    {
-                        if settings.onboarding_completed
-                            && operation.ensure_current().is_ok()
-                            && state
-                                .activity
-                                .start_watchers(settings.capture_window_titles)
-                                .is_ok()
-                        {
-                            let _ = state.store.set_paused_until(None);
+                    if let Ok(operation) = state.capture_gate.operation() {
+                        if let Ok(settings) = state.store.settings() {
+                            if settings.onboarding_completed
+                                && operation.ensure_current().is_ok()
+                                && state
+                                    .activity
+                                    .start_watchers(settings.capture_window_titles)
+                                    .is_ok()
+                            {
+                                let _ = state.store.set_paused_until(None);
+                            }
                         }
                     }
                 }
