@@ -4,12 +4,18 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing tag to build and publish
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.release_tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -37,7 +43,7 @@ jobs:
             aw_target: windows-x86_64
             bundles: msi,nsis
     env:
-      RELEASE_TAG: ${{ github.ref_name }}
+      RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
       AW_TARGET: ${{ matrix.aw_target }}
       RUST_TARGET: ${{ matrix.rust_target }}
 
@@ -46,6 +52,14 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
+          ref: refs/tags/${{ inputs.release_tag || github.ref_name }}
+
+      - name: Verify the checked-out tag commit
+        shell: bash
+        run: |
+          tag_ref="refs/tags/${RELEASE_TAG}"
+          git show-ref --verify --quiet "$tag_ref"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "${tag_ref}^{commit}")"
 
       - name: Set up Node.js
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
@@ -104,9 +118,18 @@ jobs:
         run: |
           node <<'NODE'
           const fs = require("node:fs");
-          const config = process.platform === "darwin"
-            ? { bundle: { macOS: { signingIdentity: "-" } } }
-            : {};
+          const packageVersion = require("./package.json").version;
+          const config = {};
+          if (process.platform === "darwin") {
+            config.bundle = { macOS: { signingIdentity: "-" } };
+          }
+          if (process.platform === "win32") {
+            const match = packageVersion.match(/^(\d+\.\d+\.\d+)-beta\.(\d+)$/);
+            if (!match) {
+              throw new Error(`Expected a beta version for Windows packaging, received ${packageVersion}`);
+            }
+            config.version = `${match[1]}-${match[2]}`;
+          }
           fs.writeFileSync("src-tauri/ci-bundle.json", JSON.stringify(config));
           NODE
 
@@ -217,7 +240,7 @@ jobs:
       contents: write
       id-token: write
     env:
-      RELEASE_TAG: ${{ github.ref_name }}
+      RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
 
     steps:
       - name: Download installers
