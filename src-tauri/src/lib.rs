@@ -106,6 +106,8 @@ pub fn run() {
             commands::answer_checkin,
             commands::get_study_progress,
             commands::generate_diagnostic,
+            commands::list_workflow_intakes,
+            commands::save_workflow_intake,
             commands::pause_tracking,
             commands::resume_tracking,
             commands::export_data,
