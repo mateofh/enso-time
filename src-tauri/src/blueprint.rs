@@ -820,10 +820,11 @@ mod tests {
     use super::*;
 
     fn intake() -> WorkflowIntakeV1 {
+        let candidate_label = "Weekly report";
         WorkflowIntakeV1 {
             id: "workflow-1".into(),
-            candidate_id: "candidate-1".into(),
-            candidate_label: "Weekly report".into(),
+            candidate_id: crate::models::automation_candidate_id(candidate_label),
+            candidate_label: candidate_label.into(),
             trigger: "Friday".into(),
             tools: vec!["Sheets".into(), "Email".into()],
             steps: vec![

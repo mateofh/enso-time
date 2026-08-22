@@ -938,9 +938,10 @@ mod tests {
     }
 
     fn workflow(id: &str, label: &str, updated_at: &str) -> WorkflowIntakeV1 {
+        let normalized_label = label.split_whitespace().collect::<Vec<_>>().join(" ");
         WorkflowIntakeV1 {
             id: id.into(),
-            candidate_id: "candidate-report".into(),
+            candidate_id: automation_candidate_id(&normalized_label),
             candidate_label: label.into(),
             trigger: "Cada viernes".into(),
             tools: vec!["Sheets".into(), "Email".into()],
@@ -954,6 +955,36 @@ mod tests {
             created_at: "2025-01-01T10:00:00Z".into(),
             updated_at: updated_at.into(),
         }
+    }
+
+    fn insert_legacy_workflow(store: &LocalStore, intake: &WorkflowIntakeV1) {
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "INSERT INTO workflow_intakes
+                 (id, candidate_id, candidate_label, trigger, tools_json, steps_json,
+                  human_decisions, inputs, desired_output, frequency, minutes_per_run,
+                  pain_points, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                params![
+                    intake.id,
+                    intake.candidate_id,
+                    intake.candidate_label,
+                    intake.trigger,
+                    serde_json::to_string(&intake.tools).unwrap(),
+                    serde_json::to_string(&intake.steps).unwrap(),
+                    intake.human_decisions,
+                    intake.inputs,
+                    intake.desired_output,
+                    intake.frequency,
+                    intake.minutes_per_run,
+                    intake.pain_points,
+                    intake.created_at,
+                    intake.updated_at,
+                ],
+            )
+            .unwrap();
     }
 
     fn blueprint_workflow(updated_at: &str) -> WorkflowIntakeV1 {
@@ -1283,22 +1314,22 @@ mod tests {
 
         let mut update = workflow(
             "workflow-replacement-id",
-            "Preparar reporte ejecutivo",
+            "PREPARAR REPORTE",
             "2025-01-03T10:00:00Z",
         );
         update.created_at = "2025-01-02T10:00:00Z".into();
         let updated = store.save_workflow_intake(update).unwrap();
         assert_eq!(updated.id, "workflow-1");
-        assert_eq!(updated.candidate_label, "Preparar reporte ejecutivo");
+        assert_eq!(updated.candidate_label, "PREPARAR REPORTE");
         assert_eq!(updated.created_at, stored.created_at);
 
         let stale = workflow(
             "workflow-stale-id",
-            "Valor obsoleto",
+            "Preparar reporte",
             "2025-01-02T12:00:00Z",
         );
         let unchanged = store.save_workflow_intake(stale).unwrap();
-        assert_eq!(unchanged.candidate_label, "Preparar reporte ejecutivo");
+        assert_eq!(unchanged.candidate_label, "PREPARAR REPORTE");
     }
 
     #[test]
@@ -1307,7 +1338,7 @@ mod tests {
         let store = Arc::new(LocalStore::open(&directory.path().join("enso-time.sqlite")).unwrap());
         let barrier = Arc::new(Barrier::new(3));
         let mut threads = Vec::new();
-        for (label, updated_at) in [
+        for (pain_points, updated_at) in [
             ("Versión anterior", "2025-01-02T10:00:00Z"),
             ("Versión final", "2025-01-03T10:00:00Z"),
         ] {
@@ -1315,9 +1346,9 @@ mod tests {
             let thread_barrier = Arc::clone(&barrier);
             threads.push(std::thread::spawn(move || {
                 thread_barrier.wait();
-                thread_store
-                    .save_workflow_intake(workflow("workflow-race", label, updated_at))
-                    .unwrap();
+                let mut intake = workflow("workflow-race", "Reporte concurrente", updated_at);
+                intake.pain_points = pain_points.into();
+                thread_store.save_workflow_intake(intake).unwrap();
             }));
         }
         barrier.wait();
@@ -1326,7 +1357,8 @@ mod tests {
         }
         let items = store.list_workflow_intakes().unwrap();
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].candidate_label, "Versión final");
+        assert_eq!(items[0].candidate_label, "Reporte concurrente");
+        assert_eq!(items[0].pain_points, "Versión final");
         assert_eq!(items[0].updated_at, "2025-01-03T10:00:00+00:00");
     }
 
@@ -1369,23 +1401,23 @@ mod tests {
             let mut older = workflow("older-intake", "Preparar reporte", "2025-01-02T10:00:00Z");
             older.candidate_id = "candidate-preparar-reporte".into();
             older.pain_points = "legacy-older-marker".into();
-            store.save_workflow_intake(older).unwrap();
+            insert_legacy_workflow(&store, &older);
 
             let mut newest = workflow("newest-intake", "preparar reporte", "2025-01-03T10:00:00Z");
             newest.candidate_id = "candidate-another-legacy-id".into();
             newest.created_at = "2025-01-02T09:00:00Z".into();
             newest.pain_points = "canonical-newest-marker".into();
-            store.save_workflow_intake(newest).unwrap();
+            insert_legacy_workflow(&store, &newest);
 
             let mut tie_loser = workflow("tie-z", "enviar informe 🚀", "2025-01-04T10:00:00Z");
             tie_loser.candidate_id = "candidate-tie-z-legacy".into();
             tie_loser.pain_points = "tie-z-marker".into();
-            store.save_workflow_intake(tie_loser).unwrap();
+            insert_legacy_workflow(&store, &tie_loser);
 
             let mut tie_winner = workflow("tie-a", "Enviar informe 🚀", "2025-01-04T10:00:00Z");
             tie_winner.candidate_id = "candidate-tie-a-legacy".into();
             tie_winner.pain_points = "tie-a-marker".into();
-            store.save_workflow_intake(tie_winner).unwrap();
+            insert_legacy_workflow(&store, &tie_winner);
         }
 
         let store = LocalStore::open(&path).unwrap();
@@ -1398,7 +1430,7 @@ mod tests {
             .unwrap();
         assert_eq!(migrated.id, "newest-intake");
         assert_eq!(migrated.candidate_label, "preparar reporte");
-        assert_eq!(migrated.created_at, "2025-01-02T09:00:00+00:00");
+        assert_eq!(migrated.created_at, "2025-01-02T09:00:00Z");
         assert_eq!(migrated.pain_points, "canonical-newest-marker");
 
         let tied = items

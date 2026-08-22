@@ -1165,6 +1165,10 @@ mod tests {
             created_at: "2025-01-01T10:00:00Z".into(),
             updated_at: "2025-01-02T10:00:00Z".into(),
         };
+        let private_candidate_id =
+            crate::models::automation_candidate_id(&private_workflow.candidate_label);
+        let mut private_workflow = private_workflow;
+        private_workflow.candidate_id = private_candidate_id;
         store
             .save_workflow_intake(private_workflow.clone())
             .unwrap();
@@ -1389,7 +1393,7 @@ mod tests {
         let store = LocalStore::open(&temp.path().join("enso-time.sqlite")).unwrap();
         let workflow = WorkflowIntakeV1 {
             id: "workflow-export".into(),
-            candidate_id: "candidate-report".into(),
+            candidate_id: crate::models::automation_candidate_id("Preparar reporte"),
             candidate_label: "Preparar reporte".into(),
             trigger: "Cada viernes".into(),
             tools: vec!["Sheets".into()],

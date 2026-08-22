@@ -298,6 +298,12 @@ impl WorkflowIntakeV1 {
             .into_iter()
             .map(|value| normalize_text(&value))
             .collect();
+        let expected_candidate_id = automation_candidate_id(&self.candidate_label);
+        if self.candidate_id != expected_candidate_id {
+            return Err(format!(
+                "El id del candidato no corresponde a su nombre normalizado; se esperaba {expected_candidate_id}"
+            ));
+        }
         self.validate()?;
         Ok(self)
     }
@@ -511,10 +517,11 @@ mod tests {
     use super::*;
 
     fn workflow() -> WorkflowIntakeV1 {
+        let candidate_label = "  Preparar   reporte semanal ";
         WorkflowIntakeV1 {
             id: " workflow-1 ".into(),
-            candidate_id: " candidate-report ".into(),
-            candidate_label: "  Preparar   reporte semanal ".into(),
+            candidate_id: automation_candidate_id(&normalize_text(candidate_label)),
+            candidate_label: candidate_label.into(),
             trigger: " Cada   viernes\npor la tarde ".into(),
             tools: vec![" Sheets ".into(), "sheets".into(), " Slack ".into()],
             steps: vec![" Extraer  datos ".into(), " Revisar totales ".into()],
@@ -599,8 +606,17 @@ mod tests {
             .bytes()
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')));
         let mut intake = workflow();
+        intake.candidate_label = "日本語💡".into();
         intake.candidate_id = id;
         assert!(intake.normalize_and_validate().is_ok());
+    }
+
+    #[test]
+    fn workflow_intake_rejects_candidate_id_not_derived_from_normalized_label() {
+        let mut intake = workflow();
+        intake.candidate_id = automation_candidate_id("Otro candidato");
+        let error = intake.normalize_and_validate().unwrap_err();
+        assert!(error.contains("no corresponde a su nombre normalizado"));
     }
 
     #[test]
@@ -612,7 +628,10 @@ mod tests {
         assert_eq!(intake.tools, ["Sheets", "Slack"]);
         assert_eq!(intake.created_at, "2025-01-01T15:00:00+00:00");
         let json = serde_json::to_value(&intake).unwrap();
-        assert_eq!(json["candidateId"], "candidate-report");
+        assert_eq!(
+            json["candidateId"],
+            automation_candidate_id("Preparar reporte semanal")
+        );
         assert_eq!(json["minutesPerRun"], 45);
         assert!(json.get("candidate_id").is_none());
     }
