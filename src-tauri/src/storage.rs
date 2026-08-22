@@ -1,14 +1,25 @@
+use crate::blueprint::{
+    refresh_draft, validate_draft, AutomationBlueprintDraftV1, BLUEPRINT_SCHEMA_VERSION,
+};
 use crate::models::{
     automation_candidate_id, iso_now, parse_utc, CheckInAnswer, CheckInV1, SettingsV1,
     WorkflowIntakeV1,
 };
 use rusqlite::types::Type;
-use rusqlite::{params, Connection, OptionalExtension, Row};
-use std::path::Path;
+use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 pub struct LocalStore {
     connection: Mutex<Connection>,
+    database_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub enum BlueprintStoreResult {
+    Applied(AutomationBlueprintDraftV1),
+    Conflict(AutomationBlueprintDraftV1),
+    Deleted,
 }
 
 impl LocalStore {
@@ -30,6 +41,7 @@ impl LocalStore {
                 "PRAGMA secure_delete=ON;
                  PRAGMA journal_mode=WAL;
                  PRAGMA foreign_keys=ON;
+                 PRAGMA busy_timeout=5000;
                  CREATE TABLE IF NOT EXISTS app_state (
                    key TEXT PRIMARY KEY,
                    value TEXT NOT NULL
@@ -78,8 +90,10 @@ impl LocalStore {
                 [],
             )
             .map_err(|error| error.to_string())?;
+        migrate_automation_blueprints(&mut connection)?;
         let store = Self {
             connection: Mutex::new(connection),
+            database_path: path.to_path_buf(),
         };
         if store.get_value("settings")?.is_none() {
             store.save_settings(&SettingsV1::default())?;
@@ -383,6 +397,223 @@ impl LocalStore {
         Ok(stored)
     }
 
+    pub fn workflow_intake_for_candidate(
+        &self,
+        candidate_id: &str,
+    ) -> Result<Option<WorkflowIntakeV1>, String> {
+        self.connection()?
+            .query_row(
+                "SELECT id, candidate_id, candidate_label, trigger, tools_json, steps_json,
+                        human_decisions, inputs, desired_output, frequency, minutes_per_run,
+                        pain_points, created_at, updated_at
+                 FROM workflow_intakes WHERE candidate_id = ?1",
+                [candidate_id],
+                workflow_intake_from_row,
+            )
+            .optional()
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn automation_blueprint_draft(
+        &self,
+        candidate_id: &str,
+    ) -> Result<Option<AutomationBlueprintDraftV1>, String> {
+        let connection = self.connection()?;
+        read_blueprint_draft(&connection, candidate_id)
+    }
+
+    pub fn list_automation_blueprint_drafts(
+        &self,
+    ) -> Result<Vec<AutomationBlueprintDraftV1>, String> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT draft_json FROM automation_blueprints
+                 ORDER BY updated_at DESC, id ASC",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?;
+        rows.map(|raw| parse_blueprint_json(&raw.map_err(|error| error.to_string())?))
+            .collect()
+    }
+
+    pub fn save_automation_blueprint_draft(
+        &self,
+        mut draft: AutomationBlueprintDraftV1,
+        expected_revision: u64,
+        intake: &WorkflowIntakeV1,
+    ) -> Result<BlueprintStoreResult, String> {
+        validate_draft(&draft, intake)?;
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let current = read_blueprint_draft(&transaction, &draft.candidate_id)?;
+        let current_revision = current.as_ref().map(|value| value.revision).unwrap_or(0);
+        if current_revision != expected_revision {
+            return current
+                .map(BlueprintStoreResult::Conflict)
+                .ok_or_else(|| "El blueprint cambió o fue eliminado; vuelve a cargarlo".into());
+        }
+        if current.is_none() {
+            let count = transaction
+                .query_row("SELECT COUNT(*) FROM automation_blueprints", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .map_err(|error| error.to_string())?;
+            if count >= 500 {
+                return Err("No se pueden guardar más de 500 blueprints".into());
+            }
+        }
+        draft.revision = current_revision + 1;
+        if let Some(existing) = current {
+            draft.id = existing.id;
+            draft.created_at = existing.created_at;
+        }
+        draft.updated_at = iso_now();
+        validate_draft(&draft, intake)?;
+        let raw = encode_blueprint(&draft)?;
+        transaction
+            .execute(
+                "INSERT INTO automation_blueprints
+                 (candidate_id, id, schema_version, workflow_intake_id,
+                  source_intake_updated_at, revision, draft_json, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(candidate_id) DO UPDATE SET
+                   workflow_intake_id = excluded.workflow_intake_id,
+                   source_intake_updated_at = excluded.source_intake_updated_at,
+                   revision = excluded.revision,
+                   draft_json = excluded.draft_json,
+                   updated_at = excluded.updated_at",
+                params![
+                    draft.candidate_id,
+                    draft.id,
+                    BLUEPRINT_SCHEMA_VERSION,
+                    draft.workflow_intake_id,
+                    draft.source_intake_updated_at,
+                    draft.revision,
+                    raw,
+                    draft.created_at,
+                    draft.updated_at,
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(BlueprintStoreResult::Applied(draft))
+    }
+
+    pub fn refresh_automation_blueprint_draft(
+        &self,
+        candidate_id: &str,
+        expected_revision: u64,
+        intake: &WorkflowIntakeV1,
+    ) -> Result<BlueprintStoreResult, String> {
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let Some(current) = read_blueprint_draft(&transaction, candidate_id)? else {
+            return Err("No existe un blueprint guardado para actualizar".into());
+        };
+        if current.revision != expected_revision {
+            return Ok(BlueprintStoreResult::Conflict(current));
+        }
+        let mut refreshed = refresh_draft(current, intake)?;
+        refreshed.revision = expected_revision + 1;
+        refreshed.updated_at = iso_now();
+        let raw = encode_blueprint(&refreshed)?;
+        transaction
+            .execute(
+                "UPDATE automation_blueprints SET
+                   workflow_intake_id = ?2, source_intake_updated_at = ?3,
+                   revision = ?4, draft_json = ?5, updated_at = ?6
+                 WHERE candidate_id = ?1 AND revision = ?7",
+                params![
+                    candidate_id,
+                    refreshed.workflow_intake_id,
+                    refreshed.source_intake_updated_at,
+                    refreshed.revision,
+                    raw,
+                    refreshed.updated_at,
+                    expected_revision,
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(BlueprintStoreResult::Applied(refreshed))
+    }
+
+    pub fn delete_automation_blueprint_draft(
+        &self,
+        candidate_id: &str,
+        expected_revision: u64,
+    ) -> Result<BlueprintStoreResult, String> {
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let Some(current) = read_blueprint_draft(&transaction, candidate_id)? else {
+            return Err("El blueprint ya no existe".into());
+        };
+        if current.revision != expected_revision {
+            return Ok(BlueprintStoreResult::Conflict(current));
+        }
+        transaction
+            .execute(
+                "DELETE FROM automation_blueprints WHERE candidate_id = ?1 AND revision = ?2",
+                params![candidate_id, expected_revision],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        connection
+            .execute_batch(
+                "PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA wal_checkpoint(TRUNCATE);",
+            )
+            .map_err(|error| {
+                format!("El blueprint se borró, pero la purga segura falló: {error}")
+            })?;
+        Ok(BlueprintStoreResult::Deleted)
+    }
+
+    pub fn blueprint_observation_counts(
+        &self,
+        candidate_id: &str,
+    ) -> Result<(u32, u32, u16), String> {
+        let observed_days = self
+            .get_value("study_started_at")?
+            .and_then(|value| parse_utc(&value).ok())
+            .map(|started| {
+                ((chrono::Utc::now() - started).num_seconds().max(0) / 86_400 + 1).min(14) as u16
+            })
+            .unwrap_or(0);
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT activity_label, repetitive FROM checkins
+                 WHERE status = 'answered' AND activity_label IS NOT NULL",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
+            })
+            .map_err(|error| error.to_string())?;
+        let mut total = 0_u32;
+        let mut repeated = 0_u32;
+        for row in rows {
+            let (label, is_repetitive) = row.map_err(|error| error.to_string())?;
+            if automation_candidate_id(&label) == candidate_id {
+                total = total.saturating_add(1);
+                if is_repetitive.is_some_and(|value| value != 0) {
+                    repeated = repeated.saturating_add(1);
+                }
+            }
+        }
+        Ok((total, repeated, observed_days))
+    }
+
     pub fn delete_all(&self) -> Result<(), String> {
         {
             let mut connection = self.connection()?;
@@ -391,6 +622,9 @@ impl LocalStore {
                 .map_err(|error| error.to_string())?;
             transaction
                 .execute("DELETE FROM checkins", [])
+                .map_err(|error| error.to_string())?;
+            transaction
+                .execute("DELETE FROM automation_blueprints", [])
                 .map_err(|error| error.to_string())?;
             transaction
                 .execute("DELETE FROM workflow_intakes", [])
@@ -403,6 +637,14 @@ impl LocalStore {
         self.save_settings(&SettingsV1::default())?;
         self.set_value("study_started_at", &iso_now())?;
         self.set_value("selected_days", "7")?;
+        if let Some(parent) = self.database_path.parent() {
+            let exports = parent.join("exports");
+            if exports.exists() {
+                std::fs::remove_dir_all(&exports).map_err(|error| {
+                    format!("No se pudieron borrar las exportaciones administradas: {error}")
+                })?;
+            }
+        }
         self.connection()?
             .execute_batch(
                 "PRAGMA wal_checkpoint(TRUNCATE);
@@ -527,6 +769,93 @@ fn migrate_workflow_candidate_ids(connection: &mut Connection) -> Result<(), Str
     transaction.commit().map_err(|error| error.to_string())
 }
 
+fn migrate_automation_blueprints(connection: &mut Connection) -> Result<(), String> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS automation_blueprints (
+               candidate_id TEXT PRIMARY KEY,
+               id TEXT NOT NULL UNIQUE,
+               schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+               workflow_intake_id TEXT NOT NULL REFERENCES workflow_intakes(id) ON DELETE CASCADE,
+               source_intake_updated_at TEXT NOT NULL,
+               revision INTEGER NOT NULL CHECK (revision >= 1),
+               draft_json TEXT NOT NULL CHECK (length(CAST(draft_json AS BLOB)) <= 40000),
+               created_at TEXT NOT NULL,
+               updated_at TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS automation_blueprints_updated_idx
+               ON automation_blueprints(updated_at DESC);",
+        )
+        .map_err(|error| format!("No se pudo migrar Automation Blueprint v0.2: {error}"))?;
+    transaction.commit().map_err(|error| error.to_string())
+}
+
+fn encode_blueprint(draft: &AutomationBlueprintDraftV1) -> Result<String, String> {
+    let raw = serde_json::to_string(draft).map_err(|error| error.to_string())?;
+    if raw.len() > 40_000 {
+        return Err("El blueprint excede el tamaño local permitido".into());
+    }
+    Ok(raw)
+}
+
+fn parse_blueprint_json(raw: &str) -> Result<AutomationBlueprintDraftV1, String> {
+    let draft: AutomationBlueprintDraftV1 = serde_json::from_str(raw)
+        .map_err(|error| format!("Un blueprint local está dañado: {error}"))?;
+    if draft.schema_version != BLUEPRINT_SCHEMA_VERSION {
+        return Err("Un blueprint local usa una versión desconocida".into());
+    }
+    Ok(draft)
+}
+
+fn read_blueprint_draft(
+    connection: &Connection,
+    candidate_id: &str,
+) -> Result<Option<AutomationBlueprintDraftV1>, String> {
+    let record = connection
+        .query_row(
+            "SELECT id, schema_version, workflow_intake_id, source_intake_updated_at,
+                    revision, draft_json, created_at, updated_at
+             FROM automation_blueprints WHERE candidate_id = ?1",
+            [candidate_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let Some((id, schema, workflow_id, source_updated, revision, raw, created, updated)) = record
+    else {
+        return Ok(None);
+    };
+    if schema != i64::from(BLUEPRINT_SCHEMA_VERSION) || revision < 1 {
+        return Err("Un blueprint local usa una versión o revisión inválida".into());
+    }
+    let draft = parse_blueprint_json(&raw)?;
+    if draft.id != id
+        || draft.candidate_id != candidate_id
+        || draft.workflow_intake_id != workflow_id
+        || draft.source_intake_updated_at != source_updated
+        || draft.revision != revision as u64
+        || draft.created_at != created
+        || draft.updated_at != updated
+    {
+        return Err("Los metadatos de un blueprint local no coinciden".into());
+    }
+    Ok(Some(draft))
+}
+
 fn workflow_intake_from_row(row: &Row<'_>) -> rusqlite::Result<WorkflowIntakeV1> {
     let tools_json: String = row.get(4)?;
     let steps_json: String = row.get(5)?;
@@ -557,6 +886,7 @@ fn workflow_intake_from_row(row: &Row<'_>) -> rusqlite::Result<WorkflowIntakeV1>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::blueprint::{ephemeral_draft, DataSensitivityV1};
     use crate::diagnostics::create_diagnostic;
     use crate::models::{CheckInAnswer, CheckInV1, SettingsV1, WorkflowIntakeV1};
     use std::sync::{Arc, Barrier};
@@ -585,6 +915,27 @@ mod tests {
             created_at: "2025-01-01T10:00:00Z".into(),
             updated_at: updated_at.into(),
         }
+    }
+
+    fn blueprint_workflow(updated_at: &str) -> WorkflowIntakeV1 {
+        let mut value = workflow("workflow-blueprint", "Reporte blueprint", updated_at);
+        value.candidate_id = automation_candidate_id(&value.candidate_label);
+        value
+    }
+
+    fn stored_blueprint(store: &LocalStore) -> (WorkflowIntakeV1, AutomationBlueprintDraftV1) {
+        let intake = store
+            .save_workflow_intake(blueprint_workflow("2025-01-02T10:00:00Z"))
+            .unwrap();
+        let mut draft = ephemeral_draft(&intake);
+        draft.data_sensitivity = DataSensitivityV1::Low;
+        let applied = store
+            .save_automation_blueprint_draft(draft, 0, &intake)
+            .unwrap();
+        let BlueprintStoreResult::Applied(draft) = applied else {
+            panic!("expected applied blueprint")
+        };
+        (intake, draft)
     }
 
     #[test]
@@ -618,14 +969,189 @@ mod tests {
                 "2025-01-02T10:00:00Z",
             ))
             .unwrap();
+        let exports = directory.path().join("exports");
+        std::fs::create_dir_all(&exports).unwrap();
+        std::fs::write(exports.join("private-export.json"), "private-export-marker").unwrap();
         store.delete_all().unwrap();
         assert!(store.list_workflow_intakes().unwrap().is_empty());
         assert!(!path.with_file_name("enso-time.sqlite-wal").exists());
         assert!(!path.with_file_name("enso-time.sqlite-shm").exists());
+        assert!(!exports.exists());
         let bytes = std::fs::read(path).unwrap();
         assert!(!bytes
             .windows(b"private-workflow-marker".len())
             .any(|window| window == b"private-workflow-marker"));
+    }
+
+    #[test]
+    fn v01_database_migrates_blueprints_transactionally_and_idempotently() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("enso-time.sqlite");
+        {
+            let store = LocalStore::open(&path).unwrap();
+            store.set_value("v01-marker", "preserved").unwrap();
+            store
+                .save_workflow_intake(blueprint_workflow("2025-01-02T10:00:00Z"))
+                .unwrap();
+        }
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch("DROP TABLE automation_blueprints;")
+            .unwrap();
+        drop(connection);
+
+        for _ in 0..2 {
+            let store = LocalStore::open(&path).unwrap();
+            assert_eq!(
+                store.get_value("v01-marker").unwrap().as_deref(),
+                Some("preserved")
+            );
+            let sql: String = store
+                .connection()
+                .unwrap()
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='automation_blueprints'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(sql.contains("revision INTEGER NOT NULL CHECK (revision >= 1)"));
+            assert!(store.list_automation_blueprint_drafts().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn optimistic_concurrency_returns_the_current_blueprint() {
+        let store = store();
+        let (intake, first) = stored_blueprint(&store);
+        let mut left = first.clone();
+        left.runs_per_week = Some(2);
+        let BlueprintStoreResult::Applied(saved) = store
+            .save_automation_blueprint_draft(left, 1, &intake)
+            .unwrap()
+        else {
+            panic!("expected save")
+        };
+        assert_eq!(saved.revision, 2);
+
+        let mut right = first;
+        right.runs_per_week = Some(9);
+        let BlueprintStoreResult::Conflict(current) = store
+            .save_automation_blueprint_draft(right, 1, &intake)
+            .unwrap()
+        else {
+            panic!("expected conflict")
+        };
+        assert_eq!(current.revision, 2);
+        assert_eq!(current.runs_per_week, Some(2));
+    }
+
+    #[test]
+    fn concurrent_connections_allow_exactly_one_revision_winner() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("enso-time.sqlite");
+        let first_store = Arc::new(LocalStore::open(&path).unwrap());
+        let (intake, draft) = stored_blueprint(&first_store);
+        let second_store = Arc::new(LocalStore::open(&path).unwrap());
+        let barrier = Arc::new(Barrier::new(3));
+        let mut threads = Vec::new();
+        for (store, runs) in [(first_store, 3), (second_store, 7)] {
+            let barrier = Arc::clone(&barrier);
+            let intake = intake.clone();
+            let mut draft = draft.clone();
+            threads.push(std::thread::spawn(move || {
+                draft.runs_per_week = Some(runs);
+                barrier.wait();
+                store.save_automation_blueprint_draft(draft, 1, &intake)
+            }));
+        }
+        barrier.wait();
+        let results = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, BlueprintStoreResult::Applied(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, BlueprintStoreResult::Conflict(_)))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn delete_update_race_never_silently_resurrects_or_overwrites() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("enso-time.sqlite");
+        let update_store = Arc::new(LocalStore::open(&path).unwrap());
+        let (intake, mut draft) = stored_blueprint(&update_store);
+        let delete_store = Arc::new(LocalStore::open(&path).unwrap());
+        let barrier = Arc::new(Barrier::new(3));
+        draft.runs_per_week = Some(6);
+        let update_barrier = Arc::clone(&barrier);
+        let update = std::thread::spawn(move || {
+            update_barrier.wait();
+            update_store.save_automation_blueprint_draft(draft, 1, &intake)
+        });
+        let delete_barrier = Arc::clone(&barrier);
+        let delete = std::thread::spawn(move || {
+            delete_barrier.wait();
+            delete_store
+                .delete_automation_blueprint_draft(&automation_candidate_id("Reporte blueprint"), 1)
+        });
+        barrier.wait();
+        let update_result = update.join().unwrap();
+        let delete_result = delete.join().unwrap();
+        let applied = update_result
+            .as_ref()
+            .is_ok_and(|result| matches!(result, BlueprintStoreResult::Applied(_)));
+        let deleted = delete_result
+            .as_ref()
+            .is_ok_and(|result| matches!(result, BlueprintStoreResult::Deleted));
+        assert_ne!(applied, deleted);
+        let reopened = LocalStore::open(&path).unwrap();
+        match reopened
+            .automation_blueprint_draft(&automation_candidate_id("Reporte blueprint"))
+            .unwrap()
+        {
+            Some(current) => {
+                assert!(applied);
+                assert_eq!(current.revision, 2);
+                assert_eq!(current.runs_per_week, Some(6));
+            }
+            None => assert!(deleted),
+        }
+    }
+
+    #[test]
+    fn individual_delete_securely_purges_draft_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("enso-time.sqlite");
+        let store = LocalStore::open(&path).unwrap();
+        let (intake, mut draft) = stored_blueprint(&store);
+        draft.recovery_plan = Some("private-blueprint-purge-marker".into());
+        let BlueprintStoreResult::Applied(saved) = store
+            .save_automation_blueprint_draft(draft, 1, &intake)
+            .unwrap()
+        else {
+            panic!("expected save")
+        };
+        assert!(matches!(
+            store
+                .delete_automation_blueprint_draft(&saved.candidate_id, saved.revision)
+                .unwrap(),
+            BlueprintStoreResult::Deleted
+        ));
+        let bytes = std::fs::read(&path).unwrap();
+        let marker = b"private-blueprint-purge-marker";
+        assert!(!bytes.windows(marker.len()).any(|window| window == marker));
     }
 
     #[test]

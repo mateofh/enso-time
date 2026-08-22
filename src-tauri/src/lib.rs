@@ -1,4 +1,5 @@
 mod activitywatch;
+mod blueprint;
 mod commands;
 mod diagnostics;
 mod models;
@@ -110,6 +111,11 @@ pub fn run() {
             commands::generate_diagnostic,
             commands::list_workflow_intakes,
             commands::save_workflow_intake,
+            commands::get_automation_blueprint_v1,
+            commands::save_automation_blueprint_v1,
+            commands::refresh_automation_blueprint_source_v1,
+            commands::export_automation_blueprint_v1,
+            commands::delete_automation_blueprint_v1,
             commands::pause_tracking,
             commands::resume_tracking,
             commands::export_data,

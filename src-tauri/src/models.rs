@@ -458,8 +458,42 @@ pub struct ExportEnvelope {
     pub exported_at: String,
     pub settings: SettingsV1,
     pub check_ins: Vec<CheckInV1>,
-    pub timeline: Vec<TimelineBlockV1>,
+    pub timeline: Vec<ExportTimelineBlockV2>,
     pub workflows: Vec<WorkflowIntakeV1>,
+    pub automation_blueprints: Vec<crate::blueprint::AutomationBlueprintV1>,
+    pub deletion_boundary: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportTimelineBlockV2 {
+    pub id: String,
+    pub start: String,
+    pub end: String,
+    pub duration_seconds: i64,
+    pub app: String,
+    pub category: String,
+    pub confidence: f64,
+    pub afk: bool,
+    pub source: String,
+    pub check_in_id: Option<String>,
+}
+
+impl From<&TimelineBlockV1> for ExportTimelineBlockV2 {
+    fn from(value: &TimelineBlockV1) -> Self {
+        Self {
+            id: value.id.clone(),
+            start: value.start.clone(),
+            end: value.end.clone(),
+            duration_seconds: value.duration_seconds,
+            app: value.app.clone(),
+            category: value.category.clone(),
+            confidence: value.confidence,
+            afk: value.afk,
+            source: value.source.clone(),
+            check_in_id: value.check_in_id.clone(),
+        }
+    }
 }
 
 pub fn iso_now() -> String {

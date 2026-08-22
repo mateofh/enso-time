@@ -1,12 +1,19 @@
 use crate::activitywatch::{completed_interval, ActivityWatchRuntime};
+use crate::blueprint::{
+    assess_blueprint, draft_from_input, ephemeral_draft, AutomationBlueprintExportEnvelopeV2,
+    AutomationBlueprintV1, BlueprintConflictV1, BlueprintStatusV1, SaveAutomationBlueprintInputV1,
+    BLUEPRINT_EXPORT_SCHEMA_VERSION,
+};
 use crate::diagnostics::create_diagnostic;
 use crate::models::{
     iso_now, parse_utc, CheckInAnswer, CheckInV1, DiagnosticV1, ExportEnvelope, SettingsV1,
     StudyProgress, TimelineBlockV1, TrackingStatus, UpdateInfo, WorkflowIntakeV1,
 };
-use crate::storage::LocalStore;
+use crate::storage::{BlueprintStoreResult, LocalStore};
 use chrono::{Datelike, Duration, Timelike, Utc};
 use chrono_tz::Tz;
+use std::fs::{OpenOptions, Permissions};
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -364,6 +371,234 @@ fn save_workflow_intake_inner(
     store.save_workflow_intake(intake)
 }
 
+fn assess_stored_blueprint(
+    store: &LocalStore,
+    draft: crate::blueprint::AutomationBlueprintDraftV1,
+    locale: &str,
+) -> Result<AutomationBlueprintV1, String> {
+    let intake = store
+        .workflow_intake_for_candidate(&draft.candidate_id)?
+        .ok_or_else(|| "El intake fuente ya no existe".to_string())?;
+    let (total, repeated, observed_days) =
+        store.blueprint_observation_counts(&draft.candidate_id)?;
+    assess_blueprint(draft, &intake, total, repeated, observed_days, locale)
+}
+
+fn get_automation_blueprint_inner(
+    store: &LocalStore,
+    capture_gate: &CaptureGate,
+    candidate_id: &str,
+    locale: &str,
+) -> Result<Option<AutomationBlueprintV1>, String> {
+    let operation = capture_gate.operation()?;
+    operation.ensure_current()?;
+    let Some(intake) = store.workflow_intake_for_candidate(candidate_id)? else {
+        return Ok(None);
+    };
+    let draft = store
+        .automation_blueprint_draft(candidate_id)?
+        .unwrap_or_else(|| ephemeral_draft(&intake));
+    let (total, repeated, observed_days) = store.blueprint_observation_counts(candidate_id)?;
+    assess_blueprint(draft, &intake, total, repeated, observed_days, locale).map(Some)
+}
+
+#[tauri::command]
+pub fn get_automation_blueprint_v1(
+    state: State<'_, AppState>,
+    candidate_id: String,
+    locale: String,
+) -> Result<Option<AutomationBlueprintV1>, String> {
+    get_automation_blueprint_inner(&state.store, &state.capture_gate, &candidate_id, &locale)
+}
+
+#[tauri::command]
+pub fn save_automation_blueprint_v1(
+    state: State<'_, AppState>,
+    input: SaveAutomationBlueprintInputV1,
+    locale: String,
+) -> Result<AutomationBlueprintV1, String> {
+    let operation = state.capture_gate.operation()?;
+    operation.ensure_current()?;
+    let intake = state
+        .store
+        .workflow_intake_for_candidate(&input.draft.candidate_id)?
+        .ok_or_else(|| "blueprint.intake_missing".to_string())?;
+    let existing = state
+        .store
+        .automation_blueprint_draft(&input.draft.candidate_id)?;
+    if existing
+        .as_ref()
+        .is_some_and(|draft| draft.source_intake_updated_at != intake.updated_at)
+    {
+        return Err("blueprint.stale".into());
+    }
+    let expected_revision = input.expected_revision.unwrap_or(input.draft.revision);
+    let draft = draft_from_input(&intake, existing.as_ref(), input.draft)?;
+    match state
+        .store
+        .save_automation_blueprint_draft(draft, expected_revision, &intake)?
+    {
+        BlueprintStoreResult::Applied(draft) => {
+            assess_stored_blueprint(&state.store, draft, &locale)
+        }
+        BlueprintStoreResult::Conflict(current) => {
+            let mut current = assess_stored_blueprint(&state.store, current, &locale)?;
+            current.conflict = Some(BlueprintConflictV1 {
+                current_revision: current.draft.revision,
+            });
+            Ok(current)
+        }
+        BlueprintStoreResult::Deleted => Err("Resultado de persistencia inesperado".into()),
+    }
+}
+
+#[tauri::command]
+pub fn refresh_automation_blueprint_source_v1(
+    state: State<'_, AppState>,
+    candidate_id: String,
+    expected_revision: u64,
+    locale: String,
+) -> Result<AutomationBlueprintV1, String> {
+    let operation = state.capture_gate.operation()?;
+    operation.ensure_current()?;
+    let intake = state
+        .store
+        .workflow_intake_for_candidate(&candidate_id)?
+        .ok_or_else(|| "blueprint.not_found".to_string())?;
+    match state.store.refresh_automation_blueprint_draft(
+        &candidate_id,
+        expected_revision,
+        &intake,
+    )? {
+        BlueprintStoreResult::Applied(draft) => {
+            assess_stored_blueprint(&state.store, draft, &locale)
+        }
+        BlueprintStoreResult::Conflict(current) => {
+            let mut current = assess_stored_blueprint(&state.store, current, &locale)?;
+            current.conflict = Some(BlueprintConflictV1 {
+                current_revision: current.draft.revision,
+            });
+            Ok(current)
+        }
+        BlueprintStoreResult::Deleted => Err("Resultado de persistencia inesperado".into()),
+    }
+}
+
+#[tauri::command]
+pub fn export_automation_blueprint_v1(
+    state: State<'_, AppState>,
+    candidate_id: String,
+    expected_revision: u64,
+    format: String,
+    locale: String,
+) -> Result<String, String> {
+    let operation = state.capture_gate.operation()?;
+    operation.ensure_current()?;
+    if !matches!(format.as_str(), "markdown" | "json") {
+        return Err("El formato de blueprint debe ser markdown o json".into());
+    }
+    let draft = state
+        .store
+        .automation_blueprint_draft(&candidate_id)?
+        .ok_or_else(|| "Guarda el blueprint antes de exportarlo".to_string())?;
+    let blueprint = assess_stored_blueprint(&state.store, draft, &locale)?;
+    if blueprint.draft.revision != expected_revision {
+        return Err("blueprint.conflict".into());
+    }
+    if blueprint.status != BlueprintStatusV1::Ready {
+        return Err("blueprint.not_ready".into());
+    }
+    let now = Utc::now();
+    let contents = if format == "json" {
+        serde_json::to_string_pretty(&AutomationBlueprintExportEnvelopeV2 {
+            schema_version: BLUEPRINT_EXPORT_SCHEMA_VERSION,
+            export_kind: "automation-blueprint",
+            exported_at: now.to_rfc3339(),
+            blueprint,
+            deletion_boundary: deletion_boundary(&locale).into(),
+        })
+        .map_err(|error| format!("No se pudo preparar la exportación: {error}"))?
+    } else {
+        blueprint.rendered_markdown
+    };
+    let export_dir = state.app_data_dir.join("exports");
+    create_private_directory(&export_dir)?;
+    let extension = if format == "json" { "json" } else { "md" };
+    let filename = format!(
+        "enso-automation-blueprint-{}-{}.{}",
+        now.format("%Y%m%d-%H%M%S"),
+        Uuid::new_v4(),
+        extension
+    );
+    let path = export_dir.join(filename);
+    operation.ensure_current()?;
+    write_private_new_file(&path, contents.as_bytes())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub fn delete_automation_blueprint_v1(
+    state: State<'_, AppState>,
+    candidate_id: String,
+    expected_revision: u64,
+    confirmation: String,
+    locale: String,
+) -> Result<(), String> {
+    let operation = state.capture_gate.operation()?;
+    operation.ensure_current()?;
+    if confirmation != "DELETE_AUTOMATION_BLUEPRINT" {
+        return Err("La confirmación de borrado del blueprint no coincide".into());
+    }
+    if !matches!(locale.as_str(), "es-419" | "en") {
+        return Err("El idioma del blueprint no es compatible".into());
+    }
+    match state
+        .store
+        .delete_automation_blueprint_draft(&candidate_id, expected_revision)?
+    {
+        BlueprintStoreResult::Deleted => Ok(()),
+        BlueprintStoreResult::Conflict(_) => Err("blueprint.conflict".into()),
+        BlueprintStoreResult::Applied(_) => Err("Resultado de persistencia inesperado".into()),
+    }
+}
+
+fn deletion_boundary(locale: &str) -> &'static str {
+    if locale == "en" {
+        "Ensō Time can delete its local database and app-managed exports. Clipboard contents, moved exports, backups, and synced copies remain outside its deletion boundary."
+    } else {
+        "Ensō Time puede borrar su base local y exports administrados. El portapapeles, exports movidos, respaldos y copias sincronizadas quedan fuera de su límite de borrado."
+    }
+}
+
+fn create_private_directory(path: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(path)
+        .map_err(|error| format!("No se pudo crear el directorio de exportación: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, Permissions::from_mode(0o700)).map_err(|error| {
+            format!("No se pudo proteger el directorio de exportación: {error}")
+        })?;
+    }
+    Ok(())
+}
+
+fn write_private_new_file(path: &std::path::Path, contents: &[u8]) -> Result<(), String> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| format!("No se pudo crear la exportación privada: {error}"))?;
+    file.write_all(contents)
+        .and_then(|_| file.sync_all())
+        .map_err(|error| format!("No se pudo escribir la exportación: {error}"))
+}
+
 #[tauri::command]
 pub fn pause_tracking(state: State<'_, AppState>, minutes: u16) -> Result<TrackingStatus, String> {
     let operation = state.capture_gate.operation()?;
@@ -411,26 +646,39 @@ pub fn export_data(state: State<'_, AppState>, format: String) -> Result<String,
         .store
         .checkins_between(&start.to_rfc3339(), &now.to_rfc3339())?;
     let workflows = state.store.list_workflow_intakes()?;
+    let blueprint_drafts = state.store.list_automation_blueprint_drafts()?;
+    let mut blueprints = Vec::with_capacity(blueprint_drafts.len());
+    for draft in blueprint_drafts {
+        blueprints.push(assess_stored_blueprint(
+            &state.store,
+            draft,
+            &settings.locale,
+        )?);
+    }
     let timeline = state.activity.timeline(start, now, &settings, &checkins)?;
     let export_dir = state.app_data_dir.join("exports");
-    std::fs::create_dir_all(&export_dir)
-        .map_err(|error| format!("No se pudo crear el directorio de exportación: {error}"))?;
-    let filename = format!("enso-time-{}.{}", now.format("%Y%m%d-%H%M%S"), format);
+    create_private_directory(&export_dir)?;
+    let filename = format!(
+        "enso-time-{}-{}.{}",
+        now.format("%Y%m%d-%H%M%S"),
+        Uuid::new_v4(),
+        format
+    );
     let path = export_dir.join(filename);
     operation.ensure_current()?;
     let contents = if format == "json" {
-        json_export(&settings, &checkins, &timeline, &workflows, &now)?
+        json_export(
+            &settings,
+            &checkins,
+            &timeline,
+            &workflows,
+            &blueprints,
+            &now,
+        )?
     } else {
         timeline_csv(&timeline)
     };
-    std::fs::write(&path, contents)
-        .map_err(|error| format!("No se pudo escribir la exportación: {error}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|error| format!("No se pudo proteger la exportación: {error}"))?;
-    }
+    write_private_new_file(&path, contents.as_bytes())?;
     Ok(path.to_string_lossy().into_owned())
 }
 
@@ -439,15 +687,18 @@ fn json_export(
     checkins: &[CheckInV1],
     timeline: &[TimelineBlockV1],
     workflows: &[WorkflowIntakeV1],
+    blueprints: &[AutomationBlueprintV1],
     exported_at: &chrono::DateTime<Utc>,
 ) -> Result<String, String> {
     serde_json::to_string_pretty(&ExportEnvelope {
-        schema_version: 1,
+        schema_version: BLUEPRINT_EXPORT_SCHEMA_VERSION,
         exported_at: exported_at.to_rfc3339(),
         settings: settings.clone(),
         check_ins: checkins.to_vec(),
-        timeline: timeline.to_vec(),
+        timeline: timeline.iter().map(Into::into).collect(),
         workflows: workflows.to_vec(),
+        automation_blueprints: blueprints.to_vec(),
+        deletion_boundary: deletion_boundary(&settings.locale).into(),
     })
     .map_err(|error| format!("No se pudo preparar la exportación: {error}"))
 }
@@ -761,16 +1012,14 @@ fn validate_range(from: chrono::DateTime<Utc>, to: chrono::DateTime<Utc>) -> Res
 }
 
 fn timeline_csv(blocks: &[TimelineBlockV1]) -> String {
-    let mut output = String::from(
-        "start,end,duration_seconds,app,title,category,confidence,afk,source,check_in_id\n",
-    );
+    let mut output =
+        String::from("start,end,duration_seconds,app,category,confidence,afk,source,check_in_id\n");
     for block in blocks {
         let fields = [
             block.start.clone(),
             block.end.clone(),
             block.duration_seconds.to_string(),
             block.app.clone(),
-            block.title.clone().unwrap_or_default(),
             block.category.clone(),
             block.confidence.to_string(),
             block.afk.to_string(),
@@ -1140,12 +1389,58 @@ mod tests {
         save_workflow_intake_inner(&store, &capture_gate, workflow).unwrap();
         let workflows = list_workflow_intakes_inner(&store, &capture_gate).unwrap();
         assert!(!store.settings().unwrap().onboarding_completed);
-        let exported =
-            json_export(&SettingsV1::default(), &[], &[], &workflows, &Utc::now()).unwrap();
+        let raw_timeline = TimelineBlockV1 {
+            id: "timeline-private".into(),
+            start: "2025-01-01T10:00:00Z".into(),
+            end: "2025-01-01T10:15:00Z".into(),
+            duration_seconds: 900,
+            app: "Browser".into(),
+            title: Some("private-raw-window-title".into()),
+            category: "admin".into(),
+            confidence: 0.8,
+            afk: false,
+            source: "window".into(),
+            check_in_id: None,
+        };
+        let exported = json_export(
+            &SettingsV1::default(),
+            &[],
+            &[raw_timeline],
+            &workflows,
+            &[],
+            &Utc::now(),
+        )
+        .unwrap();
         let json: serde_json::Value = serde_json::from_str(&exported).unwrap();
-        assert_eq!(json["schemaVersion"], 1);
+        assert_eq!(json["schemaVersion"], 2);
         assert_eq!(json["workflows"][0]["id"], "workflow-export");
         assert_eq!(json["workflows"][0]["minutesPerRun"], 45);
         assert!(json["workflows"][0].get("candidate_id").is_none());
+        assert!(json["timeline"][0].get("title").is_none());
+        assert!(!exported.contains("private-raw-window-title"));
+        assert!(json["deletionBoundary"].as_str().unwrap().contains("fuera"));
+    }
+
+    #[test]
+    fn private_export_files_are_create_new_and_owner_only() {
+        let directory = TempDir::new().unwrap();
+        let export_dir = directory.path().join("exports");
+        create_private_directory(&export_dir).unwrap();
+        let path = export_dir.join("blueprint.json");
+        write_private_new_file(&path, b"private-export").unwrap();
+        assert!(write_private_new_file(&path, b"overwrite").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"private-export");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&export_dir).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
     }
 }
