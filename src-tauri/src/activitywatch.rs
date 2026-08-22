@@ -187,6 +187,8 @@ pub struct ActivityWatchRuntime {
     shutdown_started: AtomicBool,
     cancellation: Arc<RuntimeCancellation>,
     watcher_lifecycle: Mutex<()>,
+    #[cfg(test)]
+    watcher_lifecycle_lock_attempt: Mutex<Option<mpsc::Sender<()>>>,
     window_health: Mutex<Option<WatcherHealth>>,
     afk_health: Mutex<Option<WatcherHealth>>,
     window_watcher: Arc<Mutex<Option<ManagedWatcher>>>,
@@ -271,6 +273,8 @@ impl ActivityWatchRuntime {
             shutdown_started: AtomicBool::new(false),
             cancellation: Arc::new(RuntimeCancellation::new()),
             watcher_lifecycle: Mutex::new(()),
+            #[cfg(test)]
+            watcher_lifecycle_lock_attempt: Mutex::new(None),
             window_health: Mutex::new(None),
             afk_health: Mutex::new(None),
             window_watcher,
@@ -385,6 +389,8 @@ impl ActivityWatchRuntime {
     }
 
     pub fn start_watchers(&self, capture_titles: bool) -> Result<(), String> {
+        #[cfg(test)]
+        self.notify_watcher_lifecycle_lock_attempt();
         let _lifecycle = self
             .watcher_lifecycle
             .lock()
@@ -393,6 +399,23 @@ impl ActivityWatchRuntime {
             return Err(CAPTURE_START_CANCELLED.into());
         }
         self.start_watchers_with_timeout(capture_titles, WATCHER_REGISTRATION_TIMEOUT)
+    }
+
+    #[cfg(test)]
+    fn notify_watcher_lifecycle_lock_attempt(&self) {
+        let sender = self
+            .watcher_lifecycle_lock_attempt
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take());
+        if let Some(sender) = sender {
+            let _ = sender.send(());
+        }
+    }
+
+    #[cfg(test)]
+    fn signal_watcher_lifecycle_lock_attempt(&self, sender: mpsc::Sender<()>) {
+        *self.watcher_lifecycle_lock_attempt.lock().unwrap() = Some(sender);
     }
 
     fn start_watchers_with_timeout(
@@ -2115,16 +2138,22 @@ mod tests {
         wait_until_ready(&runtime);
         let lifecycle = runtime.watcher_lifecycle.lock().unwrap();
         let starter_runtime = Arc::clone(&runtime);
-        let (starter_started, starter_started_rx) = std::sync::mpsc::channel();
+        let (lock_attempted, lock_attempted_rx) = mpsc::channel();
+        runtime.signal_watcher_lifecycle_lock_attempt(lock_attempted);
+        let (starter_result, starter_result_rx) = mpsc::channel();
         let starter = std::thread::spawn(move || {
-            starter_started.send(()).unwrap();
-            starter_runtime.start_watchers(false)
+            let result = starter_runtime.start_watchers(false);
+            let _ = starter_result.send(result);
         });
-        starter_started_rx
+        lock_attempted_rx
             .recv_timeout(StdDuration::from_secs(1))
             .unwrap();
         let shutdown_runtime = Arc::clone(&runtime);
-        let shutdown = std::thread::spawn(move || shutdown_runtime.shutdown());
+        let (shutdown_result, shutdown_result_rx) = mpsc::channel();
+        let shutdown = std::thread::spawn(move || {
+            let result = shutdown_runtime.shutdown();
+            let _ = shutdown_result.send(result);
+        });
 
         for _ in 0..100 {
             if runtime.shutdown_requested() {
@@ -2135,11 +2164,16 @@ mod tests {
         assert!(runtime.shutdown_requested());
         drop(lifecycle);
 
-        assert_eq!(
-            starter.join().unwrap().unwrap_err(),
-            CAPTURE_START_CANCELLED
-        );
-        shutdown.join().unwrap().unwrap();
+        let starter_result = starter_result_rx
+            .recv_timeout(StdDuration::from_secs(1))
+            .unwrap();
+        let shutdown_result = shutdown_result_rx
+            .recv_timeout(StdDuration::from_secs(1))
+            .unwrap();
+        starter.join().unwrap();
+        shutdown.join().unwrap();
+        assert_eq!(starter_result.unwrap_err(), CAPTURE_START_CANCELLED);
+        shutdown_result.unwrap();
     }
 
     #[test]
