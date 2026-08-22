@@ -1,0 +1,146 @@
+#!/usr/bin/env node
+
+import { createHash } from "node:crypto";
+import { readFile, readdir } from "node:fs/promises";
+import { resolve } from "node:path";
+import process from "node:process";
+
+const root = resolve(import.meta.dirname, "..");
+const strictManifests = process.argv.includes("--strict-manifests");
+const errors = [];
+const warnings = [];
+
+const expected = {
+  version: "0.1.0-beta.2",
+  licenseId: "PolyForm-Noncommercial-1.0.0",
+  polyformSha256: "c72b8a4b508c2363a360d29530e17767dd0e44c513b253e6ac5ab720876cd426",
+  mplSha256: "1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5",
+  requiredNotice: "Required Notice: Copyright 2026 Mateo (@mateofh).",
+};
+
+async function text(path) {
+  return readFile(resolve(root, path), "utf8");
+}
+
+async function bytes(path) {
+  return readFile(resolve(root, path));
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function requireCondition(condition, message) {
+  if (!condition) errors.push(message);
+}
+
+async function requireIdentical(left, right) {
+  const [leftBytes, rightBytes] = await Promise.all([bytes(left), bytes(right)]);
+  requireCondition(leftBytes.equals(rightBytes), `${right} must be byte-identical to ${left}`);
+}
+
+const polyform = await bytes("LICENSE");
+const mpl = await bytes("LICENSES/MPL-2.0.txt");
+requireCondition(
+  sha256(polyform) === expected.polyformSha256,
+  "LICENSE differs from the canonical PolyForm Noncommercial 1.0.0 text plus the required notice",
+);
+requireCondition(
+  sha256(mpl) === expected.mplSha256,
+  "LICENSES/MPL-2.0.txt differs from the canonical MPL-2.0 text",
+);
+
+const polyformText = polyform.toString("utf8");
+requireCondition(
+  polyformText.split(expected.requiredNotice).length === 2,
+  "LICENSE must contain the exact Required Notice once",
+);
+
+for (const [source, packaged] of [
+  ["LICENSE", "src-tauri/resources/legal/POLYFORM-NONCOMMERCIAL-1.0.0.txt"],
+  ["LICENSES/MPL-2.0.txt", "src-tauri/resources/legal/MPL-2.0.txt"],
+  ["COMMERCIAL.md", "src-tauri/resources/legal/COMMERCIAL.md"],
+  ["TRADEMARKS.md", "src-tauri/resources/legal/TRADEMARKS.md"],
+  ["PRIVACY.md", "src-tauri/resources/legal/PRIVACY.md"],
+  ["SECURITY.md", "src-tauri/resources/legal/SECURITY.md"],
+  ["THIRD_PARTY_NOTICES.md", "src-tauri/resources/legal/THIRD_PARTY_NOTICES.md"],
+]) {
+  await requireIdentical(source, packaged);
+}
+
+const licenseMap = await text("LICENSES/README.md");
+const thirdParty = await text("THIRD_PARTY_NOTICES.md");
+const trademarks = await text("TRADEMARKS.md");
+const commercial = await text("COMMERCIAL.md");
+for (const phrase of ["vendor/activitywatch/**", "Mozilla Public License 2.0", "All rights reserved"]) {
+  requireCondition(licenseMap.includes(phrase), `license map is missing boundary phrase: ${phrase}`);
+}
+for (const phrase of ["vendor/activitywatch/**", "remain covered by MPL-2.0", "does not apply"]) {
+  requireCondition(thirdParty.includes(phrase), `third-party notice is missing boundary phrase: ${phrase}`);
+}
+for (const phrase of ["isotype", "app icons", "do not grant permission"]) {
+  requireCondition(trademarks.includes(phrase), `trademark policy is missing: ${phrase}`);
+}
+for (const phrase of [
+  "internal use by a for-profit company",
+  "resale",
+  "paid consulting",
+  "bundling",
+  "providing services commercially",
+  "separate written agreement",
+  "@mateofh",
+]) {
+  requireCondition(commercial.includes(phrase), `commercial policy is missing: ${phrase}`);
+}
+
+const vendorFiles = await readdir(resolve(root, "vendor/activitywatch"), { recursive: true });
+requireCondition(vendorFiles.length > 20, "vendor/activitywatch does not contain the expected source tree");
+const upstreamCommit = (await text("vendor/activitywatch/UPSTREAM_COMMIT")).trim();
+requireCondition(/^[0-9a-f]{40}$/.test(upstreamCommit), "ActivityWatch UPSTREAM_COMMIT must be a full commit SHA");
+const vendorReadme = await text("vendor/activitywatch/README.md");
+requireCondition(vendorReadme.includes("Mozilla Public License 2.0"), "ActivityWatch README must identify MPL-2.0");
+if (vendorReadme.includes("repository root `LICENSE`")) {
+  warnings.push(
+    "handoff: vendor/activitywatch/README.md still points to the root LICENSE; its owner must point it to LICENSES/MPL-2.0.txt",
+  );
+}
+
+const packageJson = JSON.parse(await text("package.json"));
+const tauriConfig = JSON.parse(await text("src-tauri/tauri.conf.json"));
+const cargoToml = await text("src-tauri/Cargo.toml");
+const cargoVersion = cargoToml.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
+const cargoLicense = cargoToml.match(/^license\s*=\s*"([^"]+)"/m)?.[1];
+const manifestProblems = [];
+
+for (const [name, value] of [
+  ["package.json", packageJson.version],
+  ["src-tauri/Cargo.toml", cargoVersion],
+  ["src-tauri/tauri.conf.json", tauriConfig.version],
+]) {
+  if (value !== expected.version) manifestProblems.push(`${name} version is ${value}; expected ${expected.version}`);
+}
+for (const [name, value] of [
+  ["package.json", packageJson.license],
+  ["src-tauri/Cargo.toml", cargoLicense],
+]) {
+  if (value !== expected.licenseId) manifestProblems.push(`${name} license is ${value}; expected ${expected.licenseId}`);
+}
+
+requireCondition(
+  Array.isArray(tauriConfig.bundle?.resources) && tauriConfig.bundle.resources.includes("resources/**/*"),
+  "Tauri bundle must include resources/**/* so packaged legal terms are distributed",
+);
+
+if (manifestProblems.length > 0) {
+  const prefix = strictManifests ? "" : "handoff: ";
+  (strictManifests ? errors : warnings).push(...manifestProblems.map((problem) => prefix + problem));
+}
+
+for (const warning of warnings) console.warn(`warning: ${warning}`);
+if (errors.length > 0) {
+  for (const error of errors) console.error(`error: ${error}`);
+  process.exitCode = 1;
+} else {
+  const mode = strictManifests ? "strict" : "handoff-aware";
+  console.log(`License boundaries and packaged notices validated (${mode} mode).`);
+}
