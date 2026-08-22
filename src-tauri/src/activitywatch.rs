@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration as StdDuration;
+use std::time::{Duration as StdDuration, Instant};
 use uuid::Uuid;
 
 const PORT_START: u16 = 5610;
@@ -21,6 +21,7 @@ const PROFILE_NAME: &str = "enso-time";
 const LEGACY_APP_NAME: &str = "activitywatch";
 const PROFILED_APP_NAME: &str = "activitywatch-enso-time";
 const WATCHER_REGISTRATION_TIMEOUT: StdDuration = StdDuration::from_secs(20);
+const WATCHER_STALE_TIMEOUT: StdDuration = StdDuration::from_secs(45);
 
 struct ManagedWatcher {
     child: Child,
@@ -142,6 +143,10 @@ pub struct ActivityWatchRuntime {
     server_thread: Mutex<Option<JoinHandle<()>>>,
     capture_issue: Arc<Mutex<Option<CaptureIssueCode>>>,
     capture_titles: AtomicBool,
+    shutdown_started: AtomicBool,
+    watcher_lifecycle: Mutex<()>,
+    window_health: Mutex<Option<WatcherHealth>>,
+    afk_health: Mutex<Option<WatcherHealth>>,
     window_watcher: Arc<Mutex<Option<ManagedWatcher>>>,
     afk_watcher: Arc<Mutex<Option<ManagedWatcher>>>,
     resource_dir: PathBuf,
@@ -167,6 +172,13 @@ struct WatcherBaseline {
     hostname: String,
     bucket_type: &'static str,
     snapshot: Option<BucketSnapshot>,
+}
+
+#[derive(Debug, Clone)]
+struct WatcherHealth {
+    baseline: WatcherBaseline,
+    last_snapshot: BucketSnapshot,
+    last_progress: Instant,
 }
 
 impl ActivityWatchRuntime {
@@ -212,6 +224,10 @@ impl ActivityWatchRuntime {
             server_thread: Mutex::new(None),
             capture_issue,
             capture_titles: AtomicBool::new(false),
+            shutdown_started: AtomicBool::new(false),
+            watcher_lifecycle: Mutex::new(()),
+            window_health: Mutex::new(None),
+            afk_health: Mutex::new(None),
             window_watcher,
             afk_watcher,
             resource_dir,
@@ -231,6 +247,9 @@ impl ActivityWatchRuntime {
     }
 
     fn launch_server(&self) -> Result<(), String> {
+        if self.shutdown_started.load(Ordering::Acquire) {
+            return Err("El runtime de captura ya se cerró".into());
+        }
         let server_datastore = self.datastore()?;
         self.port.store(0, Ordering::Release);
         self.server_ready.store(false, Ordering::Release);
@@ -321,6 +340,13 @@ impl ActivityWatchRuntime {
     }
 
     pub fn start_watchers(&self, capture_titles: bool) -> Result<(), String> {
+        let _lifecycle = self
+            .watcher_lifecycle
+            .lock()
+            .map_err(|_| "No se pudo coordinar el capturador".to_string())?;
+        if self.shutdown_started.load(Ordering::Acquire) {
+            return Err("El runtime de captura ya se cerró".into());
+        }
         self.start_watchers_with_timeout(capture_titles, WATCHER_REGISTRATION_TIMEOUT)
     }
 
@@ -337,12 +363,12 @@ impl ActivityWatchRuntime {
         let afk_baseline = self.required_watcher_baseline(WatcherKind::Afk)?;
         if let Err(error) = self.start_watcher(WatcherKind::Window, port, capture_titles) {
             self.set_capture_issue(error.code);
-            let _ = self.stop_watchers();
+            let _ = self.stop_watchers_unlocked();
             return Err(error.message);
         }
         if let Err(error) = self.start_watcher(WatcherKind::Afk, port, capture_titles) {
             self.set_capture_issue(error.code);
-            let _ = self.stop_watchers();
+            let _ = self.stop_watchers_unlocked();
             return Err(error.message);
         }
         let result = self.await_watcher_progress(
@@ -359,6 +385,10 @@ impl ActivityWatchRuntime {
     }
 
     pub fn restart_window_watcher(&self, capture_titles: bool) -> Result<(), String> {
+        let _lifecycle = self
+            .watcher_lifecycle
+            .lock()
+            .map_err(|_| "No se pudo coordinar el capturador".to_string())?;
         // Never stop a healthy watcher until Rocket has confirmed that the private
         // loopback endpoint is ours. This also closes the bind/start TOCTOU window.
         let port = self.ready_port().map_err(|error| {
@@ -369,7 +399,7 @@ impl ActivityWatchRuntime {
         terminate_slot(&self.window_watcher)?;
         if let Err(error) = self.start_watcher(WatcherKind::Window, port, capture_titles) {
             self.set_capture_issue(error.code);
-            let _ = self.stop_watchers();
+            let _ = self.stop_watchers_unlocked();
             return Err(error.message);
         }
         let result = self.await_watcher_progress(
@@ -391,15 +421,32 @@ impl ActivityWatchRuntime {
     }
 
     pub fn stop_watchers(&self) -> Result<(), String> {
+        let _lifecycle = self
+            .watcher_lifecycle
+            .lock()
+            .map_err(|_| "No se pudo coordinar el capturador".to_string())?;
+        self.stop_watchers_unlocked()
+    }
+
+    fn stop_watchers_unlocked(&self) -> Result<(), String> {
         let window_result = terminate_slot(&self.window_watcher);
         let afk_result = terminate_slot(&self.afk_watcher);
+        self.clear_watcher_health();
         window_result.and(afk_result)
     }
 
     pub fn watcher_statuses(&self) -> (String, String) {
+        let Ok(_lifecycle) = self.watcher_lifecycle.lock() else {
+            self.set_capture_issue(CaptureIssueCode::ServerUnavailable);
+            return ("stopped".into(), "stopped".into());
+        };
+        self.watcher_statuses_with_timeout(WATCHER_STALE_TIMEOUT)
+    }
+
+    fn watcher_statuses_with_timeout(&self, stale_timeout: StdDuration) -> (String, String) {
         if self.server_error().is_some() {
             self.set_capture_issue(CaptureIssueCode::ServerUnavailable);
-            let _ = self.stop_watchers();
+            let _ = self.stop_watchers_unlocked();
         }
         let window = inspect_watcher(
             &self.window_watcher,
@@ -413,7 +460,19 @@ impl ActivityWatchRuntime {
         );
         if let Some(issue) = window.issue.or(afk.issue) {
             self.set_capture_issue(issue);
-            let _ = self.stop_watchers();
+            let _ = self.stop_watchers_unlocked();
+            return ("stopped".into(), "stopped".into());
+        }
+        if window.status == "running" && afk.status == "running" {
+            for kind in [WatcherKind::Window, WatcherKind::Afk] {
+                match self.refresh_watcher_health(kind, stale_timeout) {
+                    Ok(false) => {}
+                    Ok(true) | Err(_) => {
+                        self.fail_capture(kind.unavailable_code());
+                        return ("stopped".into(), "stopped".into());
+                    }
+                }
+            }
         }
         (window.status, afk.status)
     }
@@ -749,6 +808,12 @@ impl ActivityWatchRuntime {
                 };
             }
             if healthy.iter().all(|value| *value) {
+                for (kind, baseline) in baselines {
+                    if let Err(error) = self.record_watcher_health(*kind, baseline.clone()) {
+                        self.fail_capture(kind.unavailable_code());
+                        return Err(error);
+                    }
+                }
                 self.clear_capture_issue();
                 return Ok(());
             }
@@ -803,6 +868,71 @@ impl ActivityWatchRuntime {
         })
     }
 
+    fn record_watcher_health(
+        &self,
+        kind: WatcherKind,
+        baseline: WatcherBaseline,
+    ) -> Result<(), String> {
+        let snapshot = self
+            .bucket_snapshot(&baseline.bucket_id)?
+            .filter(|snapshot| baseline.matches(snapshot))
+            .ok_or_else(|| {
+                format!(
+                    "El capturador {} no registró su bucket privado esperado",
+                    kind.label()
+                )
+            })?;
+        *self
+            .health_slot(kind)
+            .lock()
+            .map_err(|_| "No se pudo registrar la salud del capturador".to_string())? =
+            Some(WatcherHealth {
+                baseline,
+                last_snapshot: snapshot,
+                last_progress: Instant::now(),
+            });
+        Ok(())
+    }
+
+    fn refresh_watcher_health(
+        &self,
+        kind: WatcherKind,
+        stale_timeout: StdDuration,
+    ) -> Result<bool, String> {
+        let mut slot = self
+            .health_slot(kind)
+            .lock()
+            .map_err(|_| "No se pudo consultar la salud del capturador".to_string())?;
+        let Some(health) = slot.as_mut() else {
+            // A watcher can be observed between spawn and its verified first
+            // heartbeat. Startup verification remains authoritative then.
+            return Ok(false);
+        };
+        if let Some(snapshot) = self.bucket_snapshot(&health.baseline.bucket_id)? {
+            if health.baseline.matches(&snapshot) && snapshot != health.last_snapshot {
+                health.last_snapshot = snapshot;
+                health.last_progress = Instant::now();
+                return Ok(false);
+            }
+        }
+        Ok(health.last_progress.elapsed() >= stale_timeout)
+    }
+
+    fn health_slot(&self, kind: WatcherKind) -> &Mutex<Option<WatcherHealth>> {
+        match kind {
+            WatcherKind::Window => &self.window_health,
+            WatcherKind::Afk => &self.afk_health,
+        }
+    }
+
+    fn clear_watcher_health(&self) {
+        for kind in [WatcherKind::Window, WatcherKind::Afk] {
+            if let Ok(mut slot) = self.health_slot(kind).lock() {
+                *slot = None;
+            }
+        }
+    }
+
     fn bucket_snapshot(&self, bucket_id: &str) -> Result<Option<BucketSnapshot>, String> {
         let datastore = self.datastore()?;
         let buckets = safe_datastore(|| datastore.get_buckets())?;
@@ -823,7 +953,7 @@ impl ActivityWatchRuntime {
 
     fn fail_capture(&self, issue: CaptureIssueCode) {
         self.set_capture_issue(issue);
-        let _ = self.stop_watchers();
+        let _ = self.stop_watchers_unlocked();
     }
 
     fn set_capture_issue(&self, issue: CaptureIssueCode) {
@@ -839,10 +969,17 @@ impl ActivityWatchRuntime {
     }
 
     fn recreate_datastore_securely(&self) -> Result<(), String> {
+        let _lifecycle = self
+            .watcher_lifecycle
+            .lock()
+            .map_err(|_| "No se pudo coordinar el mantenimiento".to_string())?;
+        if self.shutdown_started.load(Ordering::Acquire) {
+            return Err("El runtime de captura ya se cerró".into());
+        }
         // The vendored datastore keeps an immediate transaction open between
         // requests. Stop its only server consumer and close the worker before
         // VACUUM so secure deletion is real instead of a best-effort no-op.
-        self.stop_watchers()?;
+        self.stop_watchers_unlocked()?;
         self.shutdown_server();
         let datastore = self
             .datastore
@@ -871,6 +1008,42 @@ impl ActivityWatchRuntime {
             return Err(error);
         }
         compact_result
+    }
+
+    pub fn shutdown(&self) -> Result<(), String> {
+        if self.shutdown_started.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
+        let _lifecycle = self
+            .watcher_lifecycle
+            .lock()
+            .map_err(|_| "No se pudo coordinar el cierre del capturador".to_string())?;
+        let mut errors = Vec::new();
+        if let Err(error) = self.stop_watchers_unlocked() {
+            errors.push(error);
+        }
+        self.shutdown_server();
+        match self.datastore.lock() {
+            Ok(mut slot) => {
+                if let Some(datastore) = slot.take() {
+                    if catch_unwind(AssertUnwindSafe(|| datastore.close())).is_err() {
+                        errors.push("No se pudo cerrar el worker del almacén de actividad".into());
+                    }
+                }
+            }
+            Err(_) => errors.push("No se pudo cerrar el almacén de actividad".into()),
+        }
+        if let Err(error) = compact_activity_database(&self.database_path) {
+            errors.push(error);
+        }
+        if let Err(error) = checkpoint_and_remove_sqlite_sidecars(&self.database_path) {
+            errors.push(error);
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
     }
 
     fn shutdown_server(&self) {
@@ -911,15 +1084,7 @@ impl WatcherBaseline {
 
 impl Drop for ActivityWatchRuntime {
     fn drop(&mut self) {
-        let _ = self.stop_watchers();
-        self.shutdown_server();
-        if let Ok(mut slot) = self.datastore.lock() {
-            if let Some(datastore) = slot.take() {
-                datastore.close();
-            }
-        }
-        let _ = compact_activity_database(&self.database_path);
-        let _ = checkpoint_and_remove_sqlite_sidecars(&self.database_path);
+        let _ = self.shutdown();
     }
 }
 
@@ -1450,9 +1615,18 @@ mod tests {
 
     #[test]
     fn retries_private_bind_without_touching_official_port() {
-        let _official = TcpListener::bind((Ipv4Addr::LOCALHOST, 5600)).unwrap();
-        let _first = TcpListener::bind((Ipv4Addr::LOCALHOST, PORT_START)).unwrap();
-        let _second = TcpListener::bind((Ipv4Addr::LOCALHOST, PORT_START + 1)).unwrap();
+        // An actual ActivityWatch/Ensō process may already own one of these ports
+        // on a developer machine. Reserve every candidate that is currently free;
+        // candidates we cannot reserve are already exercising the same bind retry.
+        let _official = TcpListener::bind((Ipv4Addr::LOCALHOST, 5600)).ok();
+        let reservations: Vec<_> = (PORT_START..=PORT_START + 2)
+            .filter_map(|port| {
+                TcpListener::bind((Ipv4Addr::LOCALHOST, port))
+                    .ok()
+                    .map(|listener| (port, listener))
+            })
+            .collect();
+        assert!(!reservations.is_empty());
         let temp = TempDir::new().unwrap();
         let runtime = ActivityWatchRuntime::start(
             &temp.path().join("data"),
@@ -1461,7 +1635,10 @@ mod tests {
         .unwrap();
         let port = wait_until_ready(&runtime);
         assert!((PORT_START..=PORT_END).contains(&port));
-        assert!(port >= PORT_START + 2);
+        assert!(!reservations
+            .iter()
+            .any(|(reserved_port, _)| *reserved_port == port));
+        assert_ne!(port, 5600);
     }
 
     #[test]
@@ -1621,6 +1798,11 @@ mod tests {
             runtime.watcher_statuses(),
             ("running".into(), "running".into())
         );
+        std::thread::sleep(StdDuration::from_millis(250));
+        assert_eq!(
+            runtime.watcher_statuses_with_timeout(StdDuration::from_millis(150)),
+            ("running".into(), "running".into())
+        );
         assert_eq!(runtime.capture_issue(), None);
         assert!(runtime
             .bucket_snapshot(&runtime.watcher_bucket_id(WatcherKind::Window))
@@ -1683,10 +1865,13 @@ mod tests {
         assert!(!private_logs.exists());
         assert!(runtime.profile.diagnostics.exists());
         let database_path = runtime.database_path.clone();
-        drop(runtime);
+        runtime.shutdown().unwrap();
+        runtime.shutdown().unwrap();
+        assert_eq!(runtime.port_if_ready(), None);
+        assert!(runtime.start_watchers(false).is_err());
 
         TcpListener::bind((Ipv4Addr::LOCALHOST, port))
-            .expect("the private Rocket listener must stop with the Ensō runtime");
+            .expect("explicit shutdown must release the private Rocket listener");
         assert!(!sqlite_sidecar_path(&database_path, "-wal").exists());
         assert!(!sqlite_sidecar_path(&database_path, "-shm").exists());
     }
@@ -1710,6 +1895,40 @@ mod tests {
             runtime.watcher_statuses(),
             ("stopped".into(), "stopped".into())
         );
+    }
+
+    #[test]
+    fn healthy_then_disconnected_watchers_become_stale_and_can_retry() {
+        let temp = TempDir::new().unwrap();
+        let resources = compiled_watcher_resources(temp.path(), "healthy_then_disconnected");
+        let runtime = ActivityWatchRuntime::start(&temp.path().join("data"), resources).unwrap();
+        wait_until_ready(&runtime);
+        runtime.start_watchers(false).unwrap();
+        assert_eq!(
+            runtime.watcher_statuses(),
+            ("running".into(), "running".into())
+        );
+
+        std::thread::sleep(StdDuration::from_millis(250));
+        assert!(watcher_exit_status(&runtime.window_watcher)
+            .unwrap()
+            .is_none());
+        assert!(watcher_exit_status(&runtime.afk_watcher).unwrap().is_none());
+        assert_eq!(
+            runtime.watcher_statuses_with_timeout(StdDuration::from_millis(150)),
+            ("stopped".into(), "stopped".into())
+        );
+        assert_eq!(
+            runtime.capture_issue(),
+            Some(CaptureIssueCode::WindowWatcherUnavailable)
+        );
+
+        runtime.start_watchers(false).unwrap();
+        assert_eq!(
+            runtime.watcher_statuses(),
+            ("running".into(), "running".into())
+        );
+        assert_eq!(runtime.capture_issue(), None);
     }
 
     #[test]
@@ -1838,7 +2057,7 @@ fn main() {{
         eprintln!("Another instance is already running, quitting.");
         std::process::exit(255);
     }}
-    if mode == "healthy" {{
+    if mode == "healthy" || mode == "healthy_then_disconnected" {{
         let args: Vec<String> = env::args().collect();
         let port_index = args.iter().position(|arg| arg == "--port").unwrap();
         let port = args[port_index + 1].parse::<u16>().unwrap();
@@ -1849,14 +2068,20 @@ fn main() {{
         let key = env::var("ENSO_TEST_API_KEY").unwrap();
         let body = format!(r#"{{{{"client":"{{}}","hostname":"{{}}","type":"{{}}"}}}}"#, client, hostname, bucket_type);
         request(port, "POST", &format!("/api/0/buckets/{{}}", bucket), &body, &key);
-    let event = r#"{{"timestamp":"2026-08-21T12:00:00Z","duration":1.0,"data":{{"app":"fixture","title":"enso-runtime-sensitive-marker","status":"not-afk"}}}}"#;
-        request(
-            port,
-            "POST",
-            &format!("/api/0/buckets/{{}}/heartbeat?pulsetime=1", bucket),
-            event,
-            &key
-        );
+        let mut pulse = 0_u64;
+        loop {{
+            let event = format!(r#"{{{{"timestamp":"2026-08-21T12:00:00Z","duration":1.0,"data":{{{{"app":"fixture","title":"enso-runtime-sensitive-marker","status":"not-afk","process":{{}},"pulse":{{}}}}}}}}}}"#, std::process::id(), pulse);
+            request(
+                port,
+                "POST",
+                &format!("/api/0/buckets/{{}}/heartbeat?pulsetime=1", bucket),
+                &event,
+                &key
+            );
+            pulse += 1;
+            if mode == "healthy_then_disconnected" {{ break; }}
+            thread::sleep(Duration::from_millis(100));
+        }}
     }}
     loop {{ thread::sleep(Duration::from_secs(30)); }}
 }}
