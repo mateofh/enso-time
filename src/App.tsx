@@ -387,7 +387,7 @@ export default function App() {
       setSettings(nextSettings); setStatus(nextStatus); setBlocks(nextBlocks); setCheckIns(nextCheckIns); setStudy(nextStudy); setWorkflowIntakes(nextWorkflowIntakes);
       setDiagnostic(await bridge.generateDiagnostic(nextStudy.selectedDays));
       if (bridge.shouldResumeAutomationBlueprint()) {
-        const intake = nextWorkflowIntakes.find((item) => nextCheckIns.filter((checkIn) => checkIn.status === "answered" && checkIn.repetitive && checkIn.activityLabel === item.candidateLabel).length >= 2);
+        const intake = nextWorkflowIntakes[0];
         if (intake) {
           setWorkflowCandidate({ id: intake.candidateId, activityLabel: intake.candidateLabel, estimatedWeeklyHours: 0, weeklyFrequency: 0, impactScore: 0, feasibilityScore: 0, riskScore: 0, priorityScore: 0, evidence: [] });
           setView("blueprint");
@@ -455,7 +455,7 @@ export default function App() {
     setNotice({ kind: "success", message: copy.workflow.savedTitle });
     return saved;
   };
-  const blueprintCandidate = workflowIntakes.find((intake) => checkIns.filter((item) => item.status === "answered" && item.repetitive && item.activityLabel === intake.candidateLabel).length >= 2);
+  const blueprintCandidate = workflowIntakes[0];
   const blueprintEntry: AutomationCandidateV1 | null = blueprintCandidate ? { id: blueprintCandidate.candidateId, activityLabel: blueprintCandidate.candidateLabel, estimatedWeeklyHours: 0, weeklyFrequency: 0, impactScore: 0, feasibilityScore: 0, riskScore: 0, priorityScore: 0, evidence: [] } : null;
 
   return (

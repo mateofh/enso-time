@@ -9,7 +9,8 @@ import type {
   WorkflowIntakeV1,
 } from "./types";
 
-const bounded = (value: number) => Math.max(0, Math.min(100, Math.round(value)));
+const clamp = (value: number) => Math.max(0, Math.min(100, value));
+const bounded = (value: number) => Math.round(clamp(value));
 const hasText = (value: string | undefined) => Boolean(value?.trim());
 
 export function sourceFromIntake(intake: WorkflowIntakeV1): BlueprintSourceMapV1 {
@@ -72,21 +73,33 @@ export function computeEstimates(draft: AutomationBlueprintDraftV1, source: Blue
   const automatable = draft.stepBoundaries.filter((item) => item.disposition === "automatable").length;
   const human = total - automatable;
   const runs = draft.runsPerWeek ?? 0;
-  const verification = draft.verificationMinutesPerRun ?? 0;
+  const verificationMinutes = draft.verificationMinutesPerRun ?? 0;
   const weeklyBaselineMinutes = Math.round(runs * source.minutesPerRun);
-  const weeklyResidualMinutes = Math.round(runs * ((source.minutesPerRun * human / total) + verification));
+  const weeklyResidualMinutes = Math.round(runs * ((source.minutesPerRun * human / total) + verificationMinutes));
   const weeklySavingsMinutes = Math.max(0, Math.round(weeklyBaselineMinutes - weeklyResidualMinutes));
-  const sensitivity: Record<DataSensitivityV1, number> = { unassessed: 25, low: 5, moderate: 15, high: 30 };
-  const sideEffects: Record<SideEffectLevelV1, number> = { unassessed: 25, none: 0, reversible: 8, irreversible: 35 };
-  const verificationBurden: Record<VerificationModeV1, number> = { unassessed: 20, none: 0, sample: 7, "every-run": 4 };
-  const complexity = bounded(24 + (total * 5));
-  const effort = bounded(complexity + (draft.sideEffectLevel === "irreversible" ? 20 : 0));
-  const operationalRisk = bounded(sensitivity[draft.dataSensitivity] + sideEffects[draft.sideEffectLevel] + verificationBurden[draft.verificationMode] + (hasText(draft.recoveryPlan) ? 0 : 20));
-  const confidence = bounded(31 + Math.min(18, evidence.repeatedObservations * 4.5) + (draft.stepBoundaries.filter((item) => item.disposition !== "unassessed").length === total ? 20 : 0) + (draft.verificationMode !== "unassessed" ? 5 : 0) + (hasText(draft.recoveryPlan) ? 15 : 0));
-  return { weeklyBaselineMinutes, weeklyResidualMinutes, weeklySavingsMinutes, effort, operationalRisk, confidence, components: { complexity, sensitivity: sensitivity[draft.dataSensitivity], sideEffects: sideEffects[draft.sideEffectLevel], verification: verificationBurden[draft.verificationMode], observations: evidence.repeatedObservations } };
+  const effortSensitivity: Record<DataSensitivityV1, number> = { unassessed: 8, low: 0, moderate: 4, high: 8 };
+  const riskSensitivity: Record<DataSensitivityV1, number> = { unassessed: 20, low: 0, moderate: 10, high: 20 };
+  const effortEffect: Record<SideEffectLevelV1, number> = { unassessed: 12, none: 0, reversible: 6, irreversible: 12 };
+  const riskEffect: Record<SideEffectLevelV1, number> = { unassessed: 28, none: 0, reversible: 12, irreversible: 28 };
+  const verification: Record<VerificationModeV1, number> = { unassessed: 18, none: 18, sample: 8, "every-run": 0 };
+  const humanShare = human / total;
+  const toolComplexity = 6 * Math.min(source.tools.length, 6);
+  const stepComplexity = 3 * Math.min(total, 10);
+  const effort = bounded(10 + toolComplexity + stepComplexity + (15 * humanShare) + effortSensitivity[draft.dataSensitivity] + effortEffect[draft.sideEffectLevel]);
+  const recoveryAbsent = hasText(draft.recoveryPlan) ? 0 : 16;
+  const operationalRisk = bounded((18 * humanShare) + riskSensitivity[draft.dataSensitivity] + riskEffect[draft.sideEffectLevel] + verification[draft.verificationMode] + recoveryAbsent);
+  const completeness = computeCompleteness(draft, source).score;
+  const observationComponent = Math.min(30, 6 * evidence.repeatedObservations);
+  const durationComponent = Math.round(20 * Math.min(evidence.observedDays, 14) / 14);
+  const qualityComponent = Math.round(20 * clamp(evidence.rulesQuality));
+  const frequencyAgreement = Math.max(0, 1 - Math.abs(evidence.observedWeeklyFrequency - runs) / Math.max(1, runs));
+  const frequencyComponent = Math.round(10 * frequencyAgreement);
+  const completenessComponent = Math.round(20 * completeness / 100);
+  const confidence = bounded(observationComponent + durationComponent + qualityComponent + frequencyComponent + completenessComponent);
+  return { weeklyBaselineMinutes, weeklyResidualMinutes, weeklySavingsMinutes, effort, operationalRisk, confidence, components: { toolComplexity, stepComplexity, humanShare, effortSensitivity: effortSensitivity[draft.dataSensitivity], effortEffect: effortEffect[draft.sideEffectLevel], riskSensitivity: riskSensitivity[draft.dataSensitivity], riskEffect: riskEffect[draft.sideEffectLevel], verification: verification[draft.verificationMode], recoveryAbsent, observations: evidence.repeatedObservations, observedDays: evidence.observedDays, rulesQuality: evidence.rulesQuality, observedWeeklyFrequency: evidence.observedWeeklyFrequency, frequencyAgreement, completeness } };
 }
 
-export function buildPreviewBlueprint(intake: WorkflowIntakeV1, draft = emptyBlueprintDraft(intake), evidence: BlueprintEvidenceV1 = { observed: ["Repeated check-in activity", "Local timeline pattern"], declared: ["Workflow intake supplied by you"], repeatedObservations: 3 }): AutomationBlueprintV1 {
+export function buildPreviewBlueprint(intake: WorkflowIntakeV1, draft = emptyBlueprintDraft(intake), evidence: BlueprintEvidenceV1 = { observed: ["Repeated check-in activity", "Local timeline pattern"], declared: ["Workflow intake supplied by you"], repeatedObservations: 3, observedDays: 7, rulesQuality: 1, observedWeeklyFrequency: draft.runsPerWeek ?? 0 }): AutomationBlueprintV1 {
   const source = sourceFromIntake(intake);
   const completeness = computeCompleteness(draft, source);
   const estimates = computeEstimates(draft, source, evidence);
