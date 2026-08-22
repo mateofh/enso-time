@@ -31,7 +31,7 @@
     "active": true,
     "targets": "all",
     "category": "Productivity",
-    "copyright": "Copyright © 2026 Ensō",
+    "copyright": "Copyright © 2026 Mateo (@mateofh)",
     "shortDescription": "Private time diagnosis and automation guidance",
     "longDescription": "Ensō Time observes desktop activity locally, asks for missing context, and produces evidence-based productivity and automation guidance.",
     "resources": ["resources/**/*"],

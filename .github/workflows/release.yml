@@ -4,68 +4,86 @@ on:
   push:
     tags:
       - "v*"
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: Existing release tag (for example v0.1.0-beta.1)
-        required: true
-        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref_name }}-${{ inputs.tag }}
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   build:
     name: Build ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
           - label: macOS Apple Silicon
-            os: macos-14
+            os: macos-15
             rust_target: aarch64-apple-darwin
             aw_target: macos-arm64
+            bundles: dmg
           - label: macOS Intel
-            os: macos-14
+            os: macos-15-intel
             rust_target: x86_64-apple-darwin
             aw_target: macos-x86_64
+            bundles: dmg
           - label: Windows x64
             os: windows-2025
             rust_target: x86_64-pc-windows-msvc
             aw_target: windows-x86_64
-    runs-on: ${{ matrix.os }}
+            bundles: msi,nsis
     env:
-      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      RELEASE_TAG: ${{ github.ref_name }}
+      AW_TARGET: ${{ matrix.aw_target }}
+      RUST_TARGET: ${{ matrix.rust_target }}
 
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Check out tagged source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
 
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - name: Set up Rust target
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           targets: ${{ matrix.rust_target }}
 
-      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           workspaces: src-tauri
-          key: ${{ matrix.rust_target }}
+          key: release-${{ matrix.rust_target }}
 
-      - run: npm ci
+      - name: Install JavaScript dependencies
+        run: npm ci
 
-      - name: Verify tag matches package version
+      - name: Validate release version and license metadata
         shell: bash
         run: |
-          node -e "const version=require('./package.json').version; const expected='v'+version; if(process.env.RELEASE_TAG!==expected){console.error('Expected tag '+expected+', received '+process.env.RELEASE_TAG); process.exit(1)}"
+          node scripts/license-check.mjs --strict-manifests
+          node <<'NODE'
+          const fs = require("node:fs");
+          const packageVersion = require("./package.json").version;
+          const tauriVersion = JSON.parse(fs.readFileSync("src-tauri/tauri.conf.json", "utf8")).version;
+          const cargo = fs.readFileSync("src-tauri/Cargo.toml", "utf8");
+          const cargoVersion = cargo.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
+          const expectedTag = "v" + packageVersion;
+          const values = { packageVersion, tauriVersion, cargoVersion, releaseTag: process.env.RELEASE_TAG };
+          if (process.env.RELEASE_TAG !== expectedTag || tauriVersion !== packageVersion || cargoVersion !== packageVersion) {
+            console.error("Release version mismatch:", values);
+            process.exit(1);
+          }
+          NODE
 
       - name: Validate application and ActivityWatch preparer
         run: |
@@ -76,92 +94,87 @@ jobs:
         run: node scripts/prepare-activitywatch.mjs --target ${{ matrix.aw_target }}
 
       - name: Run Rust tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked --target ${{ matrix.rust_target }}
 
-      - name: Configure optional Apple signing identity
-        if: runner.os != 'Windows'
+      - name: Force ad-hoc macOS signing and no certificate configuration
         shell: bash
-        env:
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
-          node -e "const fs=require('node:fs'); const identity=process.env.APPLE_SIGNING_IDENTITY; const config=identity ? {bundle:{macOS:{signingIdentity:identity}}} : {}; fs.writeFileSync('src-tauri/ci-signing.json', JSON.stringify(config));"
+          node <<'NODE'
+          const fs = require("node:fs");
+          const config = process.platform === "darwin"
+            ? { bundle: { macOS: { signingIdentity: "-" } } }
+            : {};
+          fs.writeFileSync("src-tauri/ci-bundle.json", JSON.stringify(config));
+          NODE
 
-      - name: Import optional Windows code-signing certificate
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE)) {
-            '{}' | Set-Content -Encoding utf8 src-tauri/ci-signing.json
-            Write-Host 'No Windows certificate configured; producing an unsigned installer.'
-            exit 0
-          }
-          $certificatePath = Join-Path $env:RUNNER_TEMP 'enso-time-signing.pfx'
-          [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
-          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
-          $certificate = Import-PfxCertificate -FilePath $certificatePath -CertStoreLocation Cert:\CurrentUser\My -Password $password
-          @{ bundle = @{ windows = @{ certificateThumbprint = $certificate.Thumbprint } } } |
-            ConvertTo-Json -Depth 4 |
-            Set-Content -Encoding utf8 src-tauri/ci-signing.json
-          Remove-Item $certificatePath -Force
-
-      - name: Build Tauri installer
+      - name: Build Tauri installers
         uses: tauri-apps/tauri-action@fce9c6108b31ea247710505d3aaaa893ee6768d4 # v0
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tauriScript: npm run tauri
-          args: --target ${{ matrix.rust_target }} --config src-tauri/ci-signing.json
+          args: --target ${{ matrix.rust_target }} --bundles ${{ matrix.bundles }} --config src-tauri/ci-bundle.json
 
-      - name: Upload macOS installer
+      - name: Stage macOS DMG
         if: runner.os == 'macOS'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: enso-time-${{ matrix.aw_target }}
-          path: src-tauri/target/${{ matrix.rust_target }}/release/bundle/**/*.dmg
-          if-no-files-found: error
-          compression-level: 0
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          bundle_dir="src-tauri/target/${RUST_TARGET}/release/bundle/dmg"
+          test "$(find "$bundle_dir" -type f -name '*.dmg' | wc -l | tr -d ' ')" -eq 1
+          dmg_file="$(find "$bundle_dir" -type f -name '*.dmg' -print -quit)"
+          cp "$dmg_file" "release-assets/enso-time-${RELEASE_TAG#v}-${AW_TARGET}.dmg"
 
-      - name: Upload Windows installers
+      - name: Stage Windows MSI and NSIS installers
         if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release-assets | Out-Null
+          $bundle = "src-tauri/target/$env:RUST_TARGET/release/bundle"
+          $msi = @(Get-ChildItem "$bundle/msi" -File -Filter *.msi)
+          $nsis = @(Get-ChildItem "$bundle/nsis" -File -Filter *.exe)
+          if ($msi.Count -ne 1 -or $nsis.Count -ne 1) {
+            throw "Expected exactly one MSI and one NSIS installer; found $($msi.Count) MSI and $($nsis.Count) NSIS."
+          }
+          $version = $env:RELEASE_TAG.TrimStart("v")
+          Copy-Item $msi[0].FullName "release-assets/enso-time-$version-${env:AW_TARGET}.msi"
+          Copy-Item $nsis[0].FullName "release-assets/enso-time-$version-${env:AW_TARGET}.exe"
+
+      - name: Upload installers
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: enso-time-${{ matrix.aw_target }}
-          path: |
-            src-tauri/target/${{ matrix.rust_target }}/release/bundle/**/*.msi
-            src-tauri/target/${{ matrix.rust_target }}/release/bundle/**/*.exe
+          path: release-assets/*
           if-no-files-found: error
           compression-level: 0
+          retention-days: 14
 
   release:
-    name: Publish GitHub Release
+    name: Publish GitHub prerelease
     needs: build
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: write
     env:
-      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      RELEASE_TAG: ${{ github.ref_name }}
+
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - name: Download installers
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: release-assets
 
       - name: Generate SHA-256 manifest
         shell: bash
         run: |
+          mapfile -d '' files < <(find release-assets -type f \( -name '*.dmg' -o -name '*.msi' -o -name '*.exe' \) -print0 | sort -z)
+          test "${#files[@]}" -eq 4
+          test "$(printf '%s\n' "${files[@]##*/}" | sort -u | wc -l)" -eq 4
           : > SHA256SUMS
-          while IFS= read -r -d '' file; do
-            hash=$(sha256sum "$file" | cut -d ' ' -f 1)
-            printf '%s  %s\n' "$hash" "$(basename "$file")" >> SHA256SUMS
-          done < <(find release-assets -type f -print0 | sort -z)
+          for file in "${files[@]}"; do
+            sha256sum "$file" | sed "s#  .*#  $(basename "$file")#" >> SHA256SUMS
+          done
           sort -o SHA256SUMS SHA256SUMS
+          test "$(wc -l < SHA256SUMS)" -eq 4
           test -s SHA256SUMS
 
       - name: Publish installers and checksums
@@ -170,8 +183,13 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG }}
           name: Ensō Time ${{ env.RELEASE_TAG }}
           generate_release_notes: true
-          prerelease: ${{ contains(env.RELEASE_TAG, '-') }}
+          prerelease: true
+          make_latest: false
           fail_on_unmatched_files: true
+          body: |
+            Public source-available beta. Use is limited by PolyForm Noncommercial 1.0.0.
+
+            These builds do not use paid signing or notarization certificates. The macOS app is ad-hoc signed for DMG packaging and is not notarized. Windows MSI and NSIS installers are unsigned. Verify downloads against SHA256SUMS.
           files: |
             release-assets/**/*.dmg
             release-assets/**/*.msi
