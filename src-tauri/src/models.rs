@@ -233,11 +233,26 @@ pub struct AutomationCandidateV1 {
     pub evidence: Vec<String>,
 }
 
+pub fn canonicalize_candidate_label(label: &str) -> String {
+    label
+        .trim()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_uppercase() {
+                character.to_ascii_lowercase()
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
 pub fn automation_candidate_id(label: &str) -> String {
     const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
     const FNV_PRIME: u64 = 0x100000001b3;
     let mut hash = FNV_OFFSET_BASIS;
-    for byte in label.trim().as_bytes() {
+    let canonical = canonicalize_candidate_label(label);
+    for byte in canonical.as_bytes() {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(FNV_PRIME);
     }
@@ -513,8 +528,24 @@ mod tests {
             "candidate-a430d84680aabd0b"
         );
         assert_eq!(
+            automation_candidate_id("  HELLO  "),
+            "candidate-a430d84680aabd0b"
+        );
+        assert_eq!(
             automation_candidate_id("  hello  "),
             automation_candidate_id("hello")
+        );
+        assert_eq!(
+            automation_candidate_id("Preparar reporte"),
+            automation_candidate_id("preparar reporte")
+        );
+        assert_eq!(
+            canonicalize_candidate_label("  PREPARAR 🚀 Á  "),
+            "preparar 🚀 Á"
+        );
+        assert_ne!(
+            automation_candidate_id("Área 🚀"),
+            automation_candidate_id("área 🚀")
         );
         let stable_unicode = automation_candidate_id("Conciliación 💸");
         for _ in 0..32 {

@@ -1,4 +1,7 @@
-use crate::models::{iso_now, CheckInAnswer, CheckInV1, SettingsV1, WorkflowIntakeV1};
+use crate::models::{
+    automation_candidate_id, iso_now, parse_utc, CheckInAnswer, CheckInV1, SettingsV1,
+    WorkflowIntakeV1,
+};
 use rusqlite::types::Type;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::path::Path;
@@ -15,7 +18,7 @@ impl LocalStore {
                 format!("No se pudo crear el directorio de datos local: {error}")
             })?;
         }
-        let connection = Connection::open(path).map_err(|error| error.to_string())?;
+        let mut connection = Connection::open(path).map_err(|error| error.to_string())?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -63,10 +66,16 @@ impl LocalStore {
                    created_at TEXT NOT NULL,
                    updated_at TEXT NOT NULL
                  );
-                 CREATE UNIQUE INDEX IF NOT EXISTS workflow_intakes_candidate_unique
-                   ON workflow_intakes(candidate_id);
                  CREATE INDEX IF NOT EXISTS workflow_intakes_updated_idx
                    ON workflow_intakes(updated_at DESC);",
+            )
+            .map_err(|error| error.to_string())?;
+        migrate_workflow_candidate_ids(&mut connection)?;
+        connection
+            .execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS workflow_intakes_candidate_unique
+                   ON workflow_intakes(candidate_id)",
+                [],
             )
             .map_err(|error| error.to_string())?;
         let store = Self {
@@ -405,6 +414,119 @@ impl LocalStore {
     }
 }
 
+#[derive(Debug)]
+struct WorkflowCandidateMigrationRow {
+    rowid: i64,
+    intake_id: String,
+    candidate_id: String,
+    target_candidate_id: String,
+    updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+fn migrate_workflow_candidate_ids(connection: &mut Connection) -> Result<(), String> {
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    let mut rows = {
+        let mut statement = transaction
+            .prepare(
+                "SELECT rowid, id, candidate_id, candidate_label, updated_at
+                 FROM workflow_intakes",
+            )
+            .map_err(|error| error.to_string())?;
+        let values = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        values
+    }
+    .into_iter()
+    .map(
+        |(rowid, intake_id, candidate_id, candidate_label, updated_at)| {
+            let target_candidate_id = automation_candidate_id(&candidate_label);
+            let updated_at = parse_utc(&updated_at).map_err(|error| {
+                format!("El intake {intake_id} tiene updatedAt inválido: {error}")
+            })?;
+            Ok(WorkflowCandidateMigrationRow {
+                rowid,
+                intake_id,
+                candidate_id,
+                target_candidate_id,
+                updated_at,
+            })
+        },
+    )
+    .collect::<Result<Vec<_>, String>>()?;
+
+    rows.sort_by(|left, right| {
+        left.target_candidate_id
+            .cmp(&right.target_candidate_id)
+            .then_with(|| right.updated_at.cmp(&left.updated_at))
+            .then_with(|| left.intake_id.cmp(&right.intake_id))
+            .then_with(|| left.rowid.cmp(&right.rowid))
+    });
+
+    let mut winners = Vec::new();
+    let mut loser_rowids = Vec::new();
+    for row in rows {
+        if winners
+            .last()
+            .is_some_and(|winner: &WorkflowCandidateMigrationRow| {
+                winner.target_candidate_id == row.target_candidate_id
+            })
+        {
+            loser_rowids.push(row.rowid);
+        } else {
+            winners.push(row);
+        }
+    }
+
+    let requires_migration = !loser_rowids.is_empty()
+        || winners
+            .iter()
+            .any(|row| row.candidate_id != row.target_candidate_id);
+    if requires_migration {
+        // Previous releases created this unique index before candidate IDs were
+        // canonical. Rebuild it inside the same transaction so converging IDs and
+        // even legacy ID swaps cannot fail halfway through the migration.
+        transaction
+            .execute("DROP INDEX IF EXISTS workflow_intakes_candidate_unique", [])
+            .map_err(|error| error.to_string())?;
+        for rowid in loser_rowids {
+            transaction
+                .execute("DELETE FROM workflow_intakes WHERE rowid = ?1", [rowid])
+                .map_err(|error| error.to_string())?;
+        }
+
+        for row in &winners {
+            transaction
+                .execute(
+                    "UPDATE workflow_intakes SET candidate_id = ?1 WHERE rowid = ?2",
+                    params![row.target_candidate_id, row.rowid],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        transaction
+            .execute(
+                "CREATE UNIQUE INDEX workflow_intakes_candidate_unique
+                   ON workflow_intakes(candidate_id)",
+                [],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
+    transaction.commit().map_err(|error| error.to_string())
+}
+
 fn workflow_intake_from_row(row: &Row<'_>) -> rusqlite::Result<WorkflowIntakeV1> {
     let tools_json: String = row.get(4)?;
     let steps_json: String = row.get(5)?;
@@ -435,7 +557,8 @@ fn workflow_intake_from_row(row: &Row<'_>) -> rusqlite::Result<WorkflowIntakeV1>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{CheckInAnswer, CheckInV1, WorkflowIntakeV1};
+    use crate::diagnostics::create_diagnostic;
+    use crate::models::{CheckInAnswer, CheckInV1, SettingsV1, WorkflowIntakeV1};
     use std::sync::{Arc, Barrier};
 
     fn store() -> LocalStore {
@@ -626,5 +749,98 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(store.list_workflow_intakes().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn opening_migrates_legacy_candidate_ids_and_keeps_newest_canonical_variant() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("enso-time.sqlite");
+        {
+            let store = LocalStore::open(&path).unwrap();
+
+            let mut older = workflow("older-intake", "Preparar reporte", "2025-01-02T10:00:00Z");
+            older.candidate_id = "candidate-preparar-reporte".into();
+            older.pain_points = "legacy-older-marker".into();
+            store.save_workflow_intake(older).unwrap();
+
+            let mut newest = workflow("newest-intake", "preparar reporte", "2025-01-03T10:00:00Z");
+            newest.candidate_id = "candidate-another-legacy-id".into();
+            newest.created_at = "2025-01-02T09:00:00Z".into();
+            newest.pain_points = "canonical-newest-marker".into();
+            store.save_workflow_intake(newest).unwrap();
+
+            let mut tie_loser = workflow("tie-z", "enviar informe 🚀", "2025-01-04T10:00:00Z");
+            tie_loser.candidate_id = "candidate-tie-z-legacy".into();
+            tie_loser.pain_points = "tie-z-marker".into();
+            store.save_workflow_intake(tie_loser).unwrap();
+
+            let mut tie_winner = workflow("tie-a", "Enviar informe 🚀", "2025-01-04T10:00:00Z");
+            tie_winner.candidate_id = "candidate-tie-a-legacy".into();
+            tie_winner.pain_points = "tie-a-marker".into();
+            store.save_workflow_intake(tie_winner).unwrap();
+        }
+
+        let store = LocalStore::open(&path).unwrap();
+        let items = store.list_workflow_intakes().unwrap();
+        assert_eq!(items.len(), 2);
+
+        let migrated = items
+            .iter()
+            .find(|item| item.candidate_id == automation_candidate_id("Preparar reporte"))
+            .unwrap();
+        assert_eq!(migrated.id, "newest-intake");
+        assert_eq!(migrated.candidate_label, "preparar reporte");
+        assert_eq!(migrated.created_at, "2025-01-02T09:00:00+00:00");
+        assert_eq!(migrated.pain_points, "canonical-newest-marker");
+
+        let tied = items
+            .iter()
+            .find(|item| item.candidate_id == automation_candidate_id("Enviar informe 🚀"))
+            .unwrap();
+        assert_eq!(tied.id, "tie-a");
+        assert_eq!(tied.pain_points, "tie-a-marker");
+
+        let diagnostic = create_diagnostic(
+            &[],
+            &[
+                CheckInV1 {
+                    id: "migration-checkin-1".into(),
+                    interval_start: "2025-01-01T10:00:00Z".into(),
+                    interval_end: "2025-01-01T10:15:00Z".into(),
+                    reason: "ambiguous".into(),
+                    status: "answered".into(),
+                    activity_label: Some("Preparar reporte".into()),
+                    category: Some("admin".into()),
+                    project: None,
+                    repetitive: Some(true),
+                    rules_clear: Some(true),
+                    created_at: "2025-01-01T10:15:00Z".into(),
+                    answered_at: Some("2025-01-01T10:16:00Z".into()),
+                },
+                CheckInV1 {
+                    id: "migration-checkin-2".into(),
+                    interval_start: "2025-01-02T10:00:00Z".into(),
+                    interval_end: "2025-01-02T10:15:00Z".into(),
+                    reason: "ambiguous".into(),
+                    status: "answered".into(),
+                    activity_label: Some("preparar reporte".into()),
+                    category: Some("admin".into()),
+                    project: None,
+                    repetitive: Some(true),
+                    rules_clear: Some(true),
+                    created_at: "2025-01-02T10:15:00Z".into(),
+                    answered_at: Some("2025-01-02T10:16:00Z".into()),
+                },
+            ],
+            7.0,
+            &SettingsV1::default(),
+            &items,
+        );
+        assert!(diagnostic.prompt.contains("canonical-newest-marker"));
+        assert!(!diagnostic.prompt.contains("legacy-older-marker"));
+
+        drop(store);
+        let reopened = LocalStore::open(&path).unwrap();
+        assert_eq!(reopened.list_workflow_intakes().unwrap(), items);
     }
 }
