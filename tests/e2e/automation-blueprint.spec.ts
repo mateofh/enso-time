@@ -44,6 +44,32 @@ const intake = {
   updatedAt: "2026-08-21T12:00:00.000Z",
 };
 
+function makeBlueprint(overrides: Record<string, unknown> = {}) {
+  const sourceIntakeUpdatedAt = intake.updatedAt;
+  return {
+    schemaVersion: 1,
+    id: "blueprint-e2e-v1",
+    candidateId,
+    workflowIntakeId: intake.id,
+    sourceIntakeUpdatedAt,
+    revision: 2,
+    runsPerWeek: 5,
+    stepBoundaries: [
+      { stepId: "step-1", disposition: "automatable", rationale: "Reglas repetibles y reversibles." },
+      { stepId: "step-2", disposition: "human-required", rationale: "Requiere resolver excepciones." },
+    ],
+    dataSensitivity: "low",
+    sideEffectLevel: "reversible",
+    verificationMode: "every-run",
+    verificationMinutesPerRun: 5,
+    recoveryPlan: "Revisar el CSV y repetir la validación manual.",
+    createdAt: "2026-08-20T12:00:00.000Z",
+    updatedAt: "2026-08-21T12:00:00.000Z",
+    status: "ready",
+    ...overrides,
+  };
+}
+
 async function seed(page: Page, options: { locale?: "es-419" | "en"; blueprint?: unknown; intakes?: unknown[]; observations?: number } = {}) {
   await page.addInitScript(({ key, locale, blueprint, intakes, observations }) => {
     localStorage.setItem(key, JSON.stringify({
@@ -82,9 +108,13 @@ test.describe("Automation Blueprint v0.2 contract", () => {
     await page.getByLabel(/Efectos secundarios|Side effects/i).selectOption("reversible");
     await page.getByLabel(/Modo de verificación|Verification mode/i).selectOption("every-run");
     await page.getByLabel(/Plan de recuperación|Recovery plan/i).fill("Revisar el CSV y repetir la validación manual.");
-    const boundary = page.getByTestId("blueprint-boundary").first();
-    await boundary.getByLabel(/Clasificación|Disposition/i).selectOption("automatable");
-    await boundary.getByLabel(/Racional|Rationale/i).fill("Reglas repetibles y reversibles.");
+    const boundaries = page.getByTestId("blueprint-boundary");
+    await expect(boundaries).toHaveCount(2);
+    for (const [index, disposition] of ["automatable", "human-required"].entries()) {
+      const boundary = boundaries.nth(index);
+      await boundary.getByLabel(/Clasificación|Disposition/i).selectOption(disposition);
+      await boundary.getByLabel(/Racional|Rationale/i).fill(index === 0 ? "Reglas repetibles y reversibles." : "Requiere resolver excepciones.");
+    }
     await page.getByTestId("blueprint-save").click();
 
     await expect(page.getByTestId("blueprint-status")).toHaveText(/listo|ready/i);
@@ -108,7 +138,7 @@ test.describe("Automation Blueprint v0.2 contract", () => {
     await expect(page.getByTestId("blueprint-source-map")).toContainText(Spanish.human);
     await expect(page.getByTestId("blueprint-source-map")).not.toContainText("Llega el cierre semanal de ventas traducido");
     await expect(page.locator("a")).toHaveCount(0);
-    await expect(page.locator("input")).not.toHaveAttribute("name", /oauth|token|secret|credential/i);
+    await expect(page.locator('input[name*="oauth" i], input[name*="token" i], input[name*="secret" i], input[name*="credential" i]')).toHaveCount(0);
   });
 
   test("mobile and keyboard users can complete boundaries with visible focus", async ({ page }) => {
@@ -126,7 +156,7 @@ test.describe("Automation Blueprint v0.2 contract", () => {
   });
 
   test("loading, backend error, stale source and optimistic conflict are explicit", async ({ page }) => {
-    await seed(page, { blueprint: { candidateId, status: "stale", revision: 3, sourceIntakeUpdatedAt: "2026-08-22T12:00:00.000Z" } });
+    await seed(page, { blueprint: makeBlueprint({ revision: 3, sourceIntakeUpdatedAt: "2026-08-22T12:00:00.000Z", status: "stale" }) });
     await openBlueprint(page);
     await expect(page.getByTestId("blueprint-status")).toHaveText(/desactualizado|stale/i);
     await expect(page.getByTestId("blueprint-refresh")).toBeEnabled();
@@ -159,7 +189,7 @@ test.describe("Automation Blueprint v0.2 contract", () => {
     await expect(page.getByTestId("blueprint-no-candidate")).toBeVisible();
     await expect(page.getByTestId("blueprint-entry")).toHaveCount(0);
 
-    await seed(page, { blueprint: { candidateId, status: "ready", revision: 2 } });
+    await seed(page, { blueprint: makeBlueprint() });
     await openBlueprint(page);
     await page.getByTestId("blueprint-delete-preview").click();
     await expect(page.getByRole("dialog")).toContainText(/clipboard|portapapeles|copias|backups/i);
