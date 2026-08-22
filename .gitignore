@@ -12,6 +12,7 @@ src-tauri/resources/.prepared-*
 src-tauri/resources/.activitywatch-*
 .impeccable/live/
 .playwright-cli/
+output/playwright/
 src-tauri/ci-signing.json
 coverage/
 *.tsbuildinfo
