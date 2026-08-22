@@ -43,17 +43,9 @@ pub fn run() {
             let development_resources =
                 std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources");
             let resource_dir = resolve_resource_dir(packaged_resources, development_resources);
-            let config_dir = app.path().config_dir().map_err(|error| {
-                format!("No se pudo resolver el directorio de configuración: {error}")
-            })?;
-            let local_data_dir = app.path().local_data_dir().map_err(|error| {
-                format!("No se pudo resolver el directorio local del capturador: {error}")
-            })?;
             let activity = Arc::new(ActivityWatchRuntime::start(
                 &app_data_dir.join("activitywatch"),
                 resource_dir,
-                &config_dir,
-                &local_data_dir,
             )?);
             let state = AppState {
                 store: Arc::clone(&store),

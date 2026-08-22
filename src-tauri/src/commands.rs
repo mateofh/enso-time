@@ -401,6 +401,7 @@ fn status(state: &AppState) -> Result<TrackingStatus, String> {
         last_event_at: state.activity.latest_event_at()?,
         pending_check_ins: state.store.pending_count()?,
         data_stays_local: true,
+        capture_issue: state.activity.capture_issue(),
     })
 }
 
