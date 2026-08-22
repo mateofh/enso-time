@@ -654,6 +654,36 @@ impl LocalStore {
     }
 
     pub fn delete_all(&self) -> Result<(), String> {
+        self.delete_all_with_cleanup(|| self.purge_managed_exports(), || self.compact_database())
+    }
+
+    fn delete_all_with_cleanup<Purge, Compact>(
+        &self,
+        purge_exports: Purge,
+        compact_database: Compact,
+    ) -> Result<(), String>
+    where
+        Purge: FnOnce() -> Result<(), String>,
+        Compact: FnOnce() -> Result<(), String>,
+    {
+        let mut errors = Vec::new();
+        if let Err(error) = self.reset_local_records() {
+            errors.push(error);
+        }
+        if let Err(error) = purge_exports() {
+            errors.push(error);
+        }
+        if let Err(error) = compact_database() {
+            errors.push(error);
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(format!("Borrado local incompleto: {}", errors.join("; ")))
+        }
+    }
+
+    fn reset_local_records(&self) -> Result<(), String> {
         {
             let mut connection = self.connection()?;
             let transaction = connection
@@ -675,7 +705,10 @@ impl LocalStore {
         }
         self.save_settings(&SettingsV1::default())?;
         self.set_value("study_started_at", &iso_now())?;
-        self.set_value("selected_days", "7")?;
+        self.set_value("selected_days", "7")
+    }
+
+    fn purge_managed_exports(&self) -> Result<(), String> {
         if let Some(parent) = self.database_path.parent() {
             let exports = parent.join("exports");
             if exports.exists() {
@@ -684,6 +717,10 @@ impl LocalStore {
                 })?;
             }
         }
+        Ok(())
+    }
+
+    fn compact_database(&self) -> Result<(), String> {
         self.connection()?
             .execute_batch(
                 "PRAGMA wal_checkpoint(TRUNCATE);
@@ -1051,6 +1088,36 @@ mod tests {
         assert!(!bytes
             .windows(b"private-workflow-marker".len())
             .any(|window| window == b"private-workflow-marker"));
+    }
+
+    #[test]
+    fn delete_all_compacts_sqlite_even_when_export_purge_fails() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("enso-time.sqlite");
+        let store = LocalStore::open(&path).unwrap();
+        store
+            .save_workflow_intake(workflow(
+                "private-workflow",
+                "forced-export-failure-marker",
+                "2025-01-02T10:00:00Z",
+            ))
+            .unwrap();
+
+        let error = store
+            .delete_all_with_cleanup(
+                || Err("forced exports failure".into()),
+                || store.compact_database(),
+            )
+            .unwrap_err();
+
+        assert!(error.contains("forced exports failure"));
+        assert!(store.list_workflow_intakes().unwrap().is_empty());
+        assert!(!path.with_file_name("enso-time.sqlite-wal").exists());
+        assert!(!path.with_file_name("enso-time.sqlite-shm").exists());
+        let bytes = std::fs::read(path).unwrap();
+        assert!(!bytes
+            .windows(b"forced-export-failure-marker".len())
+            .any(|window| window == b"forced-export-failure-marker"));
     }
 
     #[test]
