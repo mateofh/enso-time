@@ -99,7 +99,7 @@ export function computeEstimates(draft: AutomationBlueprintDraftV1, source: Blue
   return { weeklyBaselineMinutes, weeklyResidualMinutes, weeklySavingsMinutes, effort, operationalRisk, confidence, components: { toolComplexity, stepComplexity, humanShare, effortSensitivity: effortSensitivity[draft.dataSensitivity], effortEffect: effortEffect[draft.sideEffectLevel], riskSensitivity: riskSensitivity[draft.dataSensitivity], riskEffect: riskEffect[draft.sideEffectLevel], verification: verification[draft.verificationMode], recoveryAbsent, observations: evidence.repeatedObservations, observedDays: evidence.observedDays, rulesQuality: evidence.rulesQuality, observedWeeklyFrequency: evidence.observedWeeklyFrequency, frequencyAgreement, completeness } };
 }
 
-export function buildPreviewBlueprint(intake: WorkflowIntakeV1, draft = emptyBlueprintDraft(intake), evidence: BlueprintEvidenceV1 = { observed: ["Recorded check-in interval"], declared: ["Activity, repetition, and rules confirmed by you"], repeatedObservations: 3, observedDays: 7, rulesQuality: 1, observedWeeklyFrequency: draft.runsPerWeek ?? 0 }): AutomationBlueprintV1 {
+export function buildPreviewBlueprint(intake: WorkflowIntakeV1, draft = emptyBlueprintDraft(intake), evidence: BlueprintEvidenceV1 = { observed: ["Recorded check-in interval"], declared: ["Activity, repetition, and rules confirmed by you"], repeatedObservations: 3, observedDays: 7, declaredRepeatedDays: 7, rulesQuality: 1, observedWeeklyFrequency: draft.runsPerWeek ?? 0 }): AutomationBlueprintV1 {
   const source = sourceFromIntake(intake);
   const completeness = computeCompleteness(draft, source);
   const estimates = computeEstimates(draft, source, evidence);

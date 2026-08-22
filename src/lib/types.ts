@@ -184,6 +184,7 @@ export interface BlueprintEvidenceV1 {
   declared: string[];
   repeatedObservations: number;
   observedDays: number;
+  declaredRepeatedDays: number;
   rulesQuality: number;
   observedWeeklyFrequency: number;
 }

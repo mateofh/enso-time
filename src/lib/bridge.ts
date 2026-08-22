@@ -3,6 +3,7 @@ import { demoCheckIns, demoDiagnostic, demoSettings, demoStudy, demoTimeline, de
 import { buildPrompt, createDiagnostic } from "./diagnostics";
 import { migrateWorkflowIntakes, upsertWorkflowIntake } from "./workflowIntakes";
 import { buildPreviewBlueprint, emptyBlueprintDraft } from "./blueprints";
+import { canonicalCandidateLabel } from "./candidateIdentity";
 import type {
   AutomationBlueprintDraftV1,
   AutomationBlueprintV1,
@@ -17,6 +18,7 @@ import type {
   UpdateInfo,
   WorkflowIntakeV1,
   SaveAutomationBlueprintInputV1,
+  BlueprintEvidenceV1,
 } from "./types";
 
 const STORAGE_KEY = "enso-time-web-state-v1";
@@ -61,6 +63,53 @@ function loadWebState(): WebState {
 
 function saveWebState(state: WebState) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+}
+
+function utcDay(timestamp: string): string {
+  const milliseconds = Date.parse(timestamp);
+  return Number.isFinite(milliseconds) ? new Date(milliseconds).toISOString().slice(0, 10) : timestamp.slice(0, 10);
+}
+
+export function previewBlueprintEvidence(intake: WorkflowIntakeV1, checkIns: CheckInV1[], locale: string): BlueprintEvidenceV1 {
+  const candidateLabel = canonicalCandidateLabel(intake.candidateLabel);
+  const matchingCheckIns = checkIns.filter((item) =>
+    item.status === "answered" && Boolean(item.activityLabel) && canonicalCandidateLabel(item.activityLabel!) === candidateLabel,
+  );
+  const repeatedCheckIns = matchingCheckIns.filter((item) => item.repetitive === true);
+  const observedDays = new Set(matchingCheckIns.map((item) => utcDay(item.intervalStart))).size;
+  const declaredRepeatedDays = new Set(repeatedCheckIns.map((item) => utcDay(item.intervalStart))).size;
+  const rulesQuality = repeatedCheckIns.length
+    ? repeatedCheckIns.filter((item) => item.rulesClear === true).length / repeatedCheckIns.length
+    : 0;
+  const observed = matchingCheckIns.map((item) => locale === "en"
+    ? `Recorded check-in interval: ${item.intervalStart}–${item.intervalEnd}`
+    : `Intervalo de check-in registrado: ${item.intervalStart}–${item.intervalEnd}`);
+  const declared = [locale === "en" ? "Workflow intake supplied by you" : "Intake del workflow declarado por ti"];
+  for (const item of matchingCheckIns) {
+    declared.push(locale === "en" ? `Activity label confirmed by you: ${item.activityLabel}` : `Etiqueta de actividad confirmada por ti: ${item.activityLabel}`);
+    declared.push(item.repetitive === true
+      ? (locale === "en" ? "Repetition confirmed by you" : "Repetición confirmada por ti")
+      : (locale === "en" ? "You did not confirm this check-in as repetitive" : "No confirmaste este check-in como repetitivo"));
+    declared.push(item.rulesClear === true
+      ? (locale === "en" ? "Clear rules confirmed by you" : "Reglas claras confirmadas por ti")
+      : (locale === "en" ? "Clear rules not confirmed by you" : "Reglas claras no confirmadas por ti"));
+  }
+  if (repeatedCheckIns.length) {
+    declared.push(locale === "en"
+      ? `Repetition frequency confirmed by you: ${repeatedCheckIns.length} confirmation(s) across ${declaredRepeatedDays} declared UTC day(s)`
+      : `Frecuencia de repetición confirmada por ti: ${repeatedCheckIns.length} confirmación(es) en ${declaredRepeatedDays} día(s) UTC declarados`);
+  }
+  return {
+    observed,
+    declared,
+    repeatedObservations: repeatedCheckIns.length,
+    observedDays,
+    declaredRepeatedDays,
+    rulesQuality,
+    // This wire name is retained for compatibility; it is derived exclusively
+    // from repetitions and days explicitly confirmed by the person.
+    observedWeeklyFrequency: declaredRepeatedDays ? repeatedCheckIns.length * 7 / declaredRepeatedDays : 0,
+  };
 }
 
 function enrichPreviewDiagnostic(diagnostic: DiagnosticV1, state: WebState): DiagnosticV1 {
@@ -161,28 +210,7 @@ export const bridge = {
     const raw = state.automationBlueprints?.find((item) => item.candidateId === candidateId);
     const base = emptyBlueprintDraft(intake);
     const draft: AutomationBlueprintDraftV1 = raw ? { ...base, ...raw, candidateId, workflowIntakeId: raw.workflowIntakeId ?? intake.id, sourceIntakeUpdatedAt: raw.sourceIntakeUpdatedAt ?? intake.updatedAt, revision: raw.revision ?? 0, stepBoundaries: raw.stepBoundaries ?? base.stepBoundaries } : base;
-    const matchingCheckIns = state.checkIns.filter((item) => item.status === "answered" && item.repetitive && item.activityLabel === intake.candidateLabel);
-    const observedDays = new Set(matchingCheckIns.map((item) => item.intervalStart.slice(0, 10))).size;
-    const rulesQuality = matchingCheckIns.length ? matchingCheckIns.filter((item) => item.rulesClear).length / matchingCheckIns.length : 0;
-    const observed = matchingCheckIns.map((item) => locale === "en"
-      ? `Recorded check-in interval: ${item.intervalStart}–${item.intervalEnd}`
-      : `Intervalo de check-in registrado: ${item.intervalStart}–${item.intervalEnd}`);
-    const declared = [locale === "en" ? "Workflow intake supplied by you" : "Intake del workflow declarado por ti"];
-    for (const item of matchingCheckIns) {
-      declared.push(locale === "en" ? `Activity confirmed by you: ${item.activityLabel}` : `Actividad confirmada por ti: ${item.activityLabel}`);
-      declared.push(locale === "en" ? "Marked repetitive by you" : "Marcada como repetitiva por ti");
-      declared.push(item.rulesClear
-        ? (locale === "en" ? "Rules marked clear by you" : "Reglas marcadas como claras por ti")
-        : (locale === "en" ? "Rules were not marked clear by you" : "No marcaste las reglas como claras"));
-    }
-    const evidence = {
-      observed,
-      declared,
-      repeatedObservations: matchingCheckIns.length,
-      observedDays,
-      rulesQuality,
-      observedWeeklyFrequency: observedDays ? matchingCheckIns.length * 7 / observedDays : 0,
-    };
+    const evidence = previewBlueprintEvidence(intake, state.checkIns, locale);
     return { ...buildPreviewBlueprint(intake, draft, evidence), conflict: state.automationBlueprintConflict ?? undefined };
   },
 
