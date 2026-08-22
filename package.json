@@ -1,9 +1,9 @@
 {
   "name": "enso-time",
   "private": true,
-  "version": "0.1.0-beta.1",
+  "version": "0.1.0-beta.2",
   "type": "module",
-  "license": "MPL-2.0",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",

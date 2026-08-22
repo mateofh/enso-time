@@ -8,7 +8,7 @@ the desktop binary.
 
 - Upstream: <https://github.com/ActivityWatch/aw-server-rust>
 - Pinned commit: `7c33810cd44393b3ecad64277b7e69bfeaee817b`
-- License: Mozilla Public License 2.0 (see the repository root `LICENSE`)
+- License: Mozilla Public License 2.0 (see `LICENSES/MPL-2.0.txt` at the repository root)
 
 ## Local modifications
 

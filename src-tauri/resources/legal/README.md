@@ -15,4 +15,3 @@ desktop distributions.
 
 The repository license map defines the authoritative path boundaries. Third-party
 materials always retain their original terms.
-

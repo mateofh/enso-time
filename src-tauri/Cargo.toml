@@ -1,9 +1,9 @@
 [package]
 name = "enso-time"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 description = "Private, local-first time diagnosis by Ensō"
 authors = ["Ensō"]
-license = "MPL-2.0"
+license = "PolyForm-Noncommercial-1.0.0"
 edition = "2021"
 rust-version = "1.88.0"
 
