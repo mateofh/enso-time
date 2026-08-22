@@ -19,7 +19,7 @@ interface WebState {
   settings: SettingsV1;
   checkIns: CheckInV1[];
   pausedUntil?: string;
-  captureIssue?: CaptureIssue;
+  captureIssue?: CaptureIssue | null;
 }
 
 function isTauri(): boolean {
