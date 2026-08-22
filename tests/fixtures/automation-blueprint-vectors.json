@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "vectors": [
+    {
+      "name": "empty intake is blocked",
+      "inputs": { "trigger": "", "inputs": "", "desiredOutput": "", "toolsCount": 0, "totalSteps": 0, "humanDecisions": "", "frequency": "", "runsPerWeek": 0, "minutesPerRun": 0, "classifiedBoundaries": 0, "dataSensitivity": "unassessed", "sideEffectLevel": "unassessed", "verificationMode": "unassessed", "verificationMinutesPerRun": 0, "recoveryPlan": "" },
+      "expected": { "completeness": 0, "status": "blocked", "weeklyBaselineMinutes": 0, "weeklyResidualMinutes": 0, "weeklySavingsMinutes": 0 }
+    },
+    {
+      "name": "complete four-step workflow",
+      "inputs": { "trigger": "Weekly sales close arrives", "inputs": "Sales CSV and targets table", "desiredOutput": "Validated report", "toolsCount": 2, "totalSteps": 4, "humanDecisions": "Exclude disputed accounts", "runsPerWeek": 5, "observedWeeklyFrequency": 5, "minutesPerRun": 60, "classifiedBoundaries": 4, "automatableSteps": 3, "humanSteps": 1, "dataSensitivity": "low", "sideEffectLevel": "reversible", "verificationMode": "every-run", "verificationMinutesPerRun": 5, "recoveryPlan": "Review the CSV and repeat validation", "observedCount": 4, "observedDays": 14, "rulesRatio": 0.75, "sourceCurrent": true },
+      "expected": { "completeness": 100, "status": "ready", "weeklyBaselineMinutes": 300, "weeklyResidualMinutes": 100, "weeklySavingsMinutes": 200, "effort": 44, "operationalRisk": 17, "confidence": 89 }
+    },
+    {
+      "name": "one classified step is proportional",
+      "inputs": { "trigger": "Monthly close arrives", "inputs": "Ledger export", "desiredOutput": "Reconciled summary", "toolsCount": 1, "totalSteps": 2, "humanDecisions": "Resolve unmatched rows", "runsPerWeek": 2, "observedWeeklyFrequency": 2, "minutesPerRun": 30, "classifiedBoundaries": 1, "automatableSteps": 1, "humanSteps": 1, "dataSensitivity": "moderate", "sideEffectLevel": "none", "verificationMode": "every-run", "verificationMinutesPerRun": 0, "recoveryPlan": "Escalate unresolved rows", "observedCount": 2, "observedDays": 7, "rulesRatio": 0.5, "sourceCurrent": true },
+      "expected": { "completeness": 90, "status": "draft", "weeklyBaselineMinutes": 60, "weeklyResidualMinutes": 30, "weeklySavingsMinutes": 30, "effort": 34, "operationalRisk": 19, "confidence": 60 }
+    },
+    {
+      "name": "single observation keeps a complete blueprint as draft",
+      "inputs": { "trigger": "Weekly sales close arrives", "inputs": "Sales CSV and targets table", "desiredOutput": "Validated report", "toolsCount": 2, "totalSteps": 2, "humanDecisions": "Exclude disputed accounts", "runsPerWeek": 5, "minutesPerRun": 45, "classifiedBoundaries": 2, "automatableSteps": 1, "dataSensitivity": "low", "sideEffectLevel": "reversible", "verificationMode": "every-run", "verificationMinutesPerRun": 5, "recoveryPlan": "Review the CSV and repeat validation", "observedCount": 1, "sourceCurrent": true },
+      "expected": { "completeness": 100, "status": "draft" }
+    },
+    {
+      "name": "verification can exceed manual residual without negative savings",
+      "inputs": { "runsPerWeek": 1, "minutesPerRun": 10, "totalSteps": 1, "automatableSteps": 1, "humanSteps": 0, "verificationMode": "every-run", "verificationMinutesPerRun": 20 },
+      "expected": { "weeklyBaselineMinutes": 10, "weeklyResidualMinutes": 20, "weeklySavingsMinutes": 0 }
+    }
+  ],
+  "edgeCases": {
+    "bounds": { "scoreMin": 0, "scoreMax": 100, "revisionMin": 1, "minutesPerRunMax": 1440 },
+    "invalidEnums": ["unknown", "AUTOMATABLE", "oauth"],
+    "unicodeContent": "Aprobación: ñandú ✅ — 日本語",
+    "controlCharacter": "\u0000",
+    "oversizeDraftBytes": 40001
+  }
+}
