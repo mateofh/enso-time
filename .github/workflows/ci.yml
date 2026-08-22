@@ -71,4 +71,4 @@ jobs:
         run: node scripts/prepare-activitywatch.mjs --target ${{ matrix.aw_target }} --dry-run
 
       - name: Test Rust workspace
-        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=1
