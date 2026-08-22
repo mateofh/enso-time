@@ -276,6 +276,7 @@ input:hover, select:hover, textarea:hover { border-color: var(--border-strong); 
 .blueprint-dialog { width: min(480px, 100%); padding: 28px; border: 1px solid var(--border-strong); background: var(--surface-raised); box-shadow: var(--shadow); }
 .blueprint-dialog h2 { margin: 0; font-size: 22px; }
 .blueprint-dialog p { margin: 14px 0 22px; color: var(--text-secondary); font-size: 12px; line-height: 1.55; }
+.blueprint-dialog .blueprint-dialog-error { margin: -8px 0 18px; color: var(--danger); }
 
 .settings-group { display: grid; grid-template-columns: minmax(200px, .8fr) minmax(350px, 1.5fr); gap: 50px; padding: 32px 0; border-top: 1px solid var(--border); }
 .settings-group:last-child { border-bottom: 1px solid var(--border); }

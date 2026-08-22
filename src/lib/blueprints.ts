@@ -31,7 +31,7 @@ export function emptyBlueprintDraft(intake: WorkflowIntakeV1): AutomationBluepri
   const now = new Date().toISOString();
   return {
     schemaVersion: 1,
-    id: `blueprint-${intake.id}`,
+    id: `blueprint-${intake.candidateId}`,
     candidateId: intake.candidateId,
     workflowIntakeId: intake.id,
     sourceIntakeUpdatedAt: intake.updatedAt,

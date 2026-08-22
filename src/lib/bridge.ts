@@ -214,6 +214,7 @@ export const bridge = {
 
   async deleteAutomationBlueprint(candidateId: string, expectedRevision: number, confirmation: string, locale: string): Promise<void> {
     if (isTauri()) return invoke("delete_automation_blueprint_v1", { candidateId, expectedRevision, confirmation, locale });
+    if (confirmation !== "DELETE_AUTOMATION_BLUEPRINT") throw new BlueprintBridgeError("blueprint.delete_confirmation");
     const state = loadWebState();
     const current = state.automationBlueprints?.find((item) => item.candidateId === candidateId);
     if (!current) throw new BlueprintBridgeError("blueprint.not_found");
