@@ -143,6 +143,15 @@ pub fn is_category(value: &str) -> bool {
     CATEGORIES.contains(&value)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CaptureIssueCode {
+    ServerUnavailable,
+    WindowWatcherUnavailable,
+    AfkWatcherUnavailable,
+    WatcherConflict,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrackingStatus {
@@ -154,6 +163,7 @@ pub struct TrackingStatus {
     pub last_event_at: Option<String>,
     pub pending_check_ins: usize,
     pub data_stays_local: bool,
+    pub capture_issue: Option<CaptureIssueCode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -276,4 +286,35 @@ pub fn parse_utc(value: &str) -> Result<DateTime<Utc>, String> {
     DateTime::parse_from_rfc3339(value)
         .map(|date| date.with_timezone(&Utc))
         .map_err(|error| format!("Fecha inválida: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_issue_codes_have_stable_wire_values() {
+        let cases = [
+            (CaptureIssueCode::ServerUnavailable, "server-unavailable"),
+            (
+                CaptureIssueCode::WindowWatcherUnavailable,
+                "window-watcher-unavailable",
+            ),
+            (
+                CaptureIssueCode::AfkWatcherUnavailable,
+                "afk-watcher-unavailable",
+            ),
+            (CaptureIssueCode::WatcherConflict, "watcher-conflict"),
+        ];
+        for (code, expected) in cases {
+            assert_eq!(
+                serde_json::to_string(&code).unwrap(),
+                format!("\"{expected}\"")
+            );
+            assert_eq!(
+                serde_json::from_str::<CaptureIssueCode>(&format!("\"{expected}\"")).unwrap(),
+                code
+            );
+        }
+    }
 }
