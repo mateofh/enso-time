@@ -1383,6 +1383,7 @@ dependencies = [
  "aw-server",
  "chrono",
  "chrono-tz",
+ "gethostname",
  "log",
  "nix",
  "rocket",

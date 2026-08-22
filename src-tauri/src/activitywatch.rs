@@ -2,9 +2,9 @@ use crate::models::{AppRule, CaptureIssueCode, CheckInV1, SettingsV1, TimelineBl
 use aw_datastore::Datastore;
 use aw_models::Event;
 use chrono::{DateTime, Duration, Utc};
+use rusqlite::Connection;
 use std::fs::OpenOptions;
 use std::io::Read;
-use std::net::{Ipv4Addr, TcpListener};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -20,8 +20,7 @@ const PORT_END: u16 = 5699;
 const PROFILE_NAME: &str = "enso-time";
 const LEGACY_APP_NAME: &str = "activitywatch";
 const PROFILED_APP_NAME: &str = "activitywatch-enso-time";
-const WATCHER_EXIT_GRACE: StdDuration = StdDuration::from_secs(2);
-const WATCHER_REGISTRATION_TIMEOUT: StdDuration = StdDuration::from_secs(10);
+const WATCHER_REGISTRATION_TIMEOUT: StdDuration = StdDuration::from_secs(20);
 
 struct ManagedWatcher {
     child: Child,
@@ -134,17 +133,40 @@ impl WatcherProfilePaths {
 }
 
 pub struct ActivityWatchRuntime {
-    datastore: Datastore,
-    port: AtomicU16,
+    datastore: Mutex<Option<Datastore>>,
+    database_path: PathBuf,
+    port: Arc<AtomicU16>,
     server_ready: Arc<AtomicBool>,
     server_failed: Arc<Mutex<Option<String>>>,
     server_shutdown: Arc<Mutex<Option<rocket::Shutdown>>>,
     server_thread: Mutex<Option<JoinHandle<()>>>,
     capture_issue: Arc<Mutex<Option<CaptureIssueCode>>>,
+    capture_titles: AtomicBool,
     window_watcher: Arc<Mutex<Option<ManagedWatcher>>>,
     afk_watcher: Arc<Mutex<Option<ManagedWatcher>>>,
     resource_dir: PathBuf,
     profile: WatcherProfilePaths,
+    api_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BucketSnapshot {
+    client: String,
+    hostname: String,
+    bucket_type: String,
+    created: Option<DateTime<Utc>>,
+    last_updated: Option<DateTime<Utc>>,
+    event_end: Option<DateTime<Utc>>,
+    event_count: i64,
+}
+
+#[derive(Debug, Clone)]
+struct WatcherBaseline {
+    bucket_id: String,
+    client: &'static str,
+    hostname: String,
+    bucket_type: &'static str,
+    snapshot: Option<BucketSnapshot>,
 }
 
 impl ActivityWatchRuntime {
@@ -164,29 +186,66 @@ impl ActivityWatchRuntime {
                 .open(&database)
                 .map_err(|error| format!("No se pudo preparar el almacén de actividad: {error}"))?;
         }
-        let database = database
+        prepare_activity_database(&database)?;
+        let database_string = database
             .to_str()
             .ok_or_else(|| "La ruta del almacén de actividad no es válida".to_string())?
             .to_string();
-        let port = available_port()?;
         let api_key = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         let profile = WatcherProfilePaths::new(data_dir.join("watcher-profile"));
         profile.prepare()?;
-        write_watcher_server_config(&profile, port, &api_key)?;
-        let datastore = Datastore::new(database, false);
-        let server_datastore = datastore.clone();
+        let datastore = Datastore::new(database_string, false);
+        let port = Arc::new(AtomicU16::new(0));
         let server_ready = Arc::new(AtomicBool::new(false));
         let server_failed = Arc::new(Mutex::new(None));
         let server_shutdown = Arc::new(Mutex::new(None));
         let capture_issue = Arc::new(Mutex::new(None));
         let window_watcher = Arc::new(Mutex::new(None));
         let afk_watcher = Arc::new(Mutex::new(None));
-        let failed = Arc::clone(&server_failed);
-        let shutdown = Arc::clone(&server_shutdown);
-        let issue = Arc::clone(&capture_issue);
-        let ready = Arc::clone(&server_ready);
-        let window_on_server_exit = Arc::clone(&window_watcher);
-        let afk_on_server_exit = Arc::clone(&afk_watcher);
+        let runtime = Self {
+            datastore: Mutex::new(Some(datastore)),
+            database_path: database,
+            port,
+            server_ready,
+            server_failed,
+            server_shutdown,
+            server_thread: Mutex::new(None),
+            capture_issue,
+            capture_titles: AtomicBool::new(false),
+            window_watcher,
+            afk_watcher,
+            resource_dir,
+            profile,
+            api_key,
+        };
+        runtime.launch_server()?;
+        Ok(runtime)
+    }
+
+    fn datastore(&self) -> Result<Datastore, String> {
+        self.datastore
+            .lock()
+            .map_err(|_| "No se pudo acceder al almacén de actividad".to_string())?
+            .clone()
+            .ok_or_else(|| "El almacén de actividad está en mantenimiento".to_string())
+    }
+
+    fn launch_server(&self) -> Result<(), String> {
+        let server_datastore = self.datastore()?;
+        self.port.store(0, Ordering::Release);
+        self.server_ready.store(false, Ordering::Release);
+        if let Ok(mut failed) = self.server_failed.lock() {
+            *failed = None;
+        }
+        let failed = Arc::clone(&self.server_failed);
+        let shutdown = Arc::clone(&self.server_shutdown);
+        let issue = Arc::clone(&self.capture_issue);
+        let ready = Arc::clone(&self.server_ready);
+        let window_on_server_exit = Arc::clone(&self.window_watcher);
+        let afk_on_server_exit = Arc::clone(&self.afk_watcher);
+        let server_port = Arc::clone(&self.port);
+        let server_profile = self.profile.clone();
+        let server_api_key = self.api_key.clone();
         let (startup_sender, startup_receiver) = mpsc::sync_channel(1);
         // Rocket owns its async runtime. It is isolated from Tauri so a local capture
         // failure cannot take down the UI thread.
@@ -195,8 +254,9 @@ impl ActivityWatchRuntime {
             .spawn(move || {
                 let result = run_server(
                     server_datastore,
-                    port,
-                    api_key,
+                    server_port,
+                    server_api_key,
+                    server_profile,
                     ready.clone(),
                     shutdown,
                     startup_sender,
@@ -214,37 +274,30 @@ impl ActivityWatchRuntime {
                 }
             })
             .map_err(|error| format!("No se pudo iniciar el servicio local: {error}"))?;
-        match startup_receiver.recv_timeout(StdDuration::from_secs(5)) {
-            Ok(Ok(())) => {}
+        match startup_receiver.recv_timeout(StdDuration::from_secs(10)) {
+            Ok(Ok(())) => {
+                *self
+                    .server_thread
+                    .lock()
+                    .map_err(|_| "No se pudo registrar el servicio local")? = Some(server_thread);
+                Ok(())
+            }
             Ok(Err(error)) => {
                 let _ = server_thread.join();
-                return Err(error);
+                Err(error)
             }
             Err(error) => {
-                if let Ok(slot) = server_shutdown.lock() {
+                if let Ok(slot) = self.server_shutdown.lock() {
                     if let Some(shutdown) = slot.as_ref() {
                         shutdown.clone().notify();
                     }
                 }
                 let _ = server_thread.join();
-                return Err(format!(
+                Err(format!(
                     "El servicio local no completó su inicio de forma verificable: {error}"
-                ));
+                ))
             }
         }
-        Ok(Self {
-            datastore,
-            port: AtomicU16::new(port),
-            server_ready,
-            server_failed,
-            server_shutdown,
-            server_thread: Mutex::new(Some(server_thread)),
-            capture_issue,
-            window_watcher,
-            afk_watcher,
-            resource_dir,
-            profile,
-        })
     }
 
     pub fn port_if_ready(&self) -> Option<u16> {
@@ -268,10 +321,20 @@ impl ActivityWatchRuntime {
     }
 
     pub fn start_watchers(&self, capture_titles: bool) -> Result<(), String> {
+        self.start_watchers_with_timeout(capture_titles, WATCHER_REGISTRATION_TIMEOUT)
+    }
+
+    fn start_watchers_with_timeout(
+        &self,
+        capture_titles: bool,
+        timeout: StdDuration,
+    ) -> Result<(), String> {
         let port = self.ready_port().map_err(|error| {
             self.set_capture_issue(CaptureIssueCode::ServerUnavailable);
             error
         })?;
+        let window_baseline = self.required_watcher_baseline(WatcherKind::Window)?;
+        let afk_baseline = self.required_watcher_baseline(WatcherKind::Afk)?;
         if let Err(error) = self.start_watcher(WatcherKind::Window, port, capture_titles) {
             self.set_capture_issue(error.code);
             let _ = self.stop_watchers();
@@ -282,8 +345,17 @@ impl ActivityWatchRuntime {
             let _ = self.stop_watchers();
             return Err(error.message);
         }
-        self.clear_capture_issue();
-        Ok(())
+        let result = self.await_watcher_progress(
+            &[
+                (WatcherKind::Window, window_baseline),
+                (WatcherKind::Afk, afk_baseline),
+            ],
+            timeout,
+        );
+        if result.is_ok() {
+            self.capture_titles.store(capture_titles, Ordering::Release);
+        }
+        result
     }
 
     pub fn restart_window_watcher(&self, capture_titles: bool) -> Result<(), String> {
@@ -293,14 +365,21 @@ impl ActivityWatchRuntime {
             self.set_capture_issue(CaptureIssueCode::ServerUnavailable);
             error
         })?;
+        let baseline = self.required_watcher_baseline(WatcherKind::Window)?;
         terminate_slot(&self.window_watcher)?;
         if let Err(error) = self.start_watcher(WatcherKind::Window, port, capture_titles) {
             self.set_capture_issue(error.code);
             let _ = self.stop_watchers();
             return Err(error.message);
         }
-        self.clear_capture_issue();
-        Ok(())
+        let result = self.await_watcher_progress(
+            &[(WatcherKind::Window, baseline)],
+            WATCHER_REGISTRATION_TIMEOUT,
+        );
+        if result.is_ok() {
+            self.capture_titles.store(capture_titles, Ordering::Release);
+        }
+        result
     }
 
     fn ready_port(&self) -> Result<u16, String> {
@@ -349,7 +428,8 @@ impl ActivityWatchRuntime {
         if to <= from {
             return Err("El fin del rango debe ser posterior al inicio".into());
         }
-        let buckets = safe_datastore(|| self.datastore.get_buckets())?;
+        let datastore = self.datastore()?;
+        let buckets = safe_datastore(|| datastore.get_buckets())?;
         let window_buckets: Vec<_> = buckets
             .values()
             .filter(|bucket| bucket._type == "currentwindow")
@@ -362,17 +442,14 @@ impl ActivityWatchRuntime {
         let mut afk_events = Vec::new();
         for bucket in afk_buckets {
             afk_events.extend(safe_datastore(|| {
-                self.datastore
-                    .get_events(&bucket.id, Some(from), Some(to), None)
+                datastore.get_events(&bucket.id, Some(from), Some(to), None)
             })?);
         }
 
         let mut blocks = Vec::new();
         for bucket in window_buckets {
-            let events = safe_datastore(|| {
-                self.datastore
-                    .get_events(&bucket.id, Some(from), Some(to), None)
-            })?;
+            let events =
+                safe_datastore(|| datastore.get_events(&bucket.id, Some(from), Some(to), None))?;
             for event in events {
                 let event_end = event.calculate_endtime();
                 let app =
@@ -495,7 +572,8 @@ impl ActivityWatchRuntime {
     }
 
     pub fn latest_event_at(&self) -> Result<Option<String>, String> {
-        let buckets = safe_datastore(|| self.datastore.get_buckets())?;
+        let datastore = self.datastore()?;
+        let buckets = safe_datastore(|| datastore.get_buckets())?;
         Ok(buckets
             .values()
             .filter_map(|bucket| bucket.metadata.end)
@@ -504,18 +582,21 @@ impl ActivityWatchRuntime {
     }
 
     pub fn delete_all_activity(&self) -> Result<(), String> {
-        let buckets = safe_datastore(|| self.datastore.get_buckets())?;
+        let datastore = self.datastore()?;
+        let buckets = safe_datastore(|| datastore.get_buckets())?;
         for bucket_id in buckets.keys() {
-            safe_datastore(|| self.datastore.delete_bucket(bucket_id))?;
+            safe_datastore(|| datastore.delete_bucket(bucket_id))?;
         }
-        safe_datastore(|| self.datastore.force_commit())
+        safe_datastore(|| datastore.force_commit())?;
+        self.recreate_datastore_securely()
     }
 
     pub fn delete_queued_activity(&self) -> Result<(), String> {
-        // Every platform directory used by either the pinned legacy client or a
+        // Every queue and log used by either the pinned legacy client or a
         // profile-aware future client lives below this one Ensō-owned root.
         if self.profile.root.exists() {
-            delete_private_queues(&self.profile.root)?;
+            delete_private_transient_data(&self.profile.root)?;
+            self.profile.prepare()?;
         }
         Ok(())
     }
@@ -525,12 +606,14 @@ impl ActivityWatchRuntime {
             return Ok(0);
         };
         let cutoff = Utc::now() - Duration::days(i64::from(days));
-        let buckets = safe_datastore(|| self.datastore.get_buckets())?;
+        let (window_status, afk_status) = self.watcher_statuses();
+        let restart_watchers = window_status == "running" && afk_status == "running";
+        let datastore = self.datastore()?;
+        let buckets = safe_datastore(|| datastore.get_buckets())?;
         let mut deleted = 0;
         for bucket_id in buckets.keys() {
             let events = safe_datastore(|| {
-                self.datastore
-                    .get_events_unclipped(bucket_id, None, Some(cutoff), None)
+                datastore.get_events_unclipped(bucket_id, None, Some(cutoff), None)
             })?;
             let event_ids: Vec<i64> = events
                 .iter()
@@ -539,11 +622,15 @@ impl ActivityWatchRuntime {
                 .collect();
             if !event_ids.is_empty() {
                 deleted += event_ids.len();
-                safe_datastore(|| self.datastore.delete_events_by_id(bucket_id, event_ids))?;
+                safe_datastore(|| datastore.delete_events_by_id(bucket_id, event_ids))?;
             }
         }
         if deleted > 0 {
-            safe_datastore(|| self.datastore.force_commit())?;
+            safe_datastore(|| datastore.force_commit())?;
+            self.recreate_datastore_securely()?;
+            if restart_watchers {
+                self.start_watchers(self.capture_titles.load(Ordering::Acquire))?;
+            }
         }
         Ok(deleted)
     }
@@ -577,9 +664,6 @@ impl ActivityWatchRuntime {
                 ),
             ));
         }
-        let bucket_was_present = self
-            .has_bucket_type(kind.bucket_type())
-            .map_err(|message| WatcherStartError::unavailable(kind, message))?;
         let stderr_path = self
             .profile
             .diagnostics
@@ -596,6 +680,16 @@ impl ActivityWatchRuntime {
             .stdout(Stdio::null())
             .stderr(Stdio::from(stderr));
         self.profile.configure(&mut command);
+        #[cfg(test)]
+        command
+            .env("ENSO_TEST_API_KEY", &self.api_key)
+            .env("ENSO_TEST_BUCKET_ID", self.watcher_bucket_id(kind))
+            .env("ENSO_TEST_BUCKET_TYPE", kind.bucket_type())
+            .env("ENSO_TEST_CLIENT_NAME", kind.binary_name())
+            .env(
+                "ENSO_TEST_HOSTNAME",
+                gethostname::gethostname().to_string_lossy().as_ref(),
+            );
         if matches!(kind, WatcherKind::Window) && !capture_titles {
             command.arg("--exclude-title");
         }
@@ -614,43 +708,122 @@ impl ActivityWatchRuntime {
             child,
             stderr_path: stderr_path.clone(),
         });
+        Ok(())
+    }
 
-        let deadline = std::time::Instant::now()
-            + if bucket_was_present {
-                WATCHER_EXIT_GRACE
-            } else {
-                WATCHER_REGISTRATION_TIMEOUT
-            };
+    fn await_watcher_progress(
+        &self,
+        baselines: &[(WatcherKind, WatcherBaseline)],
+        timeout: StdDuration,
+    ) -> Result<(), String> {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut healthy = vec![false; baselines.len()];
         loop {
-            if let Some(status) = watcher_exit_status(slot)
-                .map_err(|message| WatcherStartError::unavailable(kind, message))?
-            {
-                let diagnostic = read_diagnostic(&stderr_path);
-                return Err(WatcherStartError::from_exit(kind, status, &diagnostic));
+            for (index, (kind, baseline)) in baselines.iter().enumerate() {
+                if healthy[index] {
+                    continue;
+                }
+                let slot = match kind {
+                    WatcherKind::Window => &self.window_watcher,
+                    WatcherKind::Afk => &self.afk_watcher,
+                };
+                if let Some(status) = watcher_exit_status(slot).map_err(|message| {
+                    self.fail_capture(kind.unavailable_code());
+                    message
+                })? {
+                    let stderr_path = self
+                        .profile
+                        .diagnostics
+                        .join(format!("{}.stderr.log", kind.binary_name()));
+                    let error =
+                        WatcherStartError::from_exit(*kind, status, &read_diagnostic(&stderr_path));
+                    self.fail_capture(error.code);
+                    return Err(error.message);
+                }
+                healthy[index] = match self.watcher_progressed(baseline) {
+                    Ok(progressed) => progressed,
+                    Err(error) => {
+                        self.fail_capture(kind.unavailable_code());
+                        return Err(error);
+                    }
+                };
             }
-            if !bucket_was_present && self.has_bucket_type(kind.bucket_type()).unwrap_or(false) {
+            if healthy.iter().all(|value| *value) {
+                self.clear_capture_issue();
                 return Ok(());
-            } else if bucket_was_present && std::time::Instant::now() >= deadline {
-                return Ok(());
-            } else if std::time::Instant::now() >= deadline {
-                let _ = terminate_slot(slot);
-                let diagnostic = read_diagnostic(&stderr_path);
-                return Err(WatcherStartError::unavailable(
-                    kind,
-                    format!(
-                        "El capturador {} no se registró en el servicio privado a tiempo{}",
-                        kind.label(),
-                        diagnostic_suffix(&diagnostic)
-                    ),
+            }
+            if std::time::Instant::now() >= deadline {
+                let failed_kind = baselines
+                    .iter()
+                    .zip(&healthy)
+                    .find_map(|((kind, _), is_healthy)| (!is_healthy).then_some(*kind))
+                    .unwrap_or(WatcherKind::Window);
+                self.fail_capture(failed_kind.unavailable_code());
+                return Err(format!(
+                    "El capturador {} siguió vivo, pero no registró actividad nueva en el servicio privado a tiempo",
+                    failed_kind.label()
                 ));
             }
             std::thread::sleep(StdDuration::from_millis(50));
         }
     }
 
-    fn has_bucket_type(&self, bucket_type: &str) -> Result<bool, String> {
-        let buckets = safe_datastore(|| self.datastore.get_buckets())?;
-        Ok(buckets.values().any(|bucket| bucket._type == bucket_type))
+    fn watcher_bucket_id(&self, kind: WatcherKind) -> String {
+        format!(
+            "{}_{}",
+            kind.binary_name(),
+            gethostname::gethostname().to_string_lossy()
+        )
+    }
+
+    fn watcher_baseline(&self, kind: WatcherKind) -> Result<WatcherBaseline, String> {
+        let bucket_id = self.watcher_bucket_id(kind);
+        Ok(WatcherBaseline {
+            snapshot: self.bucket_snapshot(&bucket_id)?,
+            bucket_id,
+            client: kind.binary_name(),
+            hostname: gethostname::gethostname().to_string_lossy().into_owned(),
+            bucket_type: kind.bucket_type(),
+        })
+    }
+
+    fn required_watcher_baseline(&self, kind: WatcherKind) -> Result<WatcherBaseline, String> {
+        self.watcher_baseline(kind).map_err(|error| {
+            self.fail_capture(kind.unavailable_code());
+            error
+        })
+    }
+
+    fn watcher_progressed(&self, baseline: &WatcherBaseline) -> Result<bool, String> {
+        let current = self.bucket_snapshot(&baseline.bucket_id)?;
+        Ok(match (&baseline.snapshot, current) {
+            (None, Some(after)) => baseline.matches(&after),
+            (Some(before), Some(after)) => baseline.matches(&after) && before != &after,
+            _ => false,
+        })
+    }
+
+    fn bucket_snapshot(&self, bucket_id: &str) -> Result<Option<BucketSnapshot>, String> {
+        let datastore = self.datastore()?;
+        let buckets = safe_datastore(|| datastore.get_buckets())?;
+        let Some(bucket) = buckets.get(bucket_id) else {
+            return Ok(None);
+        };
+        let event_count = safe_datastore(|| datastore.get_event_count(bucket_id, None, None))?;
+        Ok(Some(BucketSnapshot {
+            client: bucket.client.clone(),
+            hostname: bucket.hostname.clone(),
+            bucket_type: bucket._type.clone(),
+            created: bucket.created,
+            last_updated: bucket.last_updated,
+            event_end: bucket.metadata.end,
+            event_count,
+        }))
+    }
+
+    fn fail_capture(&self, issue: CaptureIssueCode) {
+        self.set_capture_issue(issue);
+        let _ = self.stop_watchers();
     }
 
     fn set_capture_issue(&self, issue: CaptureIssueCode) {
@@ -665,6 +838,41 @@ impl ActivityWatchRuntime {
         }
     }
 
+    fn recreate_datastore_securely(&self) -> Result<(), String> {
+        // The vendored datastore keeps an immediate transaction open between
+        // requests. Stop its only server consumer and close the worker before
+        // VACUUM so secure deletion is real instead of a best-effort no-op.
+        self.stop_watchers()?;
+        self.shutdown_server();
+        let datastore = self
+            .datastore
+            .lock()
+            .map_err(|_| "No se pudo cerrar el almacén de actividad".to_string())?
+            .take()
+            .ok_or_else(|| "El almacén de actividad ya está en mantenimiento".to_string())?;
+        datastore.close();
+
+        let compact_result = compact_activity_database(&self.database_path);
+        let database = self
+            .database_path
+            .to_str()
+            .ok_or_else(|| "La ruta del almacén de actividad no es válida".to_string())?
+            .to_string();
+        let reopened = catch_unwind(AssertUnwindSafe(|| Datastore::new(database, false)))
+            .map_err(|_| "No se pudo reabrir el almacén de actividad".to_string())?;
+        *self
+            .datastore
+            .lock()
+            .map_err(|_| "No se pudo reabrir el almacén de actividad".to_string())? =
+            Some(reopened);
+        let launch_result = self.launch_server();
+        if let Err(error) = launch_result {
+            self.set_capture_issue(CaptureIssueCode::ServerUnavailable);
+            return Err(error);
+        }
+        compact_result
+    }
+
     fn shutdown_server(&self) {
         if let Ok(slot) = self.server_shutdown.lock() {
             if let Some(shutdown) = slot.as_ref() {
@@ -676,6 +884,10 @@ impl ActivityWatchRuntime {
                 let _ = thread.join();
             }
         }
+        if let Ok(mut slot) = self.server_shutdown.lock() {
+            *slot = None;
+        }
+        self.server_ready.store(false, Ordering::Release);
     }
 
     fn binary_path(&self, kind: WatcherKind) -> PathBuf {
@@ -689,11 +901,25 @@ impl ActivityWatchRuntime {
     }
 }
 
+impl WatcherBaseline {
+    fn matches(&self, snapshot: &BucketSnapshot) -> bool {
+        snapshot.client == self.client
+            && snapshot.hostname == self.hostname
+            && snapshot.bucket_type == self.bucket_type
+    }
+}
+
 impl Drop for ActivityWatchRuntime {
     fn drop(&mut self) {
         let _ = self.stop_watchers();
         self.shutdown_server();
-        self.datastore.close();
+        if let Ok(mut slot) = self.datastore.lock() {
+            if let Some(datastore) = slot.take() {
+                datastore.close();
+            }
+        }
+        let _ = compact_activity_database(&self.database_path);
+        let _ = checkpoint_and_remove_sqlite_sidecars(&self.database_path);
     }
 }
 
@@ -767,8 +993,9 @@ impl WatcherStartError {
 
 fn run_server(
     datastore: Datastore,
-    port: u16,
+    selected_port: Arc<AtomicU16>,
     api_key: String,
+    profile: WatcherProfilePaths,
     ready: Arc<AtomicBool>,
     shutdown_slot: Arc<Mutex<Option<rocket::Shutdown>>>,
     startup_sender: mpsc::SyncSender<Result<(), String>>,
@@ -778,46 +1005,75 @@ fn run_server(
         .build()
         .map_err(|error| format!("No se pudo crear el runtime local: {error}"))?;
     runtime.block_on(async move {
-        let mut config = aw_server::config::AWConfig::default();
-        config.address = "127.0.0.1".into();
-        config.port = port;
-        config.testing = false;
-        config.cors.clear();
-        config.cors_regex.clear();
-        config.auth.api_key = Some(api_key);
-        let state = aw_server::endpoints::ServerState {
-            datastore: Mutex::new(datastore),
-            asset_resolver: aw_server::endpoints::AssetResolver::new(None),
-            device_id: "enso-time-local".into(),
-        };
-        let ready_fairing = rocket::fairing::AdHoc::on_liftoff("Ensō server ready", move |_| {
-            let ready = Arc::clone(&ready);
-            Box::pin(async move {
-                ready.store(true, Ordering::Release);
-            })
-        });
-        let rocket = match aw_server::endpoints::build_rocket(state, config)
-            .attach(ready_fairing)
-            .ignite()
-            .await
-        {
-            Ok(rocket) => rocket,
-            Err(error) => {
-                let message = format!("No se pudo preparar el servicio ActivityWatch: {error}");
-                let _ = startup_sender.send(Err(message.clone()));
-                return Err(message);
+        let mut last_error = None;
+        for port in PORT_START..=PORT_END {
+            if let Err(error) = write_watcher_server_config(&profile, port, &api_key) {
+                let _ = startup_sender.send(Err(error.clone()));
+                return Err(error);
             }
-        };
-        let shutdown = rocket.shutdown();
-        *shutdown_slot
-            .lock()
-            .map_err(|_| "No se pudo preparar el apagado del servicio local")? = Some(shutdown);
-        let _ = startup_sender.send(Ok(()));
-        rocket
-            .launch()
-            .await
-            .map(|_| ())
-            .map_err(|error| format!("El servicio ActivityWatch se detuvo: {error}"))
+            let mut config = aw_server::config::AWConfig::default();
+            config.address = "127.0.0.1".into();
+            config.port = port;
+            config.testing = false;
+            config.cors.clear();
+            config.cors_regex.clear();
+            config.auth.api_key = Some(api_key.clone());
+            let state = aw_server::endpoints::ServerState {
+                datastore: Mutex::new(datastore.clone()),
+                asset_resolver: aw_server::endpoints::AssetResolver::new(None),
+                device_id: "enso-time-local".into(),
+            };
+            let launched = Arc::new(AtomicBool::new(false));
+            let launched_fairing = Arc::clone(&launched);
+            let ready_fairing = Arc::clone(&ready);
+            let port_fairing = Arc::clone(&selected_port);
+            let startup_fairing = startup_sender.clone();
+            let fairing = rocket::fairing::AdHoc::on_liftoff("Ensō server ready", move |_| {
+                let launched = Arc::clone(&launched_fairing);
+                let ready = Arc::clone(&ready_fairing);
+                let selected_port = Arc::clone(&port_fairing);
+                let startup = startup_fairing.clone();
+                Box::pin(async move {
+                    selected_port.store(port, Ordering::Release);
+                    launched.store(true, Ordering::Release);
+                    ready.store(true, Ordering::Release);
+                    let _ = startup.send(Ok(()));
+                })
+            });
+            let rocket = match aw_server::endpoints::build_rocket(state, config)
+                .attach(fairing)
+                .ignite()
+                .await
+            {
+                Ok(rocket) => rocket,
+                Err(error) => {
+                    last_error = Some(format!(
+                        "No se pudo preparar el servicio ActivityWatch en {port}: {error}"
+                    ));
+                    continue;
+                }
+            };
+            let shutdown = rocket.shutdown();
+            *shutdown_slot
+                .lock()
+                .map_err(|_| "No se pudo preparar el apagado del servicio local")? = Some(shutdown);
+            match rocket.launch().await {
+                Ok(_) => return Ok(()),
+                Err(error) if !launched.load(Ordering::Acquire) => {
+                    last_error = Some(format!(
+                        "No se pudo enlazar el servicio ActivityWatch en {port}: {error}"
+                    ));
+                    continue;
+                }
+                Err(error) => {
+                    return Err(format!("El servicio ActivityWatch se detuvo: {error}"));
+                }
+            }
+        }
+        let message = last_error
+            .unwrap_or_else(|| "No hay un puerto local enlazable entre 5610 y 5699".to_string());
+        let _ = startup_sender.send(Err(message.clone()));
+        Err(message)
     })
 }
 
@@ -843,13 +1099,56 @@ fn write_watcher_server_config(
     Ok(())
 }
 
-fn available_port() -> Result<u16, String> {
-    for port in PORT_START..=PORT_END {
-        if TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_ok() {
-            return Ok(port);
+fn prepare_activity_database(path: &Path) -> Result<(), String> {
+    let connection = Connection::open(path)
+        .map_err(|error| format!("No se pudo preparar la base de actividad: {error}"))?;
+    connection
+        .execute_batch("PRAGMA secure_delete=ON; PRAGMA journal_mode=WAL;")
+        .map_err(|error| format!("No se pudo activar el borrado seguro: {error}"))
+}
+
+fn compact_activity_database(path: &Path) -> Result<(), String> {
+    let connection = Connection::open(path)
+        .map_err(|error| format!("No se pudo compactar la base de actividad: {error}"))?;
+    connection
+        .busy_timeout(StdDuration::from_secs(5))
+        .map_err(|error| error.to_string())?;
+    connection
+        .execute_batch(
+            "PRAGMA secure_delete=ON;
+             PRAGMA wal_checkpoint(TRUNCATE);
+             VACUUM;
+             PRAGMA wal_checkpoint(TRUNCATE);
+             PRAGMA journal_mode=DELETE;",
+        )
+        .map_err(|error| format!("Los datos se borraron, pero la compactación falló: {error}"))
+}
+
+fn checkpoint_and_remove_sqlite_sidecars(path: &Path) -> Result<(), String> {
+    let connection = Connection::open(path)
+        .map_err(|error| format!("No se pudo cerrar la base de actividad: {error}"))?;
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .map_err(|error| format!("No se pudo cerrar el WAL de actividad: {error}"))?;
+    drop(connection);
+    for suffix in ["-wal", "-shm"] {
+        let sidecar = sqlite_sidecar_path(path, suffix);
+        if sidecar.exists() {
+            std::fs::remove_file(&sidecar).map_err(|error| {
+                format!(
+                    "No se pudo eliminar el archivo temporal {}: {error}",
+                    sidecar.display()
+                )
+            })?;
         }
     }
-    Err("No hay un puerto local libre entre 5610 y 5699".into())
+    Ok(())
+}
+
+fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
 }
 
 fn set_private_directory_permissions(path: &Path) -> Result<(), String> {
@@ -920,9 +1219,9 @@ fn diagnostic_suffix(diagnostic: &str) -> String {
     }
 }
 
-fn walk_queue_directories(root: &Path) -> Result<Vec<PathBuf>, String> {
+fn walk_private_transient_directories(root: &Path) -> Result<Vec<PathBuf>, String> {
     let mut pending = vec![root.to_path_buf()];
-    let mut queues = Vec::new();
+    let mut transient = Vec::new();
     while let Some(directory) = pending.pop() {
         let entries = std::fs::read_dir(&directory).map_err(|error| {
             format!(
@@ -937,21 +1236,25 @@ fn walk_queue_directories(root: &Path) -> Result<Vec<PathBuf>, String> {
                 continue;
             }
             let path = entry.path();
-            if entry.file_name() == "queued" {
-                queues.push(path);
+            let name = entry.file_name();
+            if matches!(
+                name.to_string_lossy().to_ascii_lowercase().as_str(),
+                "queued" | "log" | "logs" | "diagnostics"
+            ) {
+                transient.push(path);
             } else {
                 pending.push(path);
             }
         }
     }
-    Ok(queues)
+    Ok(transient)
 }
 
-fn delete_private_queues(root: &Path) -> Result<(), String> {
-    for entry in walk_queue_directories(root)? {
+fn delete_private_transient_data(root: &Path) -> Result<(), String> {
+    for entry in walk_private_transient_directories(root)? {
         std::fs::remove_dir_all(&entry).map_err(|error| {
             format!(
-                "No se pudo borrar la cola privada {}: {error}",
+                "No se pudo borrar el artefacto privado {}: {error}",
                 entry.display()
             )
         })?;
@@ -1142,15 +1445,23 @@ mod tests {
     use serde_json::Map;
     use std::collections::HashMap;
     use std::ffi::{OsStr, OsString};
-    use std::net::TcpListener;
+    use std::net::{Ipv4Addr, TcpListener};
     use tempfile::TempDir;
 
     #[test]
-    fn chooses_only_private_port_range() {
-        let official = TcpListener::bind((Ipv4Addr::LOCALHOST, 5600)).unwrap();
-        let port = available_port().unwrap();
+    fn retries_private_bind_without_touching_official_port() {
+        let _official = TcpListener::bind((Ipv4Addr::LOCALHOST, 5600)).unwrap();
+        let _first = TcpListener::bind((Ipv4Addr::LOCALHOST, PORT_START)).unwrap();
+        let _second = TcpListener::bind((Ipv4Addr::LOCALHOST, PORT_START + 1)).unwrap();
+        let temp = TempDir::new().unwrap();
+        let runtime = ActivityWatchRuntime::start(
+            &temp.path().join("data"),
+            temp.path().join("empty-resources"),
+        )
+        .unwrap();
+        let port = wait_until_ready(&runtime);
         assert!((PORT_START..=PORT_END).contains(&port));
-        assert_ne!(official.local_addr().unwrap().port(), port);
+        assert!(port >= PORT_START + 2);
     }
 
     #[test]
@@ -1216,7 +1527,38 @@ mod tests {
     }
 
     #[test]
-    fn queue_cleanup_only_removes_private_queued_directories() {
+    fn activity_database_uses_secure_delete_and_truncates_sidecars() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("activity.sqlite");
+        prepare_activity_database(&database).unwrap();
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch("PRAGMA secure_delete=ON;")
+            .unwrap();
+        let enabled: i64 = connection
+            .query_row("PRAGMA secure_delete", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(enabled, 1);
+        connection
+            .execute_batch(
+                "CREATE TABLE secret(value TEXT);
+                 INSERT INTO secret VALUES('sensitive-marker');
+                 DELETE FROM secret;",
+            )
+            .unwrap();
+        drop(connection);
+        compact_activity_database(&database).unwrap();
+        checkpoint_and_remove_sqlite_sidecars(&database).unwrap();
+        assert!(!sqlite_sidecar_path(&database, "-wal").exists());
+        assert!(!sqlite_sidecar_path(&database, "-shm").exists());
+        let bytes = std::fs::read(database).unwrap();
+        assert!(!bytes
+            .windows(b"sensitive-marker".len())
+            .any(|window| window == b"sensitive-marker"));
+    }
+
+    #[test]
+    fn private_cleanup_removes_queues_and_logs_only_inside_profile() {
         let temp = TempDir::new().unwrap();
         let profile = WatcherProfilePaths::new(temp.path().join("profile"));
         profile.prepare().unwrap();
@@ -1231,14 +1573,18 @@ mod tests {
             std::fs::create_dir_all(queue).unwrap();
             std::fs::write(queue.join("event.persistqueue"), "preserve until delete").unwrap();
         }
+        let logs = profile.home.join("Library/Logs/activitywatch");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(logs.join("watcher.log"), "private log").unwrap();
         let unrelated = profile.root.join("keep/config.toml");
         std::fs::create_dir_all(unrelated.parent().unwrap()).unwrap();
         std::fs::write(&unrelated, "keep").unwrap();
 
-        delete_private_queues(&profile.root).unwrap();
+        delete_private_transient_data(&profile.root).unwrap();
 
         assert!(!legacy_queue.exists());
         assert!(!profiled_queue.exists());
+        assert!(!logs.exists());
         assert_eq!(std::fs::read_to_string(unrelated).unwrap(), "keep");
     }
 
@@ -1263,17 +1609,12 @@ mod tests {
         assert_eq!(classify("Notion", None, &rules), ("focus".into(), 1.0));
     }
 
-    #[cfg(unix)]
     #[test]
     fn watcher_lifecycle_is_enso_owned_and_server_port_is_released() {
         let temp = TempDir::new().unwrap();
-        let resources = fake_watcher_resources(
-            temp.path(),
-            "echo \"args:$*\" >&2; echo \"profile:$AW_PROFILE home:$HOME\" >&2; exec sleep 30",
-        );
+        let resources = compiled_watcher_resources(temp.path(), "healthy");
         let runtime = ActivityWatchRuntime::start(&temp.path().join("data"), resources).unwrap();
         let port = wait_until_ready(&runtime);
-        seed_watcher_buckets(&runtime);
 
         runtime.start_watchers(false).unwrap();
         assert_eq!(
@@ -1281,39 +1622,152 @@ mod tests {
             ("running".into(), "running".into())
         );
         assert_eq!(runtime.capture_issue(), None);
-        for kind in [WatcherKind::Window, WatcherKind::Afk] {
-            let diagnostic = read_diagnostic(
-                &runtime
-                    .profile
-                    .diagnostics
-                    .join(format!("{}.stderr.log", kind.binary_name())),
-            );
-            assert!(diagnostic.contains(&format!("--port {port}")));
-            assert!(diagnostic.contains("profile:enso-time"));
-            assert!(diagnostic.contains(&runtime.profile.home.to_string_lossy().to_string()));
-        }
+        assert!(runtime
+            .bucket_snapshot(&runtime.watcher_bucket_id(WatcherKind::Window))
+            .unwrap()
+            .is_some());
+        assert!(runtime
+            .bucket_snapshot(&runtime.watcher_bucket_id(WatcherKind::Afk))
+            .unwrap()
+            .is_some());
+        let window_bucket = runtime.watcher_bucket_id(WatcherKind::Window);
+        let events = runtime
+            .datastore()
+            .unwrap()
+            .get_events(&window_bucket, None, None, None)
+            .unwrap();
+        assert_eq!(
+            events[0].data.get("title").and_then(|value| value.as_str()),
+            Some("enso-runtime-sensitive-marker")
+        );
         runtime.stop_watchers().unwrap();
         assert_eq!(
             runtime.watcher_statuses(),
             ("stopped".into(), "stopped".into())
         );
+        runtime.delete_all_activity().unwrap();
+        assert!(runtime
+            .datastore()
+            .unwrap()
+            .get_buckets()
+            .unwrap()
+            .is_empty());
+        for path in [
+            runtime.database_path.clone(),
+            sqlite_sidecar_path(&runtime.database_path, "-wal"),
+            sqlite_sidecar_path(&runtime.database_path, "-shm"),
+        ] {
+            if path.is_file() {
+                let bytes = std::fs::read(path).unwrap();
+                assert!(!bytes
+                    .windows(b"enso-runtime-sensitive-marker".len())
+                    .any(|window| window == b"enso-runtime-sensitive-marker"));
+            }
+        }
+        assert!(!sqlite_sidecar_path(&runtime.database_path, "-wal").exists());
+        assert!(!sqlite_sidecar_path(&runtime.database_path, "-shm").exists());
+        runtime.start_watchers(false).unwrap();
+        assert_eq!(
+            runtime.watcher_statuses(),
+            ("running".into(), "running".into())
+        );
+        runtime.stop_watchers().unwrap();
+        let private_queue = runtime.profile.data.join("activitywatch/aw-client/queued");
+        let private_logs = runtime.profile.home.join("Library/Logs/activitywatch");
+        std::fs::create_dir_all(&private_queue).unwrap();
+        std::fs::create_dir_all(&private_logs).unwrap();
+        std::fs::write(private_queue.join("queued.db"), "event").unwrap();
+        std::fs::write(private_logs.join("watcher.log"), "log").unwrap();
+        runtime.delete_queued_activity().unwrap();
+        assert!(!private_queue.exists());
+        assert!(!private_logs.exists());
+        assert!(runtime.profile.diagnostics.exists());
+        let database_path = runtime.database_path.clone();
         drop(runtime);
 
         TcpListener::bind((Ipv4Addr::LOCALHOST, port))
             .expect("the private Rocket listener must stop with the Ensō runtime");
+        assert!(!sqlite_sidecar_path(&database_path, "-wal").exists());
+        assert!(!sqlite_sidecar_path(&database_path, "-shm").exists());
     }
 
-    #[cfg(unix)]
+    #[test]
+    fn live_but_disconnected_watchers_degrade_and_both_are_stopped() {
+        let temp = TempDir::new().unwrap();
+        let resources = compiled_watcher_resources(temp.path(), "disconnected");
+        let runtime = ActivityWatchRuntime::start(&temp.path().join("data"), resources).unwrap();
+        wait_until_ready(&runtime);
+
+        let error = runtime
+            .start_watchers_with_timeout(false, StdDuration::from_millis(500))
+            .unwrap_err();
+        assert!(error.contains("siguió vivo"));
+        assert_eq!(
+            runtime.capture_issue(),
+            Some(CaptureIssueCode::WindowWatcherUnavailable)
+        );
+        assert_eq!(
+            runtime.watcher_statuses(),
+            ("stopped".into(), "stopped".into())
+        );
+    }
+
+    #[test]
+    fn retention_prune_compacts_and_restores_running_watchers() {
+        let temp = TempDir::new().unwrap();
+        let resources = compiled_watcher_resources(temp.path(), "healthy");
+        let runtime = ActivityWatchRuntime::start(&temp.path().join("data"), resources).unwrap();
+        wait_until_ready(&runtime);
+        runtime.start_watchers(false).unwrap();
+
+        let deleted = runtime.prune_activity(Some(0)).unwrap();
+
+        assert!(deleted >= 2);
+        assert_eq!(
+            runtime.watcher_statuses(),
+            ("running".into(), "running".into())
+        );
+        assert_eq!(runtime.capture_issue(), None);
+    }
+
+    #[test]
+    fn preexisting_exact_buckets_require_a_post_spawn_heartbeat() {
+        let temp = TempDir::new().unwrap();
+        let resources = compiled_watcher_resources(temp.path(), "healthy");
+        let runtime = ActivityWatchRuntime::start(&temp.path().join("data"), resources).unwrap();
+        wait_until_ready(&runtime);
+        for kind in [WatcherKind::Window, WatcherKind::Afk] {
+            runtime
+                .datastore()
+                .unwrap()
+                .create_bucket(&Bucket {
+                    bid: None,
+                    id: runtime.watcher_bucket_id(kind),
+                    _type: kind.bucket_type().into(),
+                    client: kind.binary_name().into(),
+                    hostname: gethostname::gethostname().to_string_lossy().into_owned(),
+                    created: None,
+                    data: Map::new(),
+                    metadata: BucketMetadata::default(),
+                    events: None,
+                    last_updated: None,
+                })
+                .unwrap();
+        }
+        let before = runtime.watcher_baseline(WatcherKind::Window).unwrap();
+
+        runtime.start_watchers(false).unwrap();
+
+        assert!(runtime.watcher_progressed(&before).unwrap());
+        assert_eq!(runtime.capture_issue(), None);
+    }
+
     #[test]
     fn early_single_instance_exit_is_reported_as_conflict_and_can_retry() {
         let temp = TempDir::new().unwrap();
-        let resources = fake_watcher_resources(
-            temp.path(),
-            "echo 'Another instance is already running, quitting.' >&2; exit 255",
-        );
+        let resources = compiled_watcher_resources(temp.path(), "conflict");
         let runtime = ActivityWatchRuntime::start(&temp.path().join("data"), resources).unwrap();
         wait_until_ready(&runtime);
-        seed_watcher_buckets(&runtime);
 
         let error = runtime.start_watchers(false).unwrap_err();
         assert!(error.contains("terminó durante el inicio"));
@@ -1327,20 +1781,13 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn missing_afk_watcher_stops_only_enso_capture_and_reports_exact_issue() {
-        use std::os::unix::fs::PermissionsExt;
         let temp = TempDir::new().unwrap();
-        let resources = temp.path().join("resources");
-        let directory = resources.join("activitywatch").join("aw-watcher-window");
-        std::fs::create_dir_all(&directory).unwrap();
-        let binary = directory.join("aw-watcher-window");
-        std::fs::write(&binary, "#!/bin/sh\nexec sleep 30\n").unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let resources = compiled_watcher_resources(temp.path(), "healthy");
+        std::fs::remove_file(fixture_binary_path(&resources, "aw-watcher-afk")).unwrap();
         let runtime = ActivityWatchRuntime::start(&temp.path().join("data"), resources).unwrap();
         wait_until_ready(&runtime);
-        seed_watcher_buckets(&runtime);
 
         assert!(runtime.start_watchers(false).is_err());
         assert_eq!(
@@ -1353,18 +1800,95 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
-    fn fake_watcher_resources(root: &Path, body: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
+    fn compiled_watcher_resources(root: &Path, mode: &str) -> PathBuf {
         let resources = root.join("resources");
+        let source = root.join(format!("watcher-fixture-{mode}.rs"));
+        let compiled = root.join(format!(
+            "watcher-fixture-{mode}{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        let fixture_source = format!(
+            r###"
+use std::env;
+use std::io::{{Read, Write}};
+use std::net::TcpStream;
+use std::thread;
+use std::time::Duration;
+
+fn request(port: u16, method: &str, path: &str, body: &str, key: &str) {{
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write!(
+        stream,
+        "{{method}} {{path}} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {{key}}\r\nContent-Type: application/json\r\nContent-Length: {{}}\r\nConnection: close\r\n\r\n{{body}}",
+        body.as_bytes().len()
+    ).unwrap();
+    stream.flush().unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).unwrap();
+    assert!(
+        response.starts_with(b"HTTP/1.1 2") || response.starts_with(b"HTTP/1.1 3"),
+        "{{}}",
+        String::from_utf8_lossy(&response)
+    );
+}}
+
+fn main() {{
+    let mode = {mode:?};
+    if mode == "conflict" {{
+        eprintln!("Another instance is already running, quitting.");
+        std::process::exit(255);
+    }}
+    if mode == "healthy" {{
+        let args: Vec<String> = env::args().collect();
+        let port_index = args.iter().position(|arg| arg == "--port").unwrap();
+        let port = args[port_index + 1].parse::<u16>().unwrap();
+        let bucket = env::var("ENSO_TEST_BUCKET_ID").unwrap();
+        let bucket_type = env::var("ENSO_TEST_BUCKET_TYPE").unwrap();
+        let client = env::var("ENSO_TEST_CLIENT_NAME").unwrap();
+        let hostname = env::var("ENSO_TEST_HOSTNAME").unwrap();
+        let key = env::var("ENSO_TEST_API_KEY").unwrap();
+        let body = format!(r#"{{{{"client":"{{}}","hostname":"{{}}","type":"{{}}"}}}}"#, client, hostname, bucket_type);
+        request(port, "POST", &format!("/api/0/buckets/{{}}", bucket), &body, &key);
+    let event = r#"{{"timestamp":"2026-08-21T12:00:00Z","duration":1.0,"data":{{"app":"fixture","title":"enso-runtime-sensitive-marker","status":"not-afk"}}}}"#;
+        request(
+            port,
+            "POST",
+            &format!("/api/0/buckets/{{}}/heartbeat?pulsetime=1", bucket),
+            event,
+            &key
+        );
+    }}
+    loop {{ thread::sleep(Duration::from_secs(30)); }}
+}}
+"###,
+        );
+        std::fs::write(&source, fixture_source).unwrap();
+        let output = Command::new("rustc")
+            .arg("--edition=2021")
+            .arg(&source)
+            .arg("-o")
+            .arg(&compiled)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "fixture compilation failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         for name in ["aw-watcher-window", "aw-watcher-afk"] {
             let directory = resources.join("activitywatch").join(name);
             std::fs::create_dir_all(&directory).unwrap();
-            let binary = directory.join(name);
-            std::fs::write(&binary, format!("#!/bin/sh\n{body}\n")).unwrap();
-            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::fs::copy(&compiled, fixture_binary_path(&resources, name)).unwrap();
         }
         resources
+    }
+
+    fn fixture_binary_path(resources: &Path, name: &str) -> PathBuf {
+        let directory = resources.join("activitywatch").join(name);
+        #[cfg(target_os = "windows")]
+        return directory.join(format!("{name}.exe"));
+        #[cfg(not(target_os = "windows"))]
+        return directory.join(name);
     }
 
     fn wait_until_ready(runtime: &ActivityWatchRuntime) -> u16 {
@@ -1378,25 +1902,5 @@ mod tests {
             std::thread::sleep(StdDuration::from_millis(25));
         }
         panic!("private server did not become ready");
-    }
-
-    fn seed_watcher_buckets(runtime: &ActivityWatchRuntime) {
-        for (id, bucket_type) in [("test-window", "currentwindow"), ("test-afk", "afkstatus")] {
-            runtime
-                .datastore
-                .create_bucket(&Bucket {
-                    bid: None,
-                    id: id.into(),
-                    _type: bucket_type.into(),
-                    client: "enso-test".into(),
-                    hostname: "localhost".into(),
-                    created: None,
-                    data: Map::new(),
-                    metadata: BucketMetadata::default(),
-                    events: None,
-                    last_updated: None,
-                })
-                .unwrap();
-        }
     }
 }
