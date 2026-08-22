@@ -11,6 +11,7 @@ import type {
   TimelineBlockV1,
   TrackingStatus,
   UpdateInfo,
+  WorkflowIntakeV1,
 } from "./types";
 
 const STORAGE_KEY = "enso-time-web-state-v1";
@@ -20,6 +21,7 @@ interface WebState {
   checkIns: CheckInV1[];
   pausedUntil?: string;
   captureIssue?: CaptureIssue | null;
+  workflowIntakes?: WorkflowIntakeV1[];
 }
 
 function isTauri(): boolean {
@@ -38,6 +40,39 @@ function loadWebState(): WebState {
 
 function saveWebState(state: WebState) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+}
+
+function enrichPreviewDiagnostic(diagnostic: DiagnosticV1, state: WebState): DiagnosticV1 {
+  const candidateId = diagnostic.candidates[0]?.id;
+  const intake = (state.workflowIntakes ?? []).find((item) => item.candidateId === candidateId);
+  if (!intake) return diagnostic;
+  const english = state.settings.locale === "en";
+  const workflowContext = english
+    ? [
+        "WORKFLOW INTAKE",
+        `- Trigger: ${intake.trigger}`,
+        `- Tools: ${intake.tools.join(", ")}`,
+        `- Ordered steps: ${intake.steps.map((step, index) => `${index + 1}. ${step}`).join(" | ")}`,
+        `- Human decisions: ${intake.humanDecisions}`,
+        `- Inputs: ${intake.inputs}`,
+        `- Desired output: ${intake.desiredOutput}`,
+        `- Frequency: ${intake.frequency}`,
+        `- Minutes per run: ${intake.minutesPerRun}`,
+        `- Pain points: ${intake.painPoints}`,
+      ]
+    : [
+        "LEVANTAMIENTO DEL WORKFLOW",
+        `- Disparador: ${intake.trigger}`,
+        `- Herramientas: ${intake.tools.join(", ")}`,
+        `- Pasos ordenados: ${intake.steps.map((step, index) => `${index + 1}. ${step}`).join(" | ")}`,
+        `- Decisiones humanas: ${intake.humanDecisions}`,
+        `- Entradas: ${intake.inputs}`,
+        `- Resultado deseado: ${intake.desiredOutput}`,
+        `- Frecuencia: ${intake.frequency}`,
+        `- Minutos por ejecución: ${intake.minutesPerRun}`,
+        `- Puntos de dolor: ${intake.painPoints}`,
+      ];
+  return { ...diagnostic, prompt: `${diagnostic.prompt}\n\n${workflowContext.join("\n")}` };
 }
 
 export const bridge = {
@@ -86,7 +121,23 @@ export const bridge = {
   async generateDiagnostic(days: 7 | 14 | 28): Promise<DiagnosticV1> {
     if (isTauri()) return invoke("generate_diagnostic", { days });
     const state = loadWebState();
-    return days === 7 ? createDiagnostic(demoTimeline, state.checkIns, 5, state.settings.role, state.settings.goals) : { ...demoDiagnostic, daysObserved: 5, preliminary: true };
+    const diagnostic = days === 7 ? createDiagnostic(demoTimeline, state.checkIns, 5, state.settings.role, state.settings.goals) : { ...demoDiagnostic, daysObserved: 5, preliminary: true };
+    return enrichPreviewDiagnostic(diagnostic, state);
+  },
+
+  async listWorkflowIntakes(): Promise<WorkflowIntakeV1[]> {
+    return isTauri() ? invoke("list_workflow_intakes") : loadWebState().workflowIntakes ?? [];
+  },
+
+  async saveWorkflowIntake(intake: WorkflowIntakeV1): Promise<WorkflowIntakeV1> {
+    if (isTauri()) return invoke("save_workflow_intake", { intake });
+    const state = loadWebState();
+    const current = state.workflowIntakes ?? [];
+    const updated = current.some((item) => item.candidateId === intake.candidateId)
+      ? current.map((item) => item.candidateId === intake.candidateId ? intake : item)
+      : [...current, intake];
+    saveWebState({ ...state, workflowIntakes: updated });
+    return intake;
   },
 
   async pauseTracking(minutes: number): Promise<TrackingStatus> {

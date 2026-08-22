@@ -120,6 +120,23 @@ export interface AutomationCandidateV1 {
   evidence: string[];
 }
 
+export interface WorkflowIntakeV1 {
+  id: string;
+  candidateId: string;
+  candidateLabel: string;
+  trigger: string;
+  tools: string[];
+  steps: string[];
+  humanDecisions: string;
+  inputs: string;
+  desiredOutput: string;
+  frequency: string;
+  minutesPerRun: number;
+  painPoints: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface DiagnosticV1 {
   schemaVersion: 1;
   rangeStart: string;

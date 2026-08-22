@@ -24,9 +24,11 @@ import {
   Trash2,
 } from "lucide-react";
 import { bridge } from "./lib/bridge";
+import { WorkflowIntakeView } from "./components/WorkflowIntakeView";
 import { CATEGORY_ORDER, categoryColor } from "./lib/categories";
 import { categoryLabel, formatDuration, formatTime, messages } from "./lib/i18n";
 import type {
+  AutomationCandidateV1,
   CategoryId,
   CheckInAnswer,
   CheckInV1,
@@ -37,9 +39,10 @@ import type {
   StudyProgress,
   TimelineBlockV1,
   TrackingStatus,
+  WorkflowIntakeV1,
 } from "./lib/types";
 
-type View = "today" | "checkins" | "study" | "automate" | "settings";
+type View = "today" | "checkins" | "study" | "automate" | "workflow" | "settings";
 type Notice = { kind: "success" | "error"; message: string };
 
 const EMPTY_STATUS: TrackingStatus = {
@@ -315,7 +318,7 @@ function StudyView({ progress, locale, onDays }: { progress: StudyProgress; loca
   );
 }
 
-function AutomateView({ diagnostic, locale, busy, onGenerate, onCopy, onOpen }: { diagnostic: DiagnosticV1; locale: Locale; busy: boolean; onGenerate: () => Promise<void>; onCopy: () => Promise<void>; onOpen: (url: string) => Promise<void> }) {
+function AutomateView({ diagnostic, locale, busy, onGenerate, onCopy, onOpen, onWorkflow }: { diagnostic: DiagnosticV1; locale: Locale; busy: boolean; onGenerate: () => Promise<void>; onCopy: () => Promise<void>; onOpen: (url: string) => Promise<void>; onWorkflow: (candidate: AutomationCandidateV1) => void }) {
   const copy = messages(locale).automate;
   const candidate = diagnostic.candidates[0];
   return (
@@ -325,7 +328,7 @@ function AutomateView({ diagnostic, locale, busy, onGenerate, onCopy, onOpen }: 
       {candidate ? (
         <section className="candidate-section" aria-labelledby="candidate-title">
           <div className="candidate-rank"><span>{candidate.priorityScore}</span><small>/ 100</small></div>
-          <div className="candidate-main"><p className="section-note">{copy.candidate}</p><h2 id="candidate-title">{candidate.activityLabel}</h2><p>{candidate.evidence.join(" · ")}</p><div className="score-line"><span><b>{candidate.priorityScore}</b>/100 {copy.signal}</span><span><b>{candidate.estimatedWeeklyHours}</b> {copy.weeklyHours}</span><span><b>{candidate.weeklyFrequency}</b> {copy.repetitions}</span></div></div>
+          <div className="candidate-main"><p className="section-note">{copy.candidate}</p><h2 id="candidate-title">{candidate.activityLabel}</h2><p>{candidate.evidence.join(" · ")}</p><div className="score-line"><span><b>{candidate.priorityScore}</b>/100 {copy.signal}</span><span><b>{candidate.estimatedWeeklyHours}</b> {copy.weeklyHours}</span><span><b>{candidate.weeklyFrequency}</b> {copy.repetitions}</span></div><div className="workflow-cta"><button type="button" className="secondary-button" onClick={() => onWorkflow(candidate)}>{copy.workflowAction}<ChevronRight size={16} aria-hidden="true" /></button><small>{copy.workflowHint}</small></div></div>
           <div className="candidate-scores"><span><b>{candidate.impactScore}/40</b>{copy.impact}</span><span><b>{candidate.feasibilityScore}/35</b>{copy.feasibility}</span><span><b>{candidate.riskScore}/25</b>{copy.risk}</span></div>
         </section>
       ) : <section className="empty-state"><Target size={30} aria-hidden="true" /><h2>{copy.empty}</h2><p>{copy.emptyCopy}</p></section>}
@@ -374,6 +377,7 @@ export default function App() {
   const [diagnostic, setDiagnostic] = useState<DiagnosticV1 | null>(null);
   const [notice, setNotice] = useState<Notice>();
   const [diagnosticBusy, setDiagnosticBusy] = useState(false);
+  const [workflowCandidate, setWorkflowCandidate] = useState<AutomationCandidateV1 | null>(null);
 
   async function load() {
     setLoading(true);
@@ -441,6 +445,12 @@ export default function App() {
     setDiagnosticBusy(true);
     void action(async () => { setDiagnostic(await bridge.generateDiagnostic(days)); }).finally(() => setDiagnosticBusy(false));
   };
+  const saveWorkflowIntake = async (intake: WorkflowIntakeV1) => {
+    const saved = await bridge.saveWorkflowIntake(intake);
+    setDiagnostic(await bridge.generateDiagnostic(study.selectedDays));
+    setNotice({ kind: "success", message: copy.workflow.savedTitle });
+    return saved;
+  };
 
   return (
     <div className="app-shell">
@@ -455,7 +465,8 @@ export default function App() {
         {view === "today" && <TodayView settings={settings} status={status} blocks={blocks} checkIns={checkIns} onNavigate={setView} onPause={() => action(async () => { setStatus(await bridge.pauseTracking(30)); }, copy.notices.paused)} onResume={() => action(async () => { setStatus(await bridge.resumeTracking()); }, copy.notices.resumed)} />}
         {view === "checkins" && <CheckInsView checkIns={checkIns} settings={settings} onAnswer={answer} />}
         {view === "study" && <StudyView progress={study} locale={settings.locale} onDays={selectDays} />}
-        {view === "automate" && <AutomateView diagnostic={diagnostic} locale={settings.locale} busy={diagnosticBusy} onGenerate={async () => { setDiagnosticBusy(true); await action(async () => { setDiagnostic(await bridge.generateDiagnostic(study.selectedDays)); }, copy.notices.diagnosticUpdated); setDiagnosticBusy(false); }} onCopy={() => action(async () => { await navigator.clipboard.writeText(diagnostic.prompt); }, copy.notices.promptCopied)} onOpen={(url) => action(() => bridge.openExternal(url))} />}
+        {view === "automate" && <AutomateView diagnostic={diagnostic} locale={settings.locale} busy={diagnosticBusy} onGenerate={async () => { setDiagnosticBusy(true); await action(async () => { setDiagnostic(await bridge.generateDiagnostic(study.selectedDays)); }, copy.notices.diagnosticUpdated); setDiagnosticBusy(false); }} onCopy={() => action(async () => { await navigator.clipboard.writeText(diagnostic.prompt); }, copy.notices.promptCopied)} onOpen={(url) => action(() => bridge.openExternal(url))} onWorkflow={(candidate) => { setWorkflowCandidate(candidate); setView("workflow"); }} />}
+        {view === "workflow" && <WorkflowIntakeView candidate={workflowCandidate} locale={settings.locale} onBack={() => setView("automate")} onSaved={saveWorkflowIntake} />}
         {view === "settings" && <SettingsView settings={settings} status={status} onSave={saveSettings} onExport={(format) => action(async () => { const path = await bridge.exportData(format); setNotice({ kind: "success", message: copy.notices.exported(path) }); })} onDelete={() => action(async () => { if (!window.confirm(copy.settings.deleteConfirm)) return; await bridge.deleteAllData(); setNotice({ kind: "success", message: copy.notices.deleted }); await load(); })} />}
       </main>
       {notice && <div className={`toast ${notice.kind === "error" ? "is-error" : ""}`} role={notice.kind === "error" ? "alert" : "status"}>{notice.kind === "error" ? <AlertCircle size={15} aria-hidden="true" /> : <Check size={15} aria-hidden="true" />}{notice.message}</div>}

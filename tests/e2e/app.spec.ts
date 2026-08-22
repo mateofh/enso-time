@@ -161,8 +161,21 @@ test("answers a check-in and clears its pending count", async ({ page, browserEr
   await expect(page.getByText("Preparar el reporte mensual")).toBeVisible();
 });
 
-test("switches study periods, refreshes diagnostics, and copies the prompt", async ({ page, browserErrors: _browserErrors }) => {
-  await seedBridge(page);
+test("maps, saves, resumes, and enriches the top candidate workflow", async ({ page, browserErrors: _browserErrors }) => {
+  const workflowCheckIns = [1, 2, 3].map((day) => ({
+    id: `workflow-checkin-${day}`,
+    intervalStart: `2026-08-0${day}T15:00:00.000Z`,
+    intervalEnd: `2026-08-0${day}T15:15:00.000Z`,
+    reason: "ambiguous",
+    status: "answered",
+    activityLabel: "Actualizar reporte semanal",
+    category: "admin",
+    repetitive: true,
+    rulesClear: true,
+    createdAt: `2026-08-0${day}T15:15:00.000Z`,
+    answeredAt: `2026-08-0${day}T15:16:00.000Z`,
+  }));
+  await seedBridge(page, { checkIns: workflowCheckIns });
   await page.goto("/");
   await page.getByRole("button", { name: "Estudio" }).click();
 
@@ -172,11 +185,65 @@ test("switches study periods, refreshes diagnostics, and copies the prompt", asy
 
   await page.getByRole("button", { name: "Automatizar" }).click();
   await expect(page.getByRole("heading", { name: "Qué automatizar primero." })).toBeVisible();
-  await page.getByRole("button", { name: "Actualizar" }).click();
-  await expect(page.getByText("Diagnóstico actualizado")).toBeVisible();
-  await page.getByRole("button", { name: "Copiar prompt" }).click();
-  await expect(page.getByText("Prompt copiado")).toBeVisible();
-  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain("Rol:");
+  await page.getByRole("button", { name: "Levantar workflow" }).click();
+  await expect(page.getByRole("heading", { name: "Describe cómo ocurre hoy." })).toBeVisible();
+
+  await page.getByRole("button", { name: "Guardar levantamiento" }).click();
+  await expect(page.getByText("Completa los campos requeridos antes de guardar.")).toBeVisible();
+  await expect(page.getByLabel("¿Qué dispara este workflow?")).toBeFocused();
+
+  await page.getByLabel("¿Qué dispara este workflow?").fill("Llega el cierre semanal de ventas");
+  await page.getByRole("textbox", { name: "Frecuencia", exact: true }).fill("Cada viernes");
+  await page.getByLabel("Minutos por ejecución").fill("45");
+  await page.getByRole("textbox", { name: "Herramienta 1", exact: true }).fill("Google Sheets");
+  await page.getByRole("button", { name: "Agregar herramienta" }).click();
+  await page.getByRole("textbox", { name: "Herramienta 2", exact: true }).fill("Slack");
+  await page.getByRole("textbox", { name: "Paso 1", exact: true }).fill("Exportar las oportunidades cerradas");
+  await page.getByRole("button", { name: "Agregar paso" }).click();
+  await page.getByRole("textbox", { name: "Paso 2", exact: true }).fill("Validar montos y responsables");
+  await page.getByLabel("Decisiones humanas").fill("Excluir cuentas con disputas abiertas");
+  await page.getByLabel("Entradas").fill("CSV de ventas y tabla de metas");
+  await page.getByLabel("Resultado deseado").fill("Reporte validado y listo para compartir");
+  await page.getByLabel("Puntos de dolor").fill("Corregir formatos y buscar datos faltantes");
+  await page.getByRole("button", { name: "Guardar levantamiento" }).click();
+
+  await expect(page.getByText("Levantamiento guardado", { exact: true }).first()).toBeVisible();
+  const saved = await page.evaluate((key) => JSON.parse(localStorage.getItem(key)!).workflowIntakes[0], STORAGE_KEY);
+  expect(saved).toMatchObject({
+    candidateLabel: "Actualizar reporte semanal",
+    trigger: "Llega el cierre semanal de ventas",
+    tools: ["Google Sheets", "Slack"],
+    steps: ["Exportar las oportunidades cerradas", "Validar montos y responsables"],
+    humanDecisions: "Excluir cuentas con disputas abiertas",
+    inputs: "CSV de ventas y tabla de metas",
+    desiredOutput: "Reporte validado y listo para compartir",
+    frequency: "Cada viernes",
+    minutesPerRun: 45,
+    painPoints: "Corregir formatos y buscar datos faltantes",
+  });
+
+  await page.reload();
+  await page.getByRole("button", { name: "Automatizar" }).click();
+  await expect(page.locator(".prompt-section pre")).toContainText("LEVANTAMIENTO DEL WORKFLOW");
+  await expect(page.locator(".prompt-section pre")).toContainText("Llega el cierre semanal de ventas");
+  await page.getByRole("button", { name: "Levantar workflow" }).click();
+  await expect(page.getByLabel("¿Qué dispara este workflow?")).toHaveValue("Llega el cierre semanal de ventas");
+  await expect(page.getByRole("textbox", { name: "Herramienta 2", exact: true })).toHaveValue("Slack");
+  await page.getByLabel("Puntos de dolor").fill("Corregir formatos, buscar datos faltantes y esperar aprobación");
+  await page.getByRole("button", { name: "Guardar levantamiento" }).click();
+  await expect(page.getByText("Levantamiento guardado", { exact: true }).first()).toBeVisible();
+
+  await page.evaluate((key) => {
+    const state = JSON.parse(localStorage.getItem(key)!);
+    localStorage.setItem(key, JSON.stringify({ ...state, settings: { ...state.settings, locale: "en" } }));
+  }, STORAGE_KEY);
+  await page.reload();
+  await expect(page.locator("html")).toHaveAttribute("lang", "en");
+  await page.getByRole("button", { name: "Automate" }).click();
+  await expect(page.locator(".prompt-section pre")).toContainText("WORKFLOW INTAKE");
+  await page.getByRole("button", { name: "Map workflow" }).click();
+  await expect(page.getByRole("heading", { name: "Describe how it works today." })).toBeVisible();
+  await expect(page.getByLabel("What triggers this workflow?")).toHaveValue("Llega el cierre semanal de ventas");
 });
 
 test("saves settings, exports both formats, and deletes local data", async ({ page, browserErrors: _browserErrors }) => {
