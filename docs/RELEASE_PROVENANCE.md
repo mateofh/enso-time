@@ -169,6 +169,15 @@ macOS bundle name, and explicit application window title remain `Ensō Time`; th
 override only supplies the Windows MSI/NSIS packaging identity. Both installer
 formats remain required and are smoke-tested after bundling.
 
+Changing Tauri's `productName` would also change its default UUID-v5 WiX upgrade
+identity. The Windows CI override therefore pins `bundle.windows.wix.upgradeCode`
+to `b9b13e4b-5399-58c4-b563-de7a5e0c02a9`, the code derived from the original
+`Ensō Time` identity. Before administrative extraction, the Windows smoke test
+opens the generated MSI through the Windows Installer COM API and requires the
+exact `ProductName` and canonicalized `UpgradeCode`, then explicitly releases all
+COM objects. Windows builds also set `TAURI_CLI_VERBOSITY=1` so future WiX failures
+retain actionable diagnostics without changing macOS builds.
+
 ## References
 
 - [GitHub artifact attestations](https://docs.github.com/en/actions/concepts/security/artifact-attestations)

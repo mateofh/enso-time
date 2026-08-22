@@ -95,10 +95,13 @@ test("Windows packaging uses an ASCII product name without changing the macOS br
   assert.ok(windowsStart > 0);
   const windows = configure.slice(windowsStart);
   const windowsName = windows.match(/const windowsProductName = "([^"]+)"/)?.[1];
+  const windowsUpgradeCode = windows.match(/const windowsUpgradeCode = "([^"]+)"/)?.[1];
 
   assert.equal(windowsName, "Enso Time");
+  assert.equal(windowsUpgradeCode, "b9b13e4b-5399-58c4-b563-de7a5e0c02a9");
   assert.match(windowsName, /^[\x20-\x7E]+$/);
   assert.match(windows, /config\.productName = windowsProductName/);
+  assert.match(windows, /config\.bundle = \{ windows: \{ wix: \{ upgradeCode: windowsUpgradeCode \} \} \}/);
   assert.match(windows, /Windows productName must be printable ASCII/);
 
   const macStart = configure.indexOf('if (process.platform === "darwin")');
@@ -106,6 +109,19 @@ test("Windows packaging uses an ASCII product name without changing the macOS br
   const mac = configure.slice(macStart, windowsStart);
   assert.doesNotMatch(mac, /productName/);
   assert.equal(tauriConfig.productName, "Ensō Time");
+});
+
+test("Windows verifies MSI identity through COM and enables verbose Tauri diagnostics", () => {
+  assert.match(workflow, /if: runner\.os == 'Windows'\s+shell: bash\s+run: echo 'TAURI_CLI_VERBOSITY=1' >> "\$GITHUB_ENV"/);
+  assert.match(workflow, /New-Object -ComObject WindowsInstaller\.Installer/);
+  assert.match(workflow, /Get-MsiProperty -Database \$database -Name "ProductName"/);
+  assert.match(workflow, /Get-MsiProperty -Database \$database -Name "UpgradeCode"/);
+  assert.match(workflow, /if \(\$productName -cne "Enso Time"\)/);
+  assert.match(workflow, /if \(\$upgradeCode -cne "b9b13e4b-5399-58c4-b563-de7a5e0c02a9"\)/);
+  assert.match(workflow, /FinalReleaseComObject\(\$record\)/);
+  assert.match(workflow, /FinalReleaseComObject\(\$view\)/);
+  assert.match(workflow, /FinalReleaseComObject\(\$database\)/);
+  assert.match(workflow, /FinalReleaseComObject\(\$installer\)/);
 });
 
 test("every external action is pinned to a full commit SHA", () => {

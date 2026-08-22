@@ -269,11 +269,18 @@ jobs:
             if (!/^[\x20-\x7E]+$/.test(windowsProductName)) {
               throw new Error(`Windows productName must be printable ASCII, received ${windowsProductName}`);
             }
+            const windowsUpgradeCode = "b9b13e4b-5399-58c4-b563-de7a5e0c02a9";
             config.productName = windowsProductName;
             config.version = `${match[1]}-${match[2]}`;
+            config.bundle = { windows: { wix: { upgradeCode: windowsUpgradeCode } } };
           }
           fs.writeFileSync("src-tauri/ci-bundle.json", JSON.stringify(config));
           NODE
+
+      - name: Enable verbose Tauri diagnostics on Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo 'TAURI_CLI_VERBOSITY=1' >> "$GITHUB_ENV"
 
       - name: Build Tauri installers
         uses: tauri-apps/tauri-action@fce9c6108b31ea247710505d3aaaa893ee6768d4 # v0
@@ -309,6 +316,70 @@ jobs:
           $nsis = @(Get-ChildItem "$bundle/nsis" -File -Filter *.exe)
           if ($msi.Count -ne 1 -or $nsis.Count -ne 1) {
             throw "Expected exactly one MSI and one NSIS installer before smoke testing."
+          }
+
+          function Get-MsiProperty {
+            param($Database, [string]$Name)
+            $view = $null
+            $record = $null
+            try {
+              $query = "SELECT ``Value`` FROM ``Property`` WHERE ``Property`` = '$Name'"
+              $view = $Database.GetType().InvokeMember(
+                "OpenView", [System.Reflection.BindingFlags]::InvokeMethod,
+                $null, $Database, @($query)
+              )
+              [void]$view.GetType().InvokeMember(
+                "Execute", [System.Reflection.BindingFlags]::InvokeMethod,
+                $null, $view, $null
+              )
+              $record = $view.GetType().InvokeMember(
+                "Fetch", [System.Reflection.BindingFlags]::InvokeMethod,
+                $null, $view, $null
+              )
+              if ($null -eq $record) {
+                throw "MSI Property table does not contain $Name."
+              }
+              return [string](
+                $record.GetType().InvokeMember(
+                  "StringData", [System.Reflection.BindingFlags]::GetProperty,
+                  $null, $record, @(1)
+                )
+              )
+            } finally {
+              if ($null -ne $record -and [System.Runtime.InteropServices.Marshal]::IsComObject($record)) {
+                [void][System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($record)
+              }
+              if ($null -ne $view -and [System.Runtime.InteropServices.Marshal]::IsComObject($view)) {
+                [void][System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($view)
+              }
+            }
+          }
+
+          $installer = $null
+          $database = $null
+          try {
+            $installer = New-Object -ComObject WindowsInstaller.Installer
+            $database = $installer.GetType().InvokeMember(
+              "OpenDatabase", [System.Reflection.BindingFlags]::InvokeMethod,
+              $null, $installer, @($msi[0].FullName, 0)
+            )
+            $productName = Get-MsiProperty -Database $database -Name "ProductName"
+            $upgradeCode = (Get-MsiProperty -Database $database -Name "UpgradeCode").Trim("{}").ToLowerInvariant()
+            if ($productName -cne "Enso Time") {
+              throw "MSI ProductName mismatch: expected Enso Time, received $productName."
+            }
+            if ($upgradeCode -cne "b9b13e4b-5399-58c4-b563-de7a5e0c02a9") {
+              throw "MSI UpgradeCode mismatch: received $upgradeCode."
+            }
+          } finally {
+            if ($null -ne $database -and [System.Runtime.InteropServices.Marshal]::IsComObject($database)) {
+              [void][System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($database)
+            }
+            if ($null -ne $installer -and [System.Runtime.InteropServices.Marshal]::IsComObject($installer)) {
+              [void][System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($installer)
+            }
+            [GC]::Collect()
+            [GC]::WaitForPendingFinalizers()
           }
 
           $msiExtract = Join-Path $env:RUNNER_TEMP "enso-time-msi-smoke"
