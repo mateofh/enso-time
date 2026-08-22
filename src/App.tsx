@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type CSSProperties, type FormEvent } from "react";
 import {
   Activity,
+  AlertCircle,
+  ArrowLeft,
   ArrowUpRight,
   Bot,
   Check,
@@ -15,7 +17,7 @@ import {
   LockKeyhole,
   Pause,
   Play,
-  RotateCcw,
+  RefreshCw,
   Settings as SettingsIcon,
   Sparkles,
   Target,
@@ -29,6 +31,7 @@ import type {
   CheckInAnswer,
   CheckInV1,
   DiagnosticV1,
+  Locale,
   SettingsV1,
   StudyProgress,
   TimelineBlockV1,
@@ -36,6 +39,7 @@ import type {
 } from "./lib/types";
 
 type View = "today" | "checkins" | "study" | "automate" | "settings";
+type Notice = { kind: "success" | "error"; message: string };
 
 const EMPTY_STATUS: TrackingStatus = {
   running: false,
@@ -54,11 +58,12 @@ function BrandMark({ compact = false }: { compact?: boolean }) {
   );
 }
 
-function StatusPill({ status }: { status: TrackingStatus }) {
+function StatusPill({ status, locale }: { status: TrackingStatus; locale: Locale }) {
+  const copy = messages(locale).common;
   return (
     <span className={`status-pill ${status.running ? "is-running" : "is-paused"}`}>
-      <span className="status-dot" />
-      {status.running ? "Registrando" : "En pausa"}
+      <span className="status-dot" aria-hidden="true" />
+      {status.running ? copy.running : copy.paused}
     </span>
   );
 }
@@ -67,77 +72,83 @@ function Onboarding({ initial, onComplete }: { initial: SettingsV1; onComplete: 
   const [step, setStep] = useState(0);
   const [role, setRole] = useState(initial.role);
   const [goal, setGoal] = useState(initial.goals[0] ?? "");
-  const steps = [
-    {
-      eyebrow: "Tu tiempo, en privado",
-      title: "Entiende tu día sin llenar cronómetros.",
-      copy: "Ensō Time observa aplicaciones activas en este computador y solo pregunta cuando falta contexto. Los datos no salen de tu equipo.",
-      icon: LockKeyhole,
-    },
-    {
-      eyebrow: "Una pregunta breve",
-      title: "Completa únicamente los intervalos ambiguos.",
-      copy: "Cada 15 minutos revisamos si la actividad quedó clara. Si lo está, no interrumpimos. Si no, puedes responder después.",
-      icon: HelpCircle,
-    },
-    {
-      eyebrow: "Automatiza con evidencia",
-      title: "Convierte patrones repetidos en una decisión.",
-      copy: "Después de 7, 14 o 28 días recibirás un diagnóstico y un prompt listo para analizar tu primera automatización.",
-      icon: Bot,
-    },
-  ];
-  const current = steps[step] ?? steps[0]!;
-  const Icon = current.icon;
+  const [locale, setLocale] = useState(initial.locale);
+  const [saving, setSaving] = useState(false);
+  const copy = messages(locale).onboarding;
+  const icons = [LockKeyhole, HelpCircle, Bot];
+  const current = copy.steps[step] ?? copy.steps[0]!;
+  const Icon = icons[step] ?? LockKeyhole;
 
   async function finish() {
-    await onComplete({
-      ...initial,
-      onboardingCompleted: true,
-      role: role.trim(),
-      goals: goal.trim() ? [goal.trim()] : initial.goals,
-    });
+    setSaving(true);
+    try {
+      await onComplete({
+        ...initial,
+        locale,
+        onboardingCompleted: true,
+        role: role.trim(),
+        goals: goal.trim() ? [goal.trim()] : initial.goals,
+      });
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (
     <main className="onboarding-shell">
-      <div className="onboarding-top"><BrandMark /></div>
-      <section className="onboarding-panel">
-        <div className="onboarding-visual"><Icon size={38} strokeWidth={1.5} /></div>
-        <p className="eyebrow">{current.eyebrow}</p>
-        <h1>{current.title}</h1>
+      <div className="onboarding-top">
+        <BrandMark />
+        <label className="language-picker">
+          <span className="sr-only">{copy.roleLabel}</span>
+          <Languages size={16} aria-hidden="true" />
+          <select value={locale} onChange={(event) => setLocale(event.target.value as Locale)} aria-label="Language / Idioma">
+            <option value="es-419">Español</option>
+            <option value="en">English</option>
+          </select>
+        </label>
+      </div>
+      <section className="onboarding-panel" aria-labelledby="onboarding-title">
+        <div className="onboarding-visual"><Icon size={38} strokeWidth={1.5} aria-hidden="true" /></div>
+        <p className="page-context">{current.label}</p>
+        <h1 id="onboarding-title">{current.title}</h1>
         <p className="lede">{current.copy}</p>
         {step === 2 && (
           <div className="onboarding-fields">
-            <label>¿Cuál es tu rol?<input value={role} onChange={(event) => setRole(event.target.value)} placeholder="Ej. Operador de negocio digital" /></label>
-            <label>¿Qué tiempo quieres recuperar?<input value={goal} onChange={(event) => setGoal(event.target.value)} placeholder="Ej. Reducir reportes manuales" /></label>
+            <label>{copy.roleLabel}<input value={role} onChange={(event) => setRole(event.target.value)} placeholder={copy.rolePlaceholder} autoComplete="organization-title" /></label>
+            <label>{copy.goalLabel}<input value={goal} onChange={(event) => setGoal(event.target.value)} placeholder={copy.goalPlaceholder} /></label>
           </div>
         )}
         <div className="onboarding-actions">
-          <div className="step-dots" aria-label={`Paso ${step + 1} de 3`}>
-            {steps.map((_, index) => <span key={index} className={index === step ? "active" : ""} />)}
+          <div className="step-dots" aria-label={copy.progress(step + 1)}>
+            {copy.steps.map((item, index) => <span key={item.label} className={index === step ? "active" : ""} aria-hidden="true" />)}
           </div>
-          <button className="primary-button" onClick={() => step < 2 ? setStep(step + 1) : void finish()}>
-            {step < 2 ? "Continuar" : "Comenzar estudio"}<ChevronRight size={17} />
-          </button>
+          <div className="button-row">
+            {step > 0 && <button type="button" className="text-button" onClick={() => setStep((value) => value - 1)}><ArrowLeft size={16} />{copy.back}</button>}
+            <button type="button" className="primary-button" disabled={saving} onClick={() => step < 2 ? setStep((value) => value + 1) : void finish()}>
+              {step < 2 ? copy.continue : copy.finish}<ChevronRight size={17} aria-hidden="true" />
+            </button>
+          </div>
         </div>
       </section>
     </main>
   );
 }
 
-function Timeline({ blocks, locale }: { blocks: TimelineBlockV1[]; locale: SettingsV1["locale"] }) {
+function Timeline({ blocks, locale }: { blocks: TimelineBlockV1[]; locale: Locale }) {
+  const copy = messages(locale).today;
+  if (blocks.length === 0) return <p className="inline-empty">{copy.emptyTimeline}</p>;
+
   return (
-    <div className="timeline" aria-label="Línea de tiempo de hoy">
+    <div className="timeline" aria-label={copy.timeline}>
       {blocks.map((block) => (
         <article className="timeline-row" key={block.id}>
-          <time>{formatTime(block.start, locale)}</time>
-          <span className="timeline-rail" style={{ "--category-color": categoryColor(block.category) } as React.CSSProperties} />
+          <time dateTime={block.start}>{formatTime(block.start, locale)}</time>
+          <span className="timeline-rail" style={{ "--category-color": categoryColor(block.category) } as CSSProperties} aria-hidden="true" />
           <div className="timeline-copy">
             <div><strong>{block.app}</strong><span>{formatDuration(block.durationSeconds, locale)}</span></div>
-            <p>{block.title || categoryLabel(locale, block.category)}</p>
+            <p title={block.title}>{block.title || categoryLabel(locale, block.category)}</p>
           </div>
-          <span className="category-tag"><i style={{ background: categoryColor(block.category) }} />{categoryLabel(locale, block.category)}</span>
+          <span className="category-tag"><i style={{ background: categoryColor(block.category) }} aria-hidden="true" />{categoryLabel(locale, block.category)}</span>
         </article>
       ))}
     </div>
@@ -154,6 +165,7 @@ function TodayView({ settings, status, blocks, checkIns, onNavigate, onPause, on
   onResume: () => Promise<void>;
 }) {
   const locale = settings.locale;
+  const copy = messages(locale).today;
   const totals = useMemo(() => {
     const values = new Map<CategoryId, number>();
     blocks.forEach((block) => values.set(block.category, (values.get(block.category) ?? 0) + block.durationSeconds));
@@ -166,37 +178,39 @@ function TodayView({ settings, status, blocks, checkIns, onNavigate, onPause, on
   return (
     <>
       <header className="page-header">
-        <div><p className="eyebrow">{date}</p><h1>Así se ve tu día.</h1><p className="page-intro">{formatDuration(totalSeconds, locale)} observados · la información sigue en este equipo.</p></div>
-        <button className="secondary-button" onClick={() => void (status.running ? onPause() : onResume())}>
-          {status.running ? <Pause size={16} /> : <Play size={16} />}{status.running ? "Pausar 30 min" : "Reanudar"}
+        <div><p className="page-context">{copy.dateLabel} · {date}</p><h1>{copy.title}</h1><p className="page-intro">{copy.observed(formatDuration(totalSeconds, locale))}</p></div>
+        <button type="button" className="secondary-button" onClick={() => void (status.running ? onPause() : onResume())}>
+          {status.running ? <Pause size={16} aria-hidden="true" /> : <Play size={16} aria-hidden="true" />}{status.running ? copy.pause : copy.resume}
         </button>
       </header>
 
       {pending && (
-        <button className="context-callout" onClick={() => onNavigate("checkins")}>
-          <span className="callout-icon"><HelpCircle size={19} /></span>
-          <span><strong>Falta contexto en un intervalo</strong><small>{formatTime(pending.intervalStart, locale)}–{formatTime(pending.intervalEnd, locale)} · responder toma menos de 20 segundos</small></span>
-          <ChevronRight size={18} />
+        <button type="button" className="context-callout" onClick={() => onNavigate("checkins")}>
+          <span className="callout-icon"><HelpCircle size={19} aria-hidden="true" /></span>
+          <span><strong>{copy.missingTitle}</strong><small>{copy.missingCopy(formatTime(pending.intervalStart, locale), formatTime(pending.intervalEnd, locale))}</small></span>
+          <ChevronRight size={18} aria-hidden="true" />
         </button>
       )}
 
       <div className="today-layout">
-        <section className="section-block">
-          <div className="section-heading"><div><p className="eyebrow">Registro continuo</p><h2>Línea de tiempo</h2></div><StatusPill status={status} /></div>
+        <section className="section-block" aria-labelledby="timeline-title">
+          <div className="section-heading"><div><p className="section-note">{copy.timelineHint}</p><h2 id="timeline-title">{copy.timeline}</h2></div><StatusPill status={status} locale={locale} /></div>
           <Timeline blocks={blocks} locale={locale} />
         </section>
-        <aside className="day-summary">
-          <p className="eyebrow">Distribución</p>
-          <h2>En qué se fue</h2>
-          <div className="distribution-list">
-            {totals.map((item) => (
-              <div className="distribution-item" key={item.category}>
-                <div><span><i style={{ background: categoryColor(item.category) }} />{categoryLabel(locale, item.category)}</span><b>{formatDuration(item.seconds, locale)}</b></div>
-                <span className="bar"><i style={{ width: `${Math.max(4, item.seconds / totalSeconds * 100)}%`, background: categoryColor(item.category) }} /></span>
-              </div>
-            ))}
-          </div>
-          <div className="privacy-note"><LockKeyhole size={16} /><span><strong>Privado por diseño</strong>Aplicaciones y títulos de ventana permanecen locales.</span></div>
+        <aside className="day-summary" aria-labelledby="distribution-title">
+          <p className="section-note">{copy.distributionHint}</p>
+          <h2 id="distribution-title">{copy.distribution}</h2>
+          {totals.length > 0 ? (
+            <div className="distribution-list">
+              {totals.map((item) => (
+                <div className="distribution-item" key={item.category}>
+                  <div><span><i style={{ background: categoryColor(item.category) }} aria-hidden="true" />{categoryLabel(locale, item.category)}</span><b>{formatDuration(item.seconds, locale)}</b></div>
+                  <span className="bar" role="progressbar" aria-label={categoryLabel(locale, item.category)} aria-valuemin={0} aria-valuemax={totalSeconds} aria-valuenow={item.seconds}><i style={{ width: `${Math.max(4, item.seconds / totalSeconds * 100)}%`, background: categoryColor(item.category) }} /></span>
+                </div>
+              ))}
+            </div>
+          ) : <p className="inline-empty">{copy.emptyTimeline}</p>}
+          <div className="privacy-note"><LockKeyhole size={16} aria-hidden="true" /><span><strong>{copy.privateTitle}</strong>{copy.privateCopy}</span></div>
         </aside>
       </div>
     </>
@@ -207,75 +221,90 @@ function CheckInsView({ checkIns, settings, onAnswer }: { checkIns: CheckInV1[];
   const pending = checkIns.filter((item) => item.status === "pending");
   const history = checkIns.filter((item) => item.status === "answered");
   const active = pending[0];
+  const copy = messages(settings.locale).checkins;
   const [activityLabel, setActivityLabel] = useState("");
   const [category, setCategory] = useState<CategoryId>("admin");
   const [project, setProject] = useState("");
   const [repetitive, setRepetitive] = useState(false);
   const [rulesClear, setRulesClear] = useState(false);
+  const [saving, setSaving] = useState(false);
 
-  async function submit(event: React.FormEvent) {
+  useEffect(() => {
+    setActivityLabel(""); setProject(""); setRepetitive(false); setRulesClear(false);
+  }, [active?.id]);
+
+  async function submit(event: FormEvent) {
     event.preventDefault();
     if (!active || !activityLabel.trim()) return;
-    await onAnswer({ id: active.id, activityLabel: activityLabel.trim(), category, project: project.trim() || undefined, repetitive, rulesClear });
-    setActivityLabel(""); setProject(""); setRepetitive(false); setRulesClear(false);
+    setSaving(true);
+    try {
+      await onAnswer({ id: active.id, activityLabel: activityLabel.trim(), category, project: project.trim() || undefined, repetitive, rulesClear });
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (
     <>
-      <header className="page-header"><div><p className="eyebrow">Contexto humano</p><h1>Completa los huecos.</h1><p className="page-intro">Ensō Time pregunta solo cuando las aplicaciones no cuentan toda la historia.</p></div></header>
+      <header className="page-header"><div><p className="page-context">{copy.pending(pending.length)}</p><h1>{copy.title}</h1><p className="page-intro">{copy.intro}</p></div></header>
       {active ? (
         <form className="checkin-form" onSubmit={(event) => void submit(event)}>
-          <div className="interval-label"><Clock3 size={18} /><span><strong>{formatTime(active.intervalStart, settings.locale)}–{formatTime(active.intervalEnd, settings.locale)}</strong>{active.reason === "afk" ? "No detectamos actividad" : "No pudimos clasificar este intervalo"}</span></div>
-          <label className="field-label">¿Qué estabas haciendo?<input autoFocus value={activityLabel} onChange={(event) => setActivityLabel(event.target.value)} placeholder="Ej. Actualizar el reporte semanal" /></label>
+          <div className="interval-label"><Clock3 size={18} aria-hidden="true" /><span><strong>{formatTime(active.intervalStart, settings.locale)}–{formatTime(active.intervalEnd, settings.locale)}</strong><small>{active.reason === "afk" ? copy.afk : copy.ambiguous}</small></span></div>
+          <label className="field-label">{copy.activity}<input autoFocus value={activityLabel} onChange={(event) => setActivityLabel(event.target.value)} placeholder={copy.activityPlaceholder} /></label>
           <div className="form-grid">
-            <label className="field-label">Categoría<select value={category} onChange={(event) => setCategory(event.target.value as CategoryId)}>{CATEGORY_ORDER.map((item) => <option key={item} value={item}>{categoryLabel(settings.locale, item)}</option>)}</select></label>
-            <label className="field-label">Proyecto, opcional<input value={project} onChange={(event) => setProject(event.target.value)} placeholder="Ej. Operación" /></label>
+            <label className="field-label">{copy.category}<select value={category} onChange={(event) => setCategory(event.target.value as CategoryId)}>{CATEGORY_ORDER.map((item) => <option key={item} value={item}>{categoryLabel(settings.locale, item)}</option>)}</select></label>
+            <label className="field-label">{copy.project}<input value={project} onChange={(event) => setProject(event.target.value)} placeholder={copy.projectPlaceholder} /></label>
           </div>
-          <label className="check-row"><input type="checkbox" checked={repetitive} onChange={(event) => setRepetitive(event.target.checked)} /><span><strong>Es una tarea repetitiva</strong><small>Ayuda a encontrar candidatos para automatizar.</small></span></label>
-          <label className="check-row"><input type="checkbox" checked={rulesClear} onChange={(event) => setRulesClear(event.target.checked)} /><span><strong>Sigue reglas claras</strong><small>Hay poca decisión subjetiva en el proceso.</small></span></label>
-          <button className="primary-button" disabled={!activityLabel.trim()}><Check size={17} />Guardar contexto</button>
+          <label className="check-row"><input type="checkbox" checked={repetitive} onChange={(event) => setRepetitive(event.target.checked)} /><span><strong>{copy.repetitive}</strong><small>{copy.repetitiveHint}</small></span></label>
+          <label className="check-row"><input type="checkbox" checked={rulesClear} onChange={(event) => setRulesClear(event.target.checked)} /><span><strong>{copy.rules}</strong><small>{copy.rulesHint}</small></span></label>
+          <button className="primary-button" disabled={!activityLabel.trim() || saving}><Check size={17} aria-hidden="true" />{copy.save}</button>
         </form>
       ) : (
-        <section className="empty-state"><Check size={30} /><h2>Todo tiene contexto.</h2><p>No hay preguntas pendientes. Puedes seguir con tu día.</p></section>
+        <section className="empty-state"><Check size={30} aria-hidden="true" /><h2>{copy.allDone}</h2><p>{copy.allDoneCopy}</p></section>
       )}
-      {history.length > 0 && <section className="history-section"><div className="section-heading"><div><p className="eyebrow">Memoria reciente</p><h2>Respondidos</h2></div></div>{history.slice(0, 5).map((item) => <div className="history-row" key={item.id}><span><i style={{ background: categoryColor(item.category ?? "unknown") }} /><strong>{item.activityLabel}</strong><small>{item.project || categoryLabel(settings.locale, item.category ?? "unknown")}</small></span><time>{item.answeredAt ? formatTime(item.answeredAt, settings.locale) : "—"}</time></div>)}</section>}
+      {history.length > 0 && <section className="history-section" aria-labelledby="history-title"><div className="section-heading"><h2 id="history-title">{copy.history}</h2></div>{history.slice(0, 5).map((item) => <div className="history-row" key={item.id}><span><i style={{ background: categoryColor(item.category ?? "unknown") }} aria-hidden="true" /><strong>{item.activityLabel}</strong><small>{item.project || categoryLabel(settings.locale, item.category ?? "unknown")}</small></span><time dateTime={item.answeredAt}>{item.answeredAt ? formatTime(item.answeredAt, settings.locale) : "—"}</time></div>)}</section>}
     </>
   );
 }
 
-function StudyView({ progress, onDays }: { progress: StudyProgress; onDays: (days: 7 | 14 | 28) => void }) {
+function StudyView({ progress, locale, onDays }: { progress: StudyProgress; locale: Locale; onDays: (days: 7 | 14 | 28) => void }) {
+  const copy = messages(locale).study;
   const circumference = 2 * Math.PI * 54;
   const offset = circumference - circumference * Math.min(progress.coveragePercent, 100) / 100;
+  const observed = new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(progress.observedDays);
+  const hours = new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(progress.trackedHours);
+  const remaining = new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(Math.max(0, 7 - progress.observedDays));
   return (
     <>
-      <header className="page-header"><div><p className="eyebrow">Periodo de observación</p><h1>De actividad a evidencia.</h1><p className="page-intro">Mientras más días observes, más confiable será la recomendación de automatización.</p></div></header>
+      <header className="page-header"><div><p className="page-context">{progress.observedDays >= 7 ? copy.available : copy.preliminary}</p><h1>{copy.title}</h1><p className="page-intro">{copy.intro}</p></div></header>
       <section className="study-hero">
-        <div className="progress-ring"><svg viewBox="0 0 128 128" role="img" aria-label={`${progress.coveragePercent}% de cobertura`}><circle cx="64" cy="64" r="54" /><circle className="progress-value" cx="64" cy="64" r="54" style={{ strokeDasharray: circumference, strokeDashoffset: offset }} /></svg><span><b>{progress.observedDays.toFixed(1)}</b><small>de {progress.selectedDays} días</small></span></div>
-        <div className="study-copy"><p className="eyebrow">Diagnóstico {progress.observedDays >= 7 ? "disponible" : "preliminar"}</p><h2>{progress.observedDays >= 7 ? "Ya hay una señal útil." : `Faltan ${(7 - progress.observedDays).toFixed(1)} días para una primera lectura.`}</h2><p>Tenemos {progress.trackedHours.toFixed(1)} horas observadas y {progress.answeredCheckIns} intervalos explicados por ti.</p><div className="study-metrics"><span><b>{progress.coveragePercent}%</b>cobertura</span><span><b>{progress.trackedHours.toFixed(1)} h</b>registradas</span><span><b>{progress.answeredCheckIns}</b>respuestas</span></div></div>
+        <div className="progress-ring"><svg viewBox="0 0 128 128" role="img" aria-label={`${progress.coveragePercent}% ${copy.coverage}`}><circle cx="64" cy="64" r="54" /><circle className="progress-value" cx="64" cy="64" r="54" style={{ strokeDasharray: circumference, strokeDashoffset: offset }} /></svg><span><b>{observed}</b><small>{locale === "en" ? `of ${progress.selectedDays} ${copy.days}` : `de ${progress.selectedDays} ${copy.days}`}</small></span></div>
+        <div className="study-copy"><h2>{progress.observedDays >= 7 ? copy.usefulSignal : copy.remaining(remaining)}</h2><p>{copy.evidence(hours, progress.answeredCheckIns)}</p><div className="study-metrics"><span><b>{progress.coveragePercent}%</b>{copy.coverage}</span><span><b>{hours} h</b>{copy.tracked}</span><span><b>{progress.answeredCheckIns}</b>{copy.answers}</span></div></div>
       </section>
-      <section className="period-section"><div><p className="eyebrow">Profundidad</p><h2>Elige el periodo de análisis</h2></div><div className="segmented-control">{([7, 14, 28] as const).map((days) => <button key={days} className={progress.selectedDays === days ? "active" : ""} onClick={() => onDays(days)}><b>{days} días</b><small>{days === 7 ? "Primera señal" : days === 14 ? "Patrones estables" : "Lectura profunda"}</small></button>)}</div></section>
+      <section className="period-section"><h2>{copy.periodTitle}</h2><div className="segmented-control" aria-label={copy.periodTitle}>{([7, 14, 28] as const).map((days) => <button type="button" key={days} className={progress.selectedDays === days ? "active" : ""} aria-pressed={progress.selectedDays === days} onClick={() => onDays(days)}><b>{days} {copy.days}</b><small>{copy.periods[days]}</small></button>)}</div></section>
     </>
   );
 }
 
-function AutomateView({ diagnostic, onGenerate, onCopy, onOpen }: { diagnostic: DiagnosticV1; onGenerate: () => Promise<void>; onCopy: () => Promise<void>; onOpen: (url: string) => Promise<void> }) {
+function AutomateView({ diagnostic, locale, busy, onGenerate, onCopy, onOpen }: { diagnostic: DiagnosticV1; locale: Locale; busy: boolean; onGenerate: () => Promise<void>; onCopy: () => Promise<void>; onOpen: (url: string) => Promise<void> }) {
+  const copy = messages(locale).automate;
   const candidate = diagnostic.candidates[0];
   return (
     <>
-      <header className="page-header"><div><p className="eyebrow">Diagnóstico personal</p><h1>Qué automatizar primero.</h1><p className="page-intro">Una recomendación basada en lo que realmente repites, con supuestos visibles.</p></div><button className="secondary-button" onClick={() => void onGenerate()}><RotateCcw size={16} />Actualizar</button></header>
-      {diagnostic.preliminary && <div className="preliminary-banner"><Gauge size={18} /><span><strong>Lectura preliminar</strong>Hay {diagnostic.daysObserved.toFixed(1)} días observados. Úsala como hipótesis, no como veredicto.</span></div>}
+      <header className="page-header"><div><p className="page-context">{copy.candidate}</p><h1>{copy.title}</h1><p className="page-intro">{copy.intro}</p></div><button type="button" className="secondary-button" disabled={busy} onClick={() => void onGenerate()}><RefreshCw size={16} aria-hidden="true" />{copy.refresh}</button></header>
+      {diagnostic.preliminary && <div className="preliminary-banner"><Gauge size={18} aria-hidden="true" /><span><strong>{copy.preliminaryTitle}</strong>{copy.preliminaryCopy(diagnostic.daysObserved.toFixed(1))}</span></div>}
       {candidate ? (
-        <section className="candidate-section">
-          <div className="candidate-rank"><span>01</span><small>Prioridad</small></div>
-          <div className="candidate-main"><p className="eyebrow">Primer candidato</p><h2>{candidate.activityLabel}</h2><p>{candidate.evidence.join(" · ")}</p><div className="score-line"><span><b>{candidate.priorityScore}</b>/100 señal</span><span><b>{candidate.estimatedWeeklyHours}</b> h/semana</span><span><b>{candidate.weeklyFrequency}</b> repeticiones</span></div></div>
-          <div className="candidate-scores"><span><b>{candidate.impactScore}/40</b>Impacto</span><span><b>{candidate.feasibilityScore}/35</b>Facilidad</span><span><b>{candidate.riskScore}/25</b>Riesgo</span></div>
+        <section className="candidate-section" aria-labelledby="candidate-title">
+          <div className="candidate-rank"><span>{candidate.priorityScore}</span><small>/ 100</small></div>
+          <div className="candidate-main"><p className="section-note">{copy.candidate}</p><h2 id="candidate-title">{candidate.activityLabel}</h2><p>{candidate.evidence.join(" · ")}</p><div className="score-line"><span><b>{candidate.priorityScore}</b>/100 {copy.signal}</span><span><b>{candidate.estimatedWeeklyHours}</b> {copy.weeklyHours}</span><span><b>{candidate.weeklyFrequency}</b> {copy.repetitions}</span></div></div>
+          <div className="candidate-scores"><span><b>{candidate.impactScore}/40</b>{copy.impact}</span><span><b>{candidate.feasibilityScore}/35</b>{copy.feasibility}</span><span><b>{candidate.riskScore}/25</b>{copy.risk}</span></div>
         </section>
-      ) : <section className="empty-state"><Target size={30} /><h2>Aún no hay un candidato sólido.</h2><p>Marca tareas repetitivas en tus check-ins para formar una señal.</p></section>}
-      <section className="recommendations"><div><p className="eyebrow">Siguiente movimiento</p><h2>Recomendaciones</h2></div><ol>{diagnostic.recommendations.map((recommendation, index) => <li key={recommendation}><span>{String(index + 1).padStart(2, "0")}</span><p>{recommendation}</p></li>)}</ol></section>
-      <section className="prompt-section">
-        <div className="prompt-heading"><div><p className="eyebrow">Lleva el diagnóstico contigo</p><h2>Prompt listo para conversar</h2></div><button className="primary-button" onClick={() => void onCopy()}><Clipboard size={16} />Copiar prompt</button></div>
-        <pre>{diagnostic.prompt}</pre>
-        <div className="prompt-links"><button onClick={() => void onOpen("https://chatgpt.com/")}>Abrir ChatGPT <ArrowUpRight size={15} /></button><button onClick={() => void onOpen("https://claude.ai/new")}>Abrir Claude <ArrowUpRight size={15} /></button><span><LockKeyhole size={14} />Solo sale lo que tú copies</span></div>
+      ) : <section className="empty-state"><Target size={30} aria-hidden="true" /><h2>{copy.empty}</h2><p>{copy.emptyCopy}</p></section>}
+      <section className="recommendations"><h2>{copy.recommendations}</h2><ol>{diagnostic.recommendations.map((recommendation, index) => <li key={recommendation}><span>{String(index + 1).padStart(2, "0")}</span><p>{recommendation}</p></li>)}</ol></section>
+      <section className="prompt-section" aria-labelledby="prompt-title">
+        <div className="prompt-heading"><div><p className="section-note">{copy.promptIntro}</p><h2 id="prompt-title">{copy.promptTitle}</h2></div><button type="button" className="primary-button" onClick={() => void onCopy()}><Clipboard size={16} aria-hidden="true" />{copy.copyPrompt}</button></div>
+        <pre tabIndex={0}>{diagnostic.prompt}</pre>
+        <div className="prompt-links"><button type="button" onClick={() => void onOpen("https://chatgpt.com/")}>{copy.openChatGpt} <ArrowUpRight size={15} aria-hidden="true" /></button><button type="button" onClick={() => void onOpen("https://claude.ai/new")}>{copy.openClaude} <ArrowUpRight size={15} aria-hidden="true" /></button><span><LockKeyhole size={14} aria-hidden="true" />{copy.outboundNotice}</span></div>
       </section>
     </>
   );
@@ -283,14 +312,23 @@ function AutomateView({ diagnostic, onGenerate, onCopy, onOpen }: { diagnostic: 
 
 function SettingsView({ settings, status, onSave, onExport, onDelete }: { settings: SettingsV1; status: TrackingStatus; onSave: (value: SettingsV1) => Promise<void>; onExport: (format: "json" | "csv") => Promise<void>; onDelete: () => Promise<void> }) {
   const [draft, setDraft] = useState(settings);
+  const [saving, setSaving] = useState(false);
+  const copy = messages(draft.locale).settings;
   useEffect(() => setDraft(settings), [settings]);
   const set = <K extends keyof SettingsV1>(key: K, value: SettingsV1[K]) => setDraft((current) => ({ ...current, [key]: value }));
+  const dirty = JSON.stringify(draft) !== JSON.stringify(settings);
+
+  async function save() {
+    setSaving(true);
+    try { await onSave(draft); } finally { setSaving(false); }
+  }
+
   return (
     <>
-      <header className="page-header"><div><p className="eyebrow">Control local</p><h1>Configuración.</h1><p className="page-intro">Decide cuánto registrar, cuándo preguntar y por cuánto tiempo conservarlo.</p></div><button className="primary-button" onClick={() => void onSave(draft)}><Check size={16} />Guardar cambios</button></header>
-      <section className="settings-group"><div className="settings-intro"><Clock3 size={19} /><div><h2>Seguimiento</h2><p>Frecuencia y horario del estudio.</p></div></div><div className="settings-fields"><label>Cadencia<select value={draft.cadenceMinutes} onChange={(event) => set("cadenceMinutes", Number(event.target.value) as 15 | 30 | 60)}><option value={15}>Cada 15 minutos</option><option value={30}>Cada 30 minutos</option><option value={60}>Cada 60 minutos</option></select></label><label>Conservar datos<select value={draft.retentionDays ?? "forever"} onChange={(event) => set("retentionDays", event.target.value === "forever" ? null : Number(event.target.value) as 30 | 90 | 365)}><option value={30}>30 días</option><option value={90}>90 días</option><option value={365}>1 año</option><option value="forever">Sin límite</option></select></label><label className="toggle-row"><span><strong>Iniciar con el sistema</strong><small>Activa el registro sin abrir la ventana.</small></span><input type="checkbox" checked={draft.autostart} onChange={(event) => set("autostart", event.target.checked)} /></label><label className="toggle-row"><span><strong>Guardar títulos de ventana</strong><small>Mejora el contexto; puede incluir nombres de documentos.</small></span><input type="checkbox" checked={draft.captureWindowTitles} onChange={(event) => set("captureWindowTitles", event.target.checked)} /></label></div></section>
-      <section className="settings-group"><div className="settings-intro"><Languages size={19} /><div><h2>Apariencia e idioma</h2><p>La interfaz cambia; tus datos no.</p></div></div><div className="settings-fields two-columns"><label>Idioma<select value={draft.locale} onChange={(event) => set("locale", event.target.value as SettingsV1["locale"])}><option value="es-419">Español (Latinoamérica)</option><option value="en">English</option></select></label><label>Tema<select value={draft.theme} onChange={(event) => set("theme", event.target.value as SettingsV1["theme"])}><option value="ink">Tinta</option><option value="paper">Papel</option><option value="system">Sistema</option></select></label></div></section>
-      <section className="settings-group"><div className="settings-intro"><LockKeyhole size={19} /><div><h2>Datos</h2><p>{status.serverPort ? `Motor local en 127.0.0.1:${status.serverPort}.` : "Motor local; sin nube ni telemetría."}</p></div></div><div className="data-actions"><button className="secondary-button" onClick={() => void onExport("json")}><Download size={16} />Exportar JSON</button><button className="secondary-button" onClick={() => void onExport("csv")}><Download size={16} />Exportar CSV</button><button className="danger-button" onClick={() => void onDelete()}><Trash2 size={16} />Borrar todo</button></div></section>
+      <header className="page-header"><div><p className="page-context">{messages(draft.locale).common.local}</p><h1>{copy.title}</h1><p className="page-intro">{copy.intro}</p></div><button type="button" className="primary-button" disabled={!dirty || saving} onClick={() => void save()}><Check size={16} aria-hidden="true" />{copy.save}</button></header>
+      <section className="settings-group"><div className="settings-intro"><Clock3 size={19} aria-hidden="true" /><div><h2>{copy.tracking}</h2><p>{copy.trackingHint}</p></div></div><div className="settings-fields"><div className="two-columns"><label>{copy.cadence}<select value={draft.cadenceMinutes} onChange={(event) => set("cadenceMinutes", Number(event.target.value) as 15 | 30 | 60)}><option value={15}>{copy.cadenceOption(15)}</option><option value={30}>{copy.cadenceOption(30)}</option><option value={60}>{copy.cadenceOption(60)}</option></select></label><label>{copy.retention}<select value={draft.retentionDays ?? "forever"} onChange={(event) => set("retentionDays", event.target.value === "forever" ? null : Number(event.target.value) as 30 | 90 | 365)}><option value={30}>{copy.retention30}</option><option value={90}>{copy.retention90}</option><option value={365}>{copy.retention365}</option><option value="forever">{copy.retentionForever}</option></select></label></div><div><p className="field-group-title">{copy.schedule}</p><p className="field-group-help">{copy.scheduleHint}</p><div className="two-columns"><label>{copy.start}<input type="time" value={draft.workSchedule.start} onChange={(event) => set("workSchedule", { ...draft.workSchedule, start: event.target.value })} /></label><label>{copy.end}<input type="time" value={draft.workSchedule.end} onChange={(event) => set("workSchedule", { ...draft.workSchedule, end: event.target.value })} /></label></div></div><label className="toggle-row"><span><strong>{copy.autostart}</strong><small>{copy.autostartHint}</small></span><input type="checkbox" role="switch" checked={draft.autostart} onChange={(event) => set("autostart", event.target.checked)} /></label><label className="toggle-row"><span><strong>{copy.titles}</strong><small>{copy.titlesHint}</small></span><input type="checkbox" role="switch" checked={draft.captureWindowTitles} onChange={(event) => set("captureWindowTitles", event.target.checked)} /></label></div></section>
+      <section className="settings-group"><div className="settings-intro"><Languages size={19} aria-hidden="true" /><div><h2>{copy.appearance}</h2><p>{copy.appearanceHint}</p></div></div><div className="settings-fields"><div className="two-columns"><label>{copy.language}<select value={draft.locale} onChange={(event) => set("locale", event.target.value as Locale)}><option value="es-419">Español (Latinoamérica)</option><option value="en">English</option></select></label><label>{copy.theme}<select value={draft.theme} onChange={(event) => set("theme", event.target.value as SettingsV1["theme"])}><option value="ink">{copy.ink}</option><option value="paper">{copy.paper}</option><option value="system">{copy.system}</option></select></label></div><label className="toggle-row"><span><strong>{copy.updates}</strong><small>{copy.updatesHint}</small></span><input type="checkbox" role="switch" checked={draft.updateChecksEnabled} onChange={(event) => set("updateChecksEnabled", event.target.checked)} /></label></div></section>
+      <section className="settings-group"><div className="settings-intro"><LockKeyhole size={19} aria-hidden="true" /><div><h2>{copy.data}</h2><p>{copy.localEngine(status.serverPort)}</p></div></div><div className="data-actions"><button type="button" className="secondary-button" onClick={() => void onExport("json")}><Download size={16} aria-hidden="true" />{copy.exportJson}</button><button type="button" className="secondary-button" onClick={() => void onExport("csv")}><Download size={16} aria-hidden="true" />{copy.exportCsv}</button><button type="button" className="danger-button" onClick={() => void onDelete()}><Trash2 size={16} aria-hidden="true" />{copy.delete}</button></div></section>
     </>
   );
 }
@@ -298,63 +336,99 @@ function SettingsView({ settings, status, onSave, onExport, onDelete }: { settin
 export default function App() {
   const [view, setView] = useState<View>("today");
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string>();
   const [settings, setSettings] = useState<SettingsV1 | null>(null);
   const [status, setStatus] = useState<TrackingStatus>(EMPTY_STATUS);
   const [blocks, setBlocks] = useState<TimelineBlockV1[]>([]);
   const [checkIns, setCheckIns] = useState<CheckInV1[]>([]);
   const [study, setStudy] = useState<StudyProgress | null>(null);
   const [diagnostic, setDiagnostic] = useState<DiagnosticV1 | null>(null);
-  const [notice, setNotice] = useState<string>();
+  const [notice, setNotice] = useState<Notice>();
+  const [diagnosticBusy, setDiagnosticBusy] = useState(false);
 
   async function load() {
-    const from = new Date(); from.setHours(0, 0, 0, 0);
-    const to = new Date(); to.setHours(23, 59, 59, 999);
-    const [nextSettings, nextStatus, nextBlocks, nextCheckIns, nextStudy] = await Promise.all([
-      bridge.getSettings(), bridge.getTrackingStatus(), bridge.getTimeline(from.toISOString(), to.toISOString()), bridge.listCheckIns(), bridge.getStudyProgress(),
-    ]);
-    setSettings(nextSettings); setStatus(nextStatus); setBlocks(nextBlocks); setCheckIns(nextCheckIns); setStudy(nextStudy);
-    setDiagnostic(await bridge.generateDiagnostic(nextStudy.selectedDays));
-    setLoading(false);
+    setLoading(true);
+    setLoadError(undefined);
+    try {
+      const from = new Date(); from.setHours(0, 0, 0, 0);
+      const to = new Date(); to.setHours(23, 59, 59, 999);
+      const [nextSettings, nextStatus, nextBlocks, nextCheckIns, nextStudy] = await Promise.all([
+        bridge.getSettings(), bridge.getTrackingStatus(), bridge.getTimeline(from.toISOString(), to.toISOString()), bridge.listCheckIns(), bridge.getStudyProgress(),
+      ]);
+      setSettings(nextSettings); setStatus(nextStatus); setBlocks(nextBlocks); setCheckIns(nextCheckIns); setStudy(nextStudy);
+      setDiagnostic(await bridge.generateDiagnostic(nextStudy.selectedDays));
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : "Unable to load Ensō Time");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function action(run: () => Promise<void>, success?: string) {
+    const fallback = settings ? messages(settings.locale).common.unexpectedError : "No pudimos completar la acción.";
+    try {
+      await run();
+      if (success) setNotice({ kind: "success", message: success });
+    } catch (error) {
+      setNotice({ kind: "error", message: error instanceof Error ? error.message : fallback });
+    }
   }
 
   useEffect(() => { void load(); }, []);
   useEffect(() => {
     if (!settings) return;
-    const theme = settings.theme === "system" ? (matchMedia("(prefers-color-scheme: light)").matches ? "paper" : "ink") : settings.theme;
-    document.documentElement.dataset.theme = theme;
+    const media = matchMedia("(prefers-color-scheme: light)");
+    const applyTheme = () => {
+      document.documentElement.dataset.theme = settings.theme === "system" ? (media.matches ? "paper" : "ink") : settings.theme;
+      document.documentElement.lang = settings.locale;
+    };
+    applyTheme();
+    media.addEventListener("change", applyTheme);
+    return () => media.removeEventListener("change", applyTheme);
   }, [settings]);
   useEffect(() => {
     if (!notice) return;
-    const timer = window.setTimeout(() => setNotice(undefined), 2600);
+    const timer = window.setTimeout(() => setNotice(undefined), 3200);
     return () => window.clearTimeout(timer);
   }, [notice]);
 
-  if (loading || !settings || !study || !diagnostic) return <main className="loading-screen"><BrandMark /><span className="loading-line" /><p>Organizando tu tiempo…</p></main>;
+  const loadingCopy = settings ? messages(settings.locale).common : messages("es-419").common;
+  if (loading) return <main className="loading-screen" aria-busy="true"><BrandMark /><span className="loading-line" /><p>{loadingCopy.loading}</p></main>;
+  if (loadError || !settings || !study || !diagnostic) return <main className="error-screen"><AlertCircle size={30} aria-hidden="true" /><h1>Ensō Time</h1><p>{loadError || loadingCopy.unexpectedError}</p><button type="button" className="primary-button" onClick={() => void load()}>{loadingCopy.retry}</button></main>;
   if (!settings.onboardingCompleted) return <Onboarding initial={settings} onComplete={async (value) => { setSettings(await bridge.saveSettings(value)); }} />;
 
-  const nav = messages(settings.locale).nav;
+  const copy = messages(settings.locale);
   const items: { id: View; label: string; icon: typeof Activity }[] = [
-    { id: "today", label: nav.today, icon: Activity }, { id: "checkins", label: nav.checkins, icon: HelpCircle }, { id: "study", label: nav.study, icon: Focus }, { id: "automate", label: nav.automate, icon: Sparkles }, { id: "settings", label: nav.settings, icon: SettingsIcon },
+    { id: "today", label: copy.nav.today, icon: Activity },
+    { id: "checkins", label: copy.nav.checkins, icon: HelpCircle },
+    { id: "study", label: copy.nav.study, icon: Focus },
+    { id: "automate", label: copy.nav.automate, icon: Sparkles },
+    { id: "settings", label: copy.nav.settings, icon: SettingsIcon },
   ];
-  const saveSettings = async (value: SettingsV1) => { setSettings(await bridge.saveSettings(value)); setNotice("Configuración guardada"); };
-  const answer = async (value: CheckInAnswer) => { await bridge.answerCheckIn(value); setCheckIns(await bridge.listCheckIns()); setStatus(await bridge.getTrackingStatus()); setNotice("Contexto guardado"); };
-  const selectDays = (days: 7 | 14 | 28) => { setStudy({ ...study, selectedDays: days }); void bridge.generateDiagnostic(days).then(setDiagnostic); };
+  const saveSettings = async (value: SettingsV1) => action(async () => { setSettings(await bridge.saveSettings(value)); }, messages(value.locale).notices.settingsSaved);
+  const answer = async (value: CheckInAnswer) => action(async () => { await bridge.answerCheckIn(value); setCheckIns(await bridge.listCheckIns()); setStatus(await bridge.getTrackingStatus()); }, copy.notices.contextSaved);
+  const selectDays = (days: 7 | 14 | 28) => {
+    setStudy({ ...study, selectedDays: days });
+    setDiagnosticBusy(true);
+    void action(async () => { setDiagnostic(await bridge.generateDiagnostic(days)); }).finally(() => setDiagnosticBusy(false));
+  };
 
   return (
     <div className="app-shell">
+      <a className="skip-link" href="#main-content">{copy.nav.today}</a>
       <aside className="sidebar">
         <BrandMark />
-        <nav aria-label="Principal">{items.map(({ id, label, icon: Icon }) => <button key={id} className={view === id ? "active" : ""} onClick={() => setView(id)}><Icon size={18} /><span>{label}</span>{id === "checkins" && status.pendingCheckIns > 0 && <b>{status.pendingCheckIns}</b>}</button>)}</nav>
-        <div className="sidebar-footer"><StatusPill status={status} /><p><LockKeyhole size={13} />Solo en este equipo</p><small>Ensō Time v0.1 beta</small></div>
+        <nav aria-label="Principal">{items.map(({ id, label, icon: Icon }) => <button type="button" key={id} className={view === id ? "active" : ""} aria-current={view === id ? "page" : undefined} title={label} onClick={() => setView(id)}><Icon size={18} aria-hidden="true" /><span>{label}</span>{id === "checkins" && status.pendingCheckIns > 0 && <b aria-label={`${status.pendingCheckIns}`}>{status.pendingCheckIns}</b>}</button>)}</nav>
+        <div className="sidebar-footer"><StatusPill status={status} locale={settings.locale} /><p><LockKeyhole size={13} aria-hidden="true" />{copy.common.local}</p><small>Ensō Time v0.1 beta</small></div>
       </aside>
-      <main className="content">
-        {view === "today" && <TodayView settings={settings} status={status} blocks={blocks} checkIns={checkIns} onNavigate={setView} onPause={async () => { setStatus(await bridge.pauseTracking(30)); setNotice("Registro pausado por 30 minutos"); }} onResume={async () => { setStatus(await bridge.resumeTracking()); setNotice("Registro reanudado"); }} />}
+      <main className="content" id="main-content" tabIndex={-1}>
+        {view === "today" && <TodayView settings={settings} status={status} blocks={blocks} checkIns={checkIns} onNavigate={setView} onPause={() => action(async () => { setStatus(await bridge.pauseTracking(30)); }, copy.notices.paused)} onResume={() => action(async () => { setStatus(await bridge.resumeTracking()); }, copy.notices.resumed)} />}
         {view === "checkins" && <CheckInsView checkIns={checkIns} settings={settings} onAnswer={answer} />}
-        {view === "study" && <StudyView progress={study} onDays={selectDays} />}
-        {view === "automate" && <AutomateView diagnostic={diagnostic} onGenerate={async () => { setDiagnostic(await bridge.generateDiagnostic(study.selectedDays)); setNotice("Diagnóstico actualizado"); }} onCopy={async () => { await navigator.clipboard.writeText(diagnostic.prompt); setNotice("Prompt copiado"); }} onOpen={bridge.openExternal} />}
-        {view === "settings" && <SettingsView settings={settings} status={status} onSave={saveSettings} onExport={async (format) => { const path = await bridge.exportData(format); setNotice(`Exportado en ${path}`); }} onDelete={async () => { if (!window.confirm("¿Borrar permanentemente toda la información de Ensō Time?")) return; await bridge.deleteAllData(); setNotice("Datos eliminados"); await load(); }} />}
+        {view === "study" && <StudyView progress={study} locale={settings.locale} onDays={selectDays} />}
+        {view === "automate" && <AutomateView diagnostic={diagnostic} locale={settings.locale} busy={diagnosticBusy} onGenerate={async () => { setDiagnosticBusy(true); await action(async () => { setDiagnostic(await bridge.generateDiagnostic(study.selectedDays)); }, copy.notices.diagnosticUpdated); setDiagnosticBusy(false); }} onCopy={() => action(async () => { await navigator.clipboard.writeText(diagnostic.prompt); }, copy.notices.promptCopied)} onOpen={(url) => action(() => bridge.openExternal(url))} />}
+        {view === "settings" && <SettingsView settings={settings} status={status} onSave={saveSettings} onExport={(format) => action(async () => { const path = await bridge.exportData(format); setNotice({ kind: "success", message: copy.notices.exported(path) }); })} onDelete={() => action(async () => { if (!window.confirm(copy.settings.deleteConfirm)) return; await bridge.deleteAllData(); setNotice({ kind: "success", message: copy.notices.deleted }); await load(); })} />}
       </main>
-      {notice && <div className="toast" role="status"><Check size={15} />{notice}</div>}
+      {notice && <div className={`toast ${notice.kind === "error" ? "is-error" : ""}`} role={notice.kind === "error" ? "alert" : "status"}>{notice.kind === "error" ? <AlertCircle size={15} aria-hidden="true" /> : <Check size={15} aria-hidden="true" />}{notice.message}</div>}
     </div>
   );
 }
