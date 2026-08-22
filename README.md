@@ -1,9 +1,10 @@
 # Ensō Time
 
-Ensō Time is a local-first desktop time tracker for personal insight. It records which
-applications receive your attention, asks only when a 15/30/60-minute interval cannot
-be classified, and turns the resulting evidence into productivity guidance and an
-automation-diagnosis prompt you can paste into ChatGPT or Claude.
+Ensō Time is a local-first desktop time tracker that helps you decide where to start
+applying AI in your daily work. It records which applications receive your attention,
+asks only when a 15/30/60-minute interval cannot be classified, and turns the resulting
+evidence into a prioritized automation opportunity, a guided workflow intake, and a
+diagnostic prompt you can paste into ChatGPT or Claude.
 
 > **Public beta:** `v0.1.0-beta.2` is source-available, not open source. The beta is
 > free only for uses permitted by the
@@ -21,8 +22,14 @@ and server components under MPL-2.0; it is not an official ActivityWatch distrib
   interruptions when the evidence is already clear.
 - 7, 14, or 28-day studies, productivity observations, automation candidates, and a
   copyable AI prompt. Ensō Time does not send that prompt or your timeline to an AI.
+- A bilingual, editable workflow intake for the top candidate: trigger, tools, ordered
+  steps, human decisions, inputs, desired output, frequency, time, and pain points.
 - Local export and deletion controls. No account, telemetry, cloud sync, ads, or hidden
   updater.
+
+The beta helps identify and document the first opportunity. It does not create or run
+an automation in n8n, Make, Zapier, or any external system. See the [roadmap](ROADMAP.md)
+for the planned Automation Blueprint stage.
 
 ## Install from GitHub Releases
 
