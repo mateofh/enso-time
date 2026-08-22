@@ -6,8 +6,28 @@ import type { AutomationBlueprintDraftV1, AutomationBlueprintV1, AutomationCandi
 
 type LoadState = "loading" | "ready" | "error";
 
-function errorCode(error: unknown) {
-  return error instanceof BlueprintBridgeError ? error.code : error instanceof Error ? error.message : "blueprint.unexpected";
+export function errorCode(error: unknown) {
+  if (error instanceof BlueprintBridgeError) return error.code;
+  if (typeof error === "string") {
+    const nativeErr = /^Err\(["']?(.+?)["']?\)$/u.exec(error);
+    return nativeErr?.[1] ?? error;
+  }
+  if (error instanceof Error) return errorCode(error.message);
+  if (typeof error === "object" && error) {
+    const value = error as { Err?: unknown; message?: unknown };
+    if (typeof value.Err === "string") return value.Err;
+    if (typeof value.message === "string") return errorCode(value.message);
+  }
+  return "blueprint.unexpected";
+}
+
+export function resolveBlueprintCommandResult(blueprint: AutomationBlueprintV1, success: string) {
+  return {
+    blueprint,
+    draft: blueprint.draft,
+    error: blueprint.conflict ? "blueprint.conflict" : undefined,
+    notice: blueprint.conflict ? undefined : success,
+  };
 }
 
 export function AutomationBlueprintView({ candidate, locale, onBack, onMapWorkflow, onDeleted }: {
@@ -74,6 +94,14 @@ export function AutomationBlueprintView({ candidate, locale, onBack, onMapWorkfl
     setDraft((current) => current ? { ...current, [key]: value } : current);
   }
 
+  function applyBlueprintCommandResult(next: AutomationBlueprintV1, success: string) {
+    const result = resolveBlueprintCommandResult(next, success);
+    setBlueprint(result.blueprint);
+    setDraft(result.draft);
+    setError(result.error);
+    setNotice(result.notice);
+  }
+
   function updateBoundary(stepId: string, disposition: StepDispositionV1, rationale?: string) {
     setDraft((current) => current ? {
       ...current,
@@ -86,7 +114,7 @@ export function AutomationBlueprintView({ candidate, locale, onBack, onMapWorkfl
     setBusy(true); setError(undefined); setNotice(undefined);
     try {
       const next = await bridge.saveAutomationBlueprint({ draft, expectedRevision: blueprint.draft.revision }, locale);
-      setBlueprint(next); setDraft(next.draft); setNotice(copy.saved);
+      applyBlueprintCommandResult(next, copy.saved);
     } catch (cause) {
       const code = errorCode(cause);
       if (cause instanceof BlueprintBridgeError && cause.code === "blueprint.conflict" && cause.current) {
@@ -101,7 +129,7 @@ export function AutomationBlueprintView({ candidate, locale, onBack, onMapWorkfl
     setBusy(true); setError(undefined);
     try {
       const next = await bridge.refreshAutomationBlueprintSource(candidate.id, blueprint.draft.revision, locale);
-      setBlueprint(next); setDraft(next.draft); setNotice(copy.refreshed);
+      applyBlueprintCommandResult(next, copy.refreshed);
     } catch (cause) { setError(errorCode(cause)); } finally { setBusy(false); }
   }
 
@@ -146,7 +174,7 @@ export function AutomationBlueprintView({ candidate, locale, onBack, onMapWorkfl
   return <section className="blueprint-panel" data-testid="blueprint-panel">
     <header className="page-header workflow-header blueprint-header">
       <div><button type="button" className="text-button workflow-back" onClick={onBack}><ArrowLeft size={16} aria-hidden="true" />{copy.back}</button><p className="page-context">{copy.context}</p><h1 ref={title} tabIndex={-1}>{copy.title}</h1><p className="page-intro">{copy.intro}</p></div>
-      <div className={`blueprint-status is-${blueprint.status}`} data-testid="blueprint-status"><span>{copy.status}</span><strong>{copy.statuses[blueprint.status]}</strong><small data-testid="blueprint-completeness">{blueprint.completeness.score}/100 {copy.complete}</small></div>
+      <div className={`blueprint-status is-${blueprint.status}`} data-testid="blueprint-status"><span>{copy.status}</span><strong>{copy.statuses[blueprint.status]}</strong><small data-testid="blueprint-completeness">{blueprint.completeness.score}/100 {copy.complete}</small>{blueprint.status === "ready" && <small>{copy.readyEvidence}</small>}</div>
     </header>
 
     {error && <div className="workflow-error" role="alert"><AlertCircle size={17} aria-hidden="true" /><span><strong>{copy.errorTitle}</strong>{copy.errors[error] ?? error ?? copy.errors["blueprint.unexpected"]}</span></div>}

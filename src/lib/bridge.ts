@@ -164,9 +164,20 @@ export const bridge = {
     const matchingCheckIns = state.checkIns.filter((item) => item.status === "answered" && item.repetitive && item.activityLabel === intake.candidateLabel);
     const observedDays = new Set(matchingCheckIns.map((item) => item.intervalStart.slice(0, 10))).size;
     const rulesQuality = matchingCheckIns.length ? matchingCheckIns.filter((item) => item.rulesClear).length / matchingCheckIns.length : 0;
+    const observed = matchingCheckIns.map((item) => locale === "en"
+      ? `Recorded check-in interval: ${item.intervalStart}–${item.intervalEnd}`
+      : `Intervalo de check-in registrado: ${item.intervalStart}–${item.intervalEnd}`);
+    const declared = [locale === "en" ? "Workflow intake supplied by you" : "Intake del workflow declarado por ti"];
+    for (const item of matchingCheckIns) {
+      declared.push(locale === "en" ? `Activity confirmed by you: ${item.activityLabel}` : `Actividad confirmada por ti: ${item.activityLabel}`);
+      declared.push(locale === "en" ? "Marked repetitive by you" : "Marcada como repetitiva por ti");
+      declared.push(item.rulesClear
+        ? (locale === "en" ? "Rules marked clear by you" : "Reglas marcadas como claras por ti")
+        : (locale === "en" ? "Rules were not marked clear by you" : "No marcaste las reglas como claras"));
+    }
     const evidence = {
-      observed: matchingCheckIns.map((item) => item.answeredAt ? `Check-in ${item.answeredAt}` : "Answered check-in"),
-      declared: ["Workflow intake supplied by you"],
+      observed,
+      declared,
       repeatedObservations: matchingCheckIns.length,
       observedDays,
       rulesQuality,

@@ -18,6 +18,12 @@ describe("automation blueprint preview golden vectors", () => {
     expect(emptyBlueprintDraft(sourceIntake).id).toBe("blueprint-candidate-stable-id");
   });
 
+  it("keeps recorded check-in evidence separate from user confirmations", () => {
+    const blueprint = buildPreviewBlueprint(intake());
+    expect(blueprint.evidence.observed).toEqual(["Recorded check-in interval"]);
+    expect(blueprint.evidence.declared).toEqual(["Activity, repetition, and rules confirmed by you"]);
+  });
+
   it("matches the complete four-step workflow vector", () => {
     const sourceIntake = intake();
     const draft = {
