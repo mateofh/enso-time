@@ -1,8 +1,8 @@
 use crate::activitywatch::{completed_interval, ActivityWatchRuntime};
 use crate::blueprint::{
-    assess_blueprint, draft_from_input, ephemeral_draft, AutomationBlueprintExportEnvelopeV2,
-    AutomationBlueprintV1, BlueprintConflictV1, BlueprintStatusV1, SaveAutomationBlueprintInputV1,
-    BLUEPRINT_EXPORT_SCHEMA_VERSION,
+    assess_blueprint, draft_from_input, ephemeral_draft, validate_blueprint_locale,
+    AutomationBlueprintExportEnvelopeV2, AutomationBlueprintV1, BlueprintConflictV1,
+    BlueprintStatusV1, SaveAutomationBlueprintInputV1, BLUEPRINT_EXPORT_SCHEMA_VERSION,
 };
 use crate::diagnostics::create_diagnostic;
 use crate::models::{
@@ -400,6 +400,7 @@ fn get_automation_blueprint_inner(
 ) -> Result<Option<AutomationBlueprintV1>, String> {
     let operation = capture_gate.operation()?;
     operation.ensure_current()?;
+    validate_blueprint_locale(locale)?;
     let Some(intake) = store.workflow_intake_for_candidate(candidate_id)? else {
         return Ok(None);
     };
@@ -435,15 +436,22 @@ pub fn save_automation_blueprint_v1(
     input: SaveAutomationBlueprintInputV1,
     locale: String,
 ) -> Result<AutomationBlueprintV1, String> {
-    let operation = state.capture_gate.operation()?;
+    save_automation_blueprint_inner(&state.store, &state.capture_gate, input, &locale)
+}
+
+fn save_automation_blueprint_inner(
+    store: &LocalStore,
+    capture_gate: &CaptureGate,
+    input: SaveAutomationBlueprintInputV1,
+    locale: &str,
+) -> Result<AutomationBlueprintV1, String> {
+    let operation = capture_gate.operation()?;
     operation.ensure_current()?;
-    let intake = state
-        .store
+    validate_blueprint_locale(locale)?;
+    let intake = store
         .workflow_intake_for_candidate(&input.draft.candidate_id)?
         .ok_or_else(|| "blueprint.intake_missing".to_string())?;
-    let existing = state
-        .store
-        .automation_blueprint_draft(&input.draft.candidate_id)?;
+    let existing = store.automation_blueprint_draft(&input.draft.candidate_id)?;
     if existing
         .as_ref()
         .is_some_and(|draft| draft.source_intake_updated_at != intake.updated_at)
@@ -452,15 +460,10 @@ pub fn save_automation_blueprint_v1(
     }
     let expected_revision = input.expected_revision.unwrap_or(input.draft.revision);
     let draft = draft_from_input(&intake, existing.as_ref(), input.draft)?;
-    match state
-        .store
-        .save_automation_blueprint_draft(draft, expected_revision, &intake)?
-    {
-        BlueprintStoreResult::Applied(draft) => {
-            assess_stored_blueprint(&state.store, draft, &locale)
-        }
+    match store.save_automation_blueprint_draft(draft, expected_revision, &intake)? {
+        BlueprintStoreResult::Applied(draft) => assess_stored_blueprint(store, draft, locale),
         BlueprintStoreResult::Conflict(current) => {
-            let mut current = assess_stored_blueprint(&state.store, current, &locale)?;
+            let mut current = assess_stored_blueprint(store, current, locale)?;
             current.conflict = Some(BlueprintConflictV1 {
                 current_revision: current.draft.revision,
             });
@@ -477,22 +480,32 @@ pub fn refresh_automation_blueprint_source_v1(
     expected_revision: u64,
     locale: String,
 ) -> Result<AutomationBlueprintV1, String> {
-    let operation = state.capture_gate.operation()?;
-    operation.ensure_current()?;
-    let intake = state
-        .store
-        .workflow_intake_for_candidate(&candidate_id)?
-        .ok_or_else(|| "blueprint.not_found".to_string())?;
-    match state.store.refresh_automation_blueprint_draft(
+    refresh_automation_blueprint_source_inner(
+        &state.store,
+        &state.capture_gate,
         &candidate_id,
         expected_revision,
-        &intake,
-    )? {
-        BlueprintStoreResult::Applied(draft) => {
-            assess_stored_blueprint(&state.store, draft, &locale)
-        }
+        &locale,
+    )
+}
+
+fn refresh_automation_blueprint_source_inner(
+    store: &LocalStore,
+    capture_gate: &CaptureGate,
+    candidate_id: &str,
+    expected_revision: u64,
+    locale: &str,
+) -> Result<AutomationBlueprintV1, String> {
+    let operation = capture_gate.operation()?;
+    operation.ensure_current()?;
+    validate_blueprint_locale(locale)?;
+    let intake = store
+        .workflow_intake_for_candidate(candidate_id)?
+        .ok_or_else(|| "blueprint.not_found".to_string())?;
+    match store.refresh_automation_blueprint_draft(candidate_id, expected_revision, &intake)? {
+        BlueprintStoreResult::Applied(draft) => assess_stored_blueprint(store, draft, locale),
         BlueprintStoreResult::Conflict(current) => {
-            let mut current = assess_stored_blueprint(&state.store, current, &locale)?;
+            let mut current = assess_stored_blueprint(store, current, locale)?;
             current.conflict = Some(BlueprintConflictV1 {
                 current_revision: current.draft.revision,
             });
@@ -1075,6 +1088,80 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
 
+    fn blueprint_command_fixture() -> (TempDir, LocalStore, WorkflowIntakeV1) {
+        let directory = TempDir::new().unwrap();
+        let store = LocalStore::open(&directory.path().join("enso-time.sqlite")).unwrap();
+        let candidate_label = "Reporte de locale";
+        let intake = WorkflowIntakeV1 {
+            id: "workflow-locale".into(),
+            candidate_id: crate::models::automation_candidate_id(candidate_label),
+            candidate_label: candidate_label.into(),
+            trigger: "Cada viernes".into(),
+            tools: vec!["Sheets".into()],
+            steps: vec!["Extraer datos".into()],
+            human_decisions: "Aprobar excepciones".into(),
+            inputs: "Ventas".into(),
+            desired_output: "Reporte".into(),
+            frequency: "Semanal".into(),
+            minutes_per_run: 45,
+            pain_points: "Trabajo manual".into(),
+            created_at: "2025-01-01T10:00:00Z".into(),
+            updated_at: "2025-01-02T10:00:00Z".into(),
+        };
+        let intake = store.save_workflow_intake(intake).unwrap();
+        (directory, store, intake)
+    }
+
+    #[test]
+    fn save_rejects_invalid_locale_without_persisting_a_draft() {
+        let (_directory, store, intake) = blueprint_command_fixture();
+        let candidate_id = intake.candidate_id.clone();
+        let input = SaveAutomationBlueprintInputV1 {
+            draft: ephemeral_draft(&intake),
+            expected_revision: None,
+        };
+
+        let error =
+            save_automation_blueprint_inner(&store, &CaptureGate::new(), input, "unsupported")
+                .unwrap_err();
+
+        assert_eq!(error, "El idioma del blueprint no es compatible");
+        assert!(store
+            .automation_blueprint_draft(&candidate_id)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn refresh_rejects_invalid_locale_without_changing_the_saved_revision() {
+        let (_directory, store, intake) = blueprint_command_fixture();
+        let draft = ephemeral_draft(&intake);
+        let BlueprintStoreResult::Applied(saved) = store
+            .save_automation_blueprint_draft(draft, 0, &intake)
+            .unwrap()
+        else {
+            panic!("expected a saved draft")
+        };
+
+        let error = refresh_automation_blueprint_source_inner(
+            &store,
+            &CaptureGate::new(),
+            &intake.candidate_id,
+            saved.revision,
+            "pt-BR",
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "El idioma del blueprint no es compatible");
+        assert_eq!(
+            store
+                .automation_blueprint_draft(&intake.candidate_id)
+                .unwrap()
+                .unwrap(),
+            saved
+        );
+    }
+
     #[test]
     fn external_allowlist_does_not_accept_lookalike_hosts() {
         let url = Url::parse("https://chatgpt.com.evil.test").unwrap();
@@ -1165,6 +1252,10 @@ mod tests {
             created_at: "2025-01-01T10:00:00Z".into(),
             updated_at: "2025-01-02T10:00:00Z".into(),
         };
+        let private_candidate_id =
+            crate::models::automation_candidate_id(&private_workflow.candidate_label);
+        let mut private_workflow = private_workflow;
+        private_workflow.candidate_id = private_candidate_id;
         store
             .save_workflow_intake(private_workflow.clone())
             .unwrap();
@@ -1389,7 +1480,7 @@ mod tests {
         let store = LocalStore::open(&temp.path().join("enso-time.sqlite")).unwrap();
         let workflow = WorkflowIntakeV1 {
             id: "workflow-export".into(),
-            candidate_id: "candidate-report".into(),
+            candidate_id: crate::models::automation_candidate_id("Preparar reporte"),
             candidate_label: "Preparar reporte".into(),
             trigger: "Cada viernes".into(),
             tools: vec!["Sheets".into()],

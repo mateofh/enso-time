@@ -190,6 +190,14 @@ pub fn source_step_id(position: usize) -> String {
     format!("step-{:02}", position + 1)
 }
 
+pub fn validate_blueprint_locale(locale: &str) -> Result<(), String> {
+    if matches!(locale, "es-419" | "en") {
+        Ok(())
+    } else {
+        Err("El idioma del blueprint no es compatible".into())
+    }
+}
+
 pub fn ephemeral_draft(intake: &WorkflowIntakeV1) -> AutomationBlueprintDraftV1 {
     let now = iso_now();
     AutomationBlueprintDraftV1 {
@@ -238,12 +246,21 @@ pub fn draft_from_input(
     {
         return Err("Los campos fuente del blueprint no pueden modificarse".into());
     }
-    let now = iso_now();
     let mut draft = existing.cloned().unwrap_or_else(|| ephemeral_draft(intake));
+    let now = iso_now();
     draft.source_intake_updated_at = intake.updated_at.clone();
     draft.workflow_intake_id = intake.id.clone();
     draft.runs_per_week = input.runs_per_week;
-    draft.step_boundaries = input.step_boundaries;
+    draft.step_boundaries = input
+        .step_boundaries
+        .into_iter()
+        .map(|mut boundary| {
+            boundary.rationale = boundary
+                .rationale
+                .map(|rationale| normalize_text(&rationale));
+            boundary
+        })
+        .collect();
     draft.data_sensitivity = input.data_sensitivity;
     draft.side_effect_level = input.side_effect_level;
     draft.verification_mode = input.verification_mode;
@@ -343,7 +360,10 @@ fn validate_identifier(value: &str, maximum: usize) -> Result<(), String> {
 }
 
 fn validate_optional_text(value: &str, maximum: usize, label: &str) -> Result<(), String> {
-    if value.is_empty() || value.chars().count() > maximum || value.chars().any(char::is_control) {
+    if value.trim().is_empty()
+        || value.chars().count() > maximum
+        || value.chars().any(char::is_control)
+    {
         return Err(format!(
             "{label} debe tener entre 1 y {maximum} caracteres sin controles"
         ));
@@ -365,9 +385,7 @@ pub fn assess_blueprint(
     observed_weekly_frequency: f64,
     locale: &str,
 ) -> Result<AutomationBlueprintV1, String> {
-    if !matches!(locale, "es-419" | "en") {
-        return Err("El idioma del blueprint no es compatible".into());
-    }
+    validate_blueprint_locale(locale)?;
     validate_draft(&draft, intake)?;
     let completeness_score = completeness(&draft, intake);
     let completeness = BlueprintCompletenessV1 {
@@ -379,9 +397,12 @@ pub fn assess_blueprint(
         .step_boundaries
         .iter()
         .any(|step| step.disposition == StepDispositionV1::Automatable);
+    // `repeated_observations` comes only from check-ins that the user explicitly
+    // marked as repetitive. Recorded intervals alone never open the READY gate.
+    let user_confirmed_repetitions = repeated_observations;
     let status = if stale {
         BlueprintStatusV1::Stale
-    } else if completeness.score == 100 && repeated_observations >= 2 && has_automatable {
+    } else if completeness.score == 100 && user_confirmed_repetitions >= 2 && has_automatable {
         BlueprintStatusV1::Ready
     } else if intake.steps.is_empty() {
         BlueprintStatusV1::Blocked
@@ -410,21 +431,33 @@ pub fn assess_blueprint(
     let observed = if total_observations == 0 {
         Vec::new()
     } else if locale == "en" {
-        vec![format!(
-            "{repeated_observations} repeated check-in(s) among {total_observations} matching observation(s) across {observed_days} day(s)"
-        )]
+        vec![
+            format!("{total_observations} answered check-in interval(s) were recorded locally"),
+            format!("The selected recorded intervals cover {observed_days} distinct UTC day(s)"),
+        ]
     } else {
-        vec![format!(
-            "{repeated_observations} check-in(s) repetido(s) entre {total_observations} observación(es) coincidentes durante {observed_days} día(s)"
-        )]
+        vec![
+            format!("Se registraron localmente {total_observations} intervalo(s) de check-in respondido(s)"),
+            format!("Los intervalos registrados seleccionados cubren {observed_days} día(s) UTC distinto(s)"),
+        ]
+    };
+    let rules_percentage = (rules_quality.clamp(0.0, 1.0) * 100.0).round();
+    let declared = if locale == "en" {
+        vec![
+            "Workflow intake and activity-label association supplied by you".into(),
+            format!("You marked {user_confirmed_repetitions} linked check-in(s) as repetitive"),
+            format!("Your clear-rules confirmations yield {rules_percentage}% rules quality"),
+        ]
+    } else {
+        vec![
+            "Intake del workflow y asociación por etiqueta de actividad declarados por ti".into(),
+            format!("Marcaste {user_confirmed_repetitions} check-in(s) vinculado(s) como repetitivo(s)"),
+            format!("Tus confirmaciones de reglas claras producen {rules_percentage}% de calidad de reglas"),
+        ]
     };
     let evidence = BlueprintEvidenceV1 {
         observed,
-        declared: vec![if locale == "en" {
-            "Workflow intake supplied by you".into()
-        } else {
-            "Intake del workflow declarado por ti".into()
-        }],
+        declared,
         repeated_observations,
         observed_days,
         rules_quality,
@@ -475,7 +508,7 @@ pub fn completeness(draft: &AutomationBlueprintDraftV1, intake: &WorkflowIntakeV
                 && boundary
                     .rationale
                     .as_ref()
-                    .is_some_and(|value| !value.is_empty())
+                    .is_some_and(|value| !value.trim().is_empty())
         })
         .count();
     let boundary_points = if intake.steps.is_empty() {
@@ -534,7 +567,7 @@ fn missing_fields(draft: &AutomationBlueprintDraftV1, intake: &WorkflowIntakeV1)
                 && boundary
                     .rationale
                     .as_ref()
-                    .is_some_and(|value| !value.is_empty())
+                    .is_some_and(|value| !value.trim().is_empty())
         })
         .count();
     let mut missing = Vec::new();
@@ -820,10 +853,11 @@ mod tests {
     use super::*;
 
     fn intake() -> WorkflowIntakeV1 {
+        let candidate_label = "Weekly report";
         WorkflowIntakeV1 {
             id: "workflow-1".into(),
-            candidate_id: "candidate-1".into(),
-            candidate_label: "Weekly report".into(),
+            candidate_id: crate::models::automation_candidate_id(candidate_label),
+            candidate_label: candidate_label.into(),
             trigger: "Friday".into(),
             tools: vec!["Sheets".into(), "Email".into()],
             steps: vec![
@@ -1071,6 +1105,41 @@ mod tests {
     }
 
     #[test]
+    fn evidence_separates_recorded_facts_from_user_declarations() {
+        let blueprint =
+            assess_blueprint(ready_draft(), &intake(), 4, 3, 2.0, 2.0 / 3.0, 10.5, "en").unwrap();
+        let observed = blueprint.evidence.observed.join(" ").to_lowercase();
+        assert!(observed.contains("recorded"));
+        assert!(observed.contains("interval"));
+        assert!(!observed.contains("repetitive"));
+        assert!(!observed.contains("rules"));
+        assert!(!observed.contains("label"));
+
+        let declared = blueprint.evidence.declared.join(" ").to_lowercase();
+        assert!(declared.contains("activity-label"));
+        assert!(declared.contains("repetitive"));
+        assert!(declared.contains("rules"));
+    }
+
+    #[test]
+    fn ready_gate_requires_two_user_confirmed_repetitions() {
+        let intake = intake();
+        let draft = ready_draft();
+        assert_eq!(
+            assess_blueprint(draft.clone(), &intake, 4, 0, 0.0, 0.0, 0.0, "en")
+                .unwrap()
+                .status,
+            BlueprintStatusV1::Draft
+        );
+        assert_eq!(
+            assess_blueprint(draft, &intake, 4, 2, 2.0, 1.0, 7.0, "en")
+                .unwrap()
+                .status,
+            BlueprintStatusV1::Ready
+        );
+    }
+
+    #[test]
     fn validation_rejects_controls_bounds_and_wrong_step_ids() {
         let intake = intake();
         let mut draft = ready_draft();
@@ -1082,6 +1151,24 @@ mod tests {
         draft.step_boundaries[0].rationale = Some("ok".into());
         draft.step_boundaries[0].step_id = "step-02".into();
         assert!(validate_draft(&draft, &intake).is_err());
+    }
+
+    #[test]
+    fn whitespace_rationales_are_normalized_or_rejected_and_never_ready() {
+        let intake = intake();
+        let mut whitespace = ready_draft();
+        whitespace.step_boundaries[0].rationale = Some(" \n\t ".into());
+        assert!(completeness(&whitespace, &intake).score < 100);
+        assert!(assess_blueprint(whitespace.clone(), &intake, 2, 2, 2.0, 1.0, 7.0, "en").is_err());
+        assert!(draft_from_input(&intake, None, whitespace).is_err());
+
+        let mut spaced = ready_draft();
+        spaced.step_boundaries[0].rationale = Some("  Clear   deterministic\n rules  ".into());
+        let normalized = draft_from_input(&intake, None, spaced).unwrap();
+        assert_eq!(
+            normalized.step_boundaries[0].rationale.as_deref(),
+            Some("Clear deterministic rules")
+        );
     }
 
     #[test]

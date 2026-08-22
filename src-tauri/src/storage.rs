@@ -7,6 +7,7 @@ use crate::models::{
 };
 use rusqlite::types::Type;
 use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -610,8 +611,7 @@ impl LocalStore {
         let mut total = 0_u32;
         let mut repeated = 0_u32;
         let mut rules_clear = 0_u32;
-        let mut first_repeated_at = None;
-        let mut last_repeated_at = None;
+        let mut repeated_utc_days = HashSet::new();
         for row in rows {
             let (label, is_repetitive, has_clear_rules, interval_start) =
                 row.map_err(|error| error.to_string())?;
@@ -622,22 +622,11 @@ impl LocalStore {
                     if has_clear_rules.is_some_and(|value| value != 0) {
                         rules_clear = rules_clear.saturating_add(1);
                     }
-                    let observed_at = parse_utc(&interval_start)?;
-                    first_repeated_at = Some(
-                        first_repeated_at
-                            .map_or(observed_at, |current| std::cmp::min(current, observed_at)),
-                    );
-                    last_repeated_at = Some(
-                        last_repeated_at
-                            .map_or(observed_at, |current| std::cmp::max(current, observed_at)),
-                    );
+                    repeated_utc_days.insert(parse_utc(&interval_start)?.date_naive());
                 }
             }
         }
-        let observed_days = match (first_repeated_at, last_repeated_at) {
-            (Some(first), Some(last)) => ((last - first).num_seconds() as f64 / 86_400.0).max(1.0),
-            _ => 0.0,
-        };
+        let observed_days = repeated_utc_days.len() as f64;
         let rules_quality = if repeated == 0 {
             0.0
         } else {
@@ -654,6 +643,36 @@ impl LocalStore {
     }
 
     pub fn delete_all(&self) -> Result<(), String> {
+        self.delete_all_with_cleanup(|| self.purge_managed_exports(), || self.compact_database())
+    }
+
+    fn delete_all_with_cleanup<Purge, Compact>(
+        &self,
+        purge_exports: Purge,
+        compact_database: Compact,
+    ) -> Result<(), String>
+    where
+        Purge: FnOnce() -> Result<(), String>,
+        Compact: FnOnce() -> Result<(), String>,
+    {
+        let mut errors = Vec::new();
+        if let Err(error) = self.reset_local_records() {
+            errors.push(error);
+        }
+        if let Err(error) = purge_exports() {
+            errors.push(error);
+        }
+        if let Err(error) = compact_database() {
+            errors.push(error);
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(format!("Borrado local incompleto: {}", errors.join("; ")))
+        }
+    }
+
+    fn reset_local_records(&self) -> Result<(), String> {
         {
             let mut connection = self.connection()?;
             let transaction = connection
@@ -675,7 +694,10 @@ impl LocalStore {
         }
         self.save_settings(&SettingsV1::default())?;
         self.set_value("study_started_at", &iso_now())?;
-        self.set_value("selected_days", "7")?;
+        self.set_value("selected_days", "7")
+    }
+
+    fn purge_managed_exports(&self) -> Result<(), String> {
         if let Some(parent) = self.database_path.parent() {
             let exports = parent.join("exports");
             if exports.exists() {
@@ -684,6 +706,10 @@ impl LocalStore {
                 })?;
             }
         }
+        Ok(())
+    }
+
+    fn compact_database(&self) -> Result<(), String> {
         self.connection()?
             .execute_batch(
                 "PRAGMA wal_checkpoint(TRUNCATE);
@@ -938,9 +964,10 @@ mod tests {
     }
 
     fn workflow(id: &str, label: &str, updated_at: &str) -> WorkflowIntakeV1 {
+        let normalized_label = label.split_whitespace().collect::<Vec<_>>().join(" ");
         WorkflowIntakeV1 {
             id: id.into(),
-            candidate_id: "candidate-report".into(),
+            candidate_id: automation_candidate_id(&normalized_label),
             candidate_label: label.into(),
             trigger: "Cada viernes".into(),
             tools: vec!["Sheets".into(), "Email".into()],
@@ -954,6 +981,36 @@ mod tests {
             created_at: "2025-01-01T10:00:00Z".into(),
             updated_at: updated_at.into(),
         }
+    }
+
+    fn insert_legacy_workflow(store: &LocalStore, intake: &WorkflowIntakeV1) {
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "INSERT INTO workflow_intakes
+                 (id, candidate_id, candidate_label, trigger, tools_json, steps_json,
+                  human_decisions, inputs, desired_output, frequency, minutes_per_run,
+                  pain_points, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                params![
+                    intake.id,
+                    intake.candidate_id,
+                    intake.candidate_label,
+                    intake.trigger,
+                    serde_json::to_string(&intake.tools).unwrap(),
+                    serde_json::to_string(&intake.steps).unwrap(),
+                    intake.human_decisions,
+                    intake.inputs,
+                    intake.desired_output,
+                    intake.frequency,
+                    intake.minutes_per_run,
+                    intake.pain_points,
+                    intake.created_at,
+                    intake.updated_at,
+                ],
+            )
+            .unwrap();
     }
 
     fn blueprint_workflow(updated_at: &str) -> WorkflowIntakeV1 {
@@ -1023,6 +1080,36 @@ mod tests {
     }
 
     #[test]
+    fn delete_all_compacts_sqlite_even_when_export_purge_fails() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("enso-time.sqlite");
+        let store = LocalStore::open(&path).unwrap();
+        store
+            .save_workflow_intake(workflow(
+                "private-workflow",
+                "forced-export-failure-marker",
+                "2025-01-02T10:00:00Z",
+            ))
+            .unwrap();
+
+        let error = store
+            .delete_all_with_cleanup(
+                || Err("forced exports failure".into()),
+                || store.compact_database(),
+            )
+            .unwrap_err();
+
+        assert!(error.contains("forced exports failure"));
+        assert!(store.list_workflow_intakes().unwrap().is_empty());
+        assert!(!path.with_file_name("enso-time.sqlite-wal").exists());
+        assert!(!path.with_file_name("enso-time.sqlite-shm").exists());
+        let bytes = std::fs::read(path).unwrap();
+        assert!(!bytes
+            .windows(b"forced-export-failure-marker".len())
+            .any(|window| window == b"forced-export-failure-marker"));
+    }
+
+    #[test]
     fn v01_database_migrates_blueprints_transactionally_and_idempotently() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("enso-time.sqlite");
@@ -1089,9 +1176,10 @@ mod tests {
     fn blueprint_evidence_aggregates_days_rule_quality_and_weekly_frequency() {
         let store = store();
         let candidate_id = automation_candidate_id("Reporte blueprint");
-        for (position, start, clear) in [
-            (1, "2025-01-01T10:00:00Z", true),
-            (2, "2025-01-08T10:00:00Z", false),
+        for (position, start, repetitive, clear) in [
+            (1, "2025-01-01T10:00:00Z", true, true),
+            (2, "2025-01-08T10:00:00Z", true, false),
+            (3, "2025-01-09T10:00:00Z", false, true),
         ] {
             let start_at = parse_utc(start).unwrap();
             let checkin = CheckInV1 {
@@ -1115,17 +1203,17 @@ mod tests {
                     activity_label: "Reporte blueprint".into(),
                     category: "admin".into(),
                     project: None,
-                    repetitive: true,
+                    repetitive,
                     rules_clear: clear,
                 })
                 .unwrap();
         }
         let evidence = store.blueprint_observation_counts(&candidate_id).unwrap();
-        assert_eq!(evidence.total, 2);
+        assert_eq!(evidence.total, 3);
         assert_eq!(evidence.repeated, 2);
-        assert_eq!(evidence.observed_days, 7.0);
+        assert_eq!(evidence.observed_days, 2.0);
         assert_eq!(evidence.rules_quality, 0.5);
-        assert_eq!(evidence.observed_weekly_frequency, 2.0);
+        assert_eq!(evidence.observed_weekly_frequency, 7.0);
     }
 
     #[test]
@@ -1283,22 +1371,22 @@ mod tests {
 
         let mut update = workflow(
             "workflow-replacement-id",
-            "Preparar reporte ejecutivo",
+            "PREPARAR REPORTE",
             "2025-01-03T10:00:00Z",
         );
         update.created_at = "2025-01-02T10:00:00Z".into();
         let updated = store.save_workflow_intake(update).unwrap();
         assert_eq!(updated.id, "workflow-1");
-        assert_eq!(updated.candidate_label, "Preparar reporte ejecutivo");
+        assert_eq!(updated.candidate_label, "PREPARAR REPORTE");
         assert_eq!(updated.created_at, stored.created_at);
 
         let stale = workflow(
             "workflow-stale-id",
-            "Valor obsoleto",
+            "Preparar reporte",
             "2025-01-02T12:00:00Z",
         );
         let unchanged = store.save_workflow_intake(stale).unwrap();
-        assert_eq!(unchanged.candidate_label, "Preparar reporte ejecutivo");
+        assert_eq!(unchanged.candidate_label, "PREPARAR REPORTE");
     }
 
     #[test]
@@ -1307,7 +1395,7 @@ mod tests {
         let store = Arc::new(LocalStore::open(&directory.path().join("enso-time.sqlite")).unwrap());
         let barrier = Arc::new(Barrier::new(3));
         let mut threads = Vec::new();
-        for (label, updated_at) in [
+        for (pain_points, updated_at) in [
             ("Versión anterior", "2025-01-02T10:00:00Z"),
             ("Versión final", "2025-01-03T10:00:00Z"),
         ] {
@@ -1315,9 +1403,9 @@ mod tests {
             let thread_barrier = Arc::clone(&barrier);
             threads.push(std::thread::spawn(move || {
                 thread_barrier.wait();
-                thread_store
-                    .save_workflow_intake(workflow("workflow-race", label, updated_at))
-                    .unwrap();
+                let mut intake = workflow("workflow-race", "Reporte concurrente", updated_at);
+                intake.pain_points = pain_points.into();
+                thread_store.save_workflow_intake(intake).unwrap();
             }));
         }
         barrier.wait();
@@ -1326,7 +1414,8 @@ mod tests {
         }
         let items = store.list_workflow_intakes().unwrap();
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].candidate_label, "Versión final");
+        assert_eq!(items[0].candidate_label, "Reporte concurrente");
+        assert_eq!(items[0].pain_points, "Versión final");
         assert_eq!(items[0].updated_at, "2025-01-03T10:00:00+00:00");
     }
 
@@ -1369,23 +1458,23 @@ mod tests {
             let mut older = workflow("older-intake", "Preparar reporte", "2025-01-02T10:00:00Z");
             older.candidate_id = "candidate-preparar-reporte".into();
             older.pain_points = "legacy-older-marker".into();
-            store.save_workflow_intake(older).unwrap();
+            insert_legacy_workflow(&store, &older);
 
             let mut newest = workflow("newest-intake", "preparar reporte", "2025-01-03T10:00:00Z");
             newest.candidate_id = "candidate-another-legacy-id".into();
             newest.created_at = "2025-01-02T09:00:00Z".into();
             newest.pain_points = "canonical-newest-marker".into();
-            store.save_workflow_intake(newest).unwrap();
+            insert_legacy_workflow(&store, &newest);
 
             let mut tie_loser = workflow("tie-z", "enviar informe 🚀", "2025-01-04T10:00:00Z");
             tie_loser.candidate_id = "candidate-tie-z-legacy".into();
             tie_loser.pain_points = "tie-z-marker".into();
-            store.save_workflow_intake(tie_loser).unwrap();
+            insert_legacy_workflow(&store, &tie_loser);
 
             let mut tie_winner = workflow("tie-a", "Enviar informe 🚀", "2025-01-04T10:00:00Z");
             tie_winner.candidate_id = "candidate-tie-a-legacy".into();
             tie_winner.pain_points = "tie-a-marker".into();
-            store.save_workflow_intake(tie_winner).unwrap();
+            insert_legacy_workflow(&store, &tie_winner);
         }
 
         let store = LocalStore::open(&path).unwrap();
@@ -1398,7 +1487,7 @@ mod tests {
             .unwrap();
         assert_eq!(migrated.id, "newest-intake");
         assert_eq!(migrated.candidate_label, "preparar reporte");
-        assert_eq!(migrated.created_at, "2025-01-02T09:00:00+00:00");
+        assert_eq!(migrated.created_at, "2025-01-02T09:00:00Z");
         assert_eq!(migrated.pain_points, "canonical-newest-marker");
 
         let tied = items
