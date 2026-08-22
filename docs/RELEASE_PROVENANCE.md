@@ -27,6 +27,14 @@ atomic operation. Repository rules must therefore prevent tag deletion or moveme
 without that external control, a privileged actor could race the short interval
 between the check and publication.
 
+Only the publisher job enters the protected GitHub environment named `release`.
+That environment must exist before any release is triggered and must require an
+authorized reviewer. The matrix build jobs deliberately remain outside it and
+retain read-only repository permissions. A repository ruleset must also restrict
+creation, update, and deletion of release tags matching `v*`; the environment does
+not prevent GitHub from running a historical workflow attached to an unprotected
+tag.
+
 ## Signed attestations
 
 Each of the four installers is a subject of two GitHub/Sigstore attestations:
@@ -53,28 +61,87 @@ The release attaches:
 - the custom release-binding Sigstore bundle; and
 - the readable JSON used as the custom predicate.
 
-Verify the standard provenance:
+### Fail-closed verification
+
+Choose the expected commits from reviewed repository state, not from fields inside
+the downloaded attestation:
+
+- Future tag push: `WORKFLOW_COMMIT=SOURCE_COMMIT=OIDC_SOURCE_COMMIT=<peeled tag commit>`.
+- Beta.2 backfill: `OIDC_SOURCE_COMMIT=WORKFLOW_COMMIT=<audited main commit>` and
+  `SOURCE_COMMIT=fceb6c7929e0cf469de9af482c0fb21da34062d9`.
+
+For a tag push, GitHub's signer and source certificate extensions both identify
+the tagged commit, which also contains the workflow. For the manual backfill, the
+OIDC token is issued for the audited workflow invocation on `main`, so its signer
+and source extensions both identify `WORKFLOW_COMMIT`. Checking out beta.2 cannot
+and must not rewrite those certificate fields; the separately checked-out
+`SOURCE_COMMIT` is instead bound by the signed custom predicate.
+
+Set the expected values and verify the standard provenance:
 
 ```bash
-gh attestation verify INSTALLER \
-  --repo mateofh/enso-time \
-  --signer-workflow mateofh/enso-time/.github/workflows/release.yml
-```
+INSTALLER="./enso-time-0.2.0-beta.1-macos-arm64.dmg"
+RELEASE_TAG="v0.2.0-beta.1"
+WORKFLOW_COMMIT="REPLACE_WITH_AUDITED_40_HEX_WORKFLOW_SHA"
+SOURCE_COMMIT="REPLACE_WITH_AUDITED_40_HEX_SOURCE_SHA"
+OIDC_SOURCE_COMMIT="REPLACE_WITH_AUDITED_40_HEX_OIDC_SOURCE_SHA"
+PREDICATE_TYPE=https://github.com/mateofh/enso-time/attestations/release/v1
 
-Verify and inspect the release/source binding:
+test -f "$INSTALLER"
+test -f SHA256SUMS
+[[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$ ]]
+for commit in "$WORKFLOW_COMMIT" "$SOURCE_COMMIT" "$OIDC_SOURCE_COMMIT"; do
+  [[ "$commit" =~ ^[0-9a-f]{40}$ ]]
+done
 
-```bash
-gh attestation verify INSTALLER \
+gh attestation verify "$INSTALLER" \
   --repo mateofh/enso-time \
   --signer-workflow mateofh/enso-time/.github/workflows/release.yml \
-  --predicate-type https://github.com/mateofh/enso-time/attestations/release/v1 \
-  --format json \
-  --jq '.[].verificationResult.statement.predicate'
+  --signer-digest "$WORKFLOW_COMMIT" \
+  --source-digest "$OIDC_SOURCE_COMMIT"
 ```
 
-Verification checks the downloaded installer's digest against the signed subject.
-For beta.2, also confirm that `releaseTag` is `v0.1.0-beta.2` and `sourceCommit` is
-`fceb6c7929e0cf469de9af482c0fb21da34062d9`.
+Verify the custom predicate under the same certificate policy and save only the
+already-verified result for structural checks:
+
+```bash
+gh attestation verify "$INSTALLER" \
+  --repo mateofh/enso-time \
+  --signer-workflow mateofh/enso-time/.github/workflows/release.yml \
+  --signer-digest "$WORKFLOW_COMMIT" \
+  --source-digest "$OIDC_SOURCE_COMMIT" \
+  --predicate-type "$PREDICATE_TYPE" \
+  --format json > VERIFIED_RELEASE_ATTESTATION.json
+```
+
+`gh attestation verify` checks the downloaded installer's digest against the signed
+subject. Independently confirm that the attached checksum manifest, signed subject,
+and custom predicate all name the same bytes and that the predicate records the
+reviewed source/workflow commits:
+
+```bash
+ASSET_NAME="$(basename "$INSTALLER")"
+ASSET_SHA256="$(shasum -a 256 "$INSTALLER" | awk '{print $1}')"
+grep -Fqx "$ASSET_SHA256  $ASSET_NAME" SHA256SUMS
+
+jq -e \
+  --arg name "$ASSET_NAME" \
+  --arg sha256 "$ASSET_SHA256" \
+  --arg releaseTag "$RELEASE_TAG" \
+  --arg sourceCommit "$SOURCE_COMMIT" \
+  --arg workflowCommit "$WORKFLOW_COMMIT" \
+  'length >= 1 and all(.[].verificationResult.statement;
+    any(.subject[]; .name == $name and .digest.sha256 == $sha256)
+    and .predicate.releaseTag == $releaseTag
+    and .predicate.sourceCommit == $sourceCommit
+    and .predicate.workflow.commit == $workflowCommit
+    and any(.predicate.assets[]; .name == $name and .sha256 == $sha256)
+  )' VERIFIED_RELEASE_ATTESTATION.json
+```
+
+For beta.2, set `RELEASE_TAG=v0.1.0-beta.2`. Do not substitute the historical
+beta.2 commit into `--source-digest`: that flag verifies the GitHub OIDC source
+extension, which is the audited `main` workflow commit for a manual dispatch.
 
 ## Security limits
 

@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const workflow = readFileSync(new URL("../../.github/workflows/release.yml", import.meta.url), "utf8");
+const provenanceDocs = readFileSync(new URL("../../docs/RELEASE_PROVENANCE.md", import.meta.url), "utf8");
 
 test("manual release is a fail-closed beta.2 backfill", () => {
   assert.match(workflow, /type: choice\s+options:\s+- v0\.1\.0-beta\.2/);
@@ -10,6 +11,7 @@ test("manual release is a fail-closed beta.2 backfill", () => {
   assert.match(workflow, /\[\[ "\$REQUESTED_TAG" == "\$BACKFILL_TAG" \]\]/);
   assert.match(workflow, /BACKFILL_SOURCE_COMMIT: fceb6c7929e0cf469de9af482c0fb21da34062d9/);
   assert.match(workflow, /\[\[ "\$source_commit" == "\$BACKFILL_SOURCE_COMMIT" \]\]/);
+  assert.match(workflow, /\[\[ "\$TRIGGER_SHA" == "\$WORKFLOW_COMMIT" \]\]/);
 });
 
 test("one resolved source SHA feeds and is verified by every job", () => {
@@ -27,6 +29,7 @@ test("one resolved source SHA feeds and is verified by every job", () => {
   const publish = workflow.indexOf("Publish installers and checksums");
   assert.ok(finalTagCheck > 0 && finalTagCheck < publish);
   assert.match(workflow.slice(finalTagCheck, publish), /test "\$current_commit" = "\$SOURCE_COMMIT"/);
+  assert.match(workflow, /\[\[ "\$WORKFLOW_COMMIT" == "\$source_commit" \]\]/);
 });
 
 test("standard and custom attestations cover the same installer manifest", () => {
@@ -45,6 +48,33 @@ test("standard and custom attestations cover the same installer manifest", () =>
   assert.match(workflow, /commit: \$workflowCommit/);
   assert.match(workflow, /ref: \$workflowRef/);
   assert.match(workflow, /assets: \$assets/);
+});
+
+test("only the publisher crosses the protected release environment", () => {
+  const buildStart = workflow.indexOf("\n  build:");
+  const releaseStart = workflow.indexOf("\n  release:");
+  assert.ok(buildStart > 0 && buildStart < releaseStart);
+  assert.doesNotMatch(workflow.slice(buildStart, releaseStart), /environment:\s*release/);
+  assert.match(workflow.slice(releaseStart), /runs-on: ubuntu-24\.04\s+environment: release\s+timeout-minutes:/);
+  assert.equal(workflow.match(/environment:\s*release/g)?.length, 1);
+  assert.match(workflow, /group: release-\$\{\{ inputs\.release_tag \|\| github\.ref_name \}\}/);
+  assert.match(workflow, /cancel-in-progress: false/);
+});
+
+test("verification pins signer and OIDC source digests for both trigger branches", () => {
+  assert.match(workflow, /--signer-digest \$\{\{ needs\.resolve\.outputs\.workflow_commit \}\}/);
+  assert.match(workflow, /--source-digest \$\{\{ github\.sha \}\}/);
+
+  assert.match(provenanceDocs, /Future tag push: `WORKFLOW_COMMIT=SOURCE_COMMIT=OIDC_SOURCE_COMMIT=<peeled tag commit>`/);
+  assert.match(provenanceDocs, /Beta\.2 backfill: `OIDC_SOURCE_COMMIT=WORKFLOW_COMMIT=<audited main commit>`/);
+  assert.match(provenanceDocs, /`SOURCE_COMMIT=fceb6c7929e0cf469de9af482c0fb21da34062d9`/);
+  assert.match(provenanceDocs, /--signer-digest "\$WORKFLOW_COMMIT"/);
+  assert.match(provenanceDocs, /--source-digest "\$OIDC_SOURCE_COMMIT"/);
+  assert.match(provenanceDocs, /\[\[ "\$commit" =~ \^\[0-9a-f\]\{40\}\$ \]\]/);
+  assert.match(provenanceDocs, /--predicate-type "\$PREDICATE_TYPE"/);
+  assert.match(provenanceDocs, /any\(\.subject\[\]; \.name == \$name and \.digest\.sha256 == \$sha256\)/);
+  assert.match(provenanceDocs, /\.predicate\.releaseTag == \$releaseTag/);
+  assert.match(provenanceDocs, /any\(\.predicate\.assets\[\]; \.name == \$name and \.sha256 == \$sha256\)/);
 });
 
 test("Windows uses a real VBScript smoke test without mutating optional features", () => {
