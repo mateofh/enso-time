@@ -5,7 +5,7 @@ description = "Private, local-first time diagnosis by Ensō"
 authors = ["Ensō"]
 license = "MPL-2.0"
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.88.0"
 
 [lib]
 name = "enso_time_lib"
@@ -19,6 +19,7 @@ aw-server = { path = "../vendor/activitywatch/aw-server" }
 aw-datastore = { path = "../vendor/activitywatch/aw-datastore" }
 aw-models = { path = "../vendor/activitywatch/aw-models" }
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
 log = "0.4"
 rusqlite = { version = "0.30", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
@@ -30,6 +31,8 @@ tauri-plugin-opener = "2.5"
 tauri-plugin-single-instance = "2.3"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
+url = "2"
+uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.30", features = ["signal"] }
@@ -43,3 +46,6 @@ lto = "thin"
 opt-level = "s"
 panic = "abort"
 strip = true
+
+[dev-dependencies]
+tempfile = "3"

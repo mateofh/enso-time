@@ -1,2 +1,2 @@
 [env]
-AW_WEBUI_DIR = "server-static"
+AW_WEBUI_DIR = { value = "server-static", relative = true }
