@@ -251,7 +251,16 @@ pub fn draft_from_input(
     draft.source_intake_updated_at = intake.updated_at.clone();
     draft.workflow_intake_id = intake.id.clone();
     draft.runs_per_week = input.runs_per_week;
-    draft.step_boundaries = input.step_boundaries;
+    draft.step_boundaries = input
+        .step_boundaries
+        .into_iter()
+        .map(|mut boundary| {
+            boundary.rationale = boundary
+                .rationale
+                .map(|rationale| normalize_text(&rationale));
+            boundary
+        })
+        .collect();
     draft.data_sensitivity = input.data_sensitivity;
     draft.side_effect_level = input.side_effect_level;
     draft.verification_mode = input.verification_mode;
@@ -351,7 +360,10 @@ fn validate_identifier(value: &str, maximum: usize) -> Result<(), String> {
 }
 
 fn validate_optional_text(value: &str, maximum: usize, label: &str) -> Result<(), String> {
-    if value.is_empty() || value.chars().count() > maximum || value.chars().any(char::is_control) {
+    if value.trim().is_empty()
+        || value.chars().count() > maximum
+        || value.chars().any(char::is_control)
+    {
         return Err(format!(
             "{label} debe tener entre 1 y {maximum} caracteres sin controles"
         ));
@@ -481,7 +493,7 @@ pub fn completeness(draft: &AutomationBlueprintDraftV1, intake: &WorkflowIntakeV
                 && boundary
                     .rationale
                     .as_ref()
-                    .is_some_and(|value| !value.is_empty())
+                    .is_some_and(|value| !value.trim().is_empty())
         })
         .count();
     let boundary_points = if intake.steps.is_empty() {
@@ -540,7 +552,7 @@ fn missing_fields(draft: &AutomationBlueprintDraftV1, intake: &WorkflowIntakeV1)
                 && boundary
                     .rationale
                     .as_ref()
-                    .is_some_and(|value| !value.is_empty())
+                    .is_some_and(|value| !value.trim().is_empty())
         })
         .count();
     let mut missing = Vec::new();
@@ -1089,6 +1101,24 @@ mod tests {
         draft.step_boundaries[0].rationale = Some("ok".into());
         draft.step_boundaries[0].step_id = "step-02".into();
         assert!(validate_draft(&draft, &intake).is_err());
+    }
+
+    #[test]
+    fn whitespace_rationales_are_normalized_or_rejected_and_never_ready() {
+        let intake = intake();
+        let mut whitespace = ready_draft();
+        whitespace.step_boundaries[0].rationale = Some(" \n\t ".into());
+        assert!(completeness(&whitespace, &intake).score < 100);
+        assert!(assess_blueprint(whitespace.clone(), &intake, 2, 2, 2.0, 1.0, 7.0, "en").is_err());
+        assert!(draft_from_input(&intake, None, whitespace).is_err());
+
+        let mut spaced = ready_draft();
+        spaced.step_boundaries[0].rationale = Some("  Clear   deterministic\n rules  ".into());
+        let normalized = draft_from_input(&intake, None, spaced).unwrap();
+        assert_eq!(
+            normalized.step_boundaries[0].rationale.as_deref(),
+            Some("Clear deterministic rules")
+        );
     }
 
     #[test]
