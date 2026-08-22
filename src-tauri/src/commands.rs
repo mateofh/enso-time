@@ -8,7 +8,8 @@ use crate::storage::LocalStore;
 use chrono::{Datelike, Duration, Timelike, Utc};
 use chrono_tz::Tz;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread::JoinHandle;
 use tauri::{AppHandle, State};
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 use tauri_plugin_notification::NotificationExt;
@@ -17,9 +18,46 @@ use url::Url;
 use uuid::Uuid;
 
 pub struct AppState {
+    pub scheduler: SchedulerHandle,
     pub store: Arc<LocalStore>,
     pub activity: Arc<ActivityWatchRuntime>,
     pub app_data_dir: PathBuf,
+}
+
+pub struct SchedulerHandle {
+    state: Mutex<SchedulerState>,
+}
+
+struct SchedulerState {
+    stop_sender: Option<mpsc::Sender<()>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl SchedulerHandle {
+    pub fn shutdown(&self) -> Result<(), String> {
+        let (sender, thread) = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| "No se pudo detener el scheduler".to_string())?;
+            (state.stop_sender.take(), state.thread.take())
+        };
+        if let Some(sender) = sender {
+            let _ = sender.send(());
+        }
+        if let Some(thread) = thread {
+            thread
+                .join()
+                .map_err(|_| "El scheduler terminó de forma inesperada".to_string())?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for SchedulerHandle {
+    fn drop(&mut self) {
+        let _ = self.shutdown();
+    }
 }
 
 #[tauri::command]
@@ -312,16 +350,36 @@ pub fn start_scheduler(
     app: AppHandle,
     store: Arc<LocalStore>,
     activity: Arc<ActivityWatchRuntime>,
-) {
-    std::thread::Builder::new()
+) -> Result<SchedulerHandle, String> {
+    spawn_scheduler(
+        move || scheduler_tick(&app, &store, &activity),
+        std::time::Duration::from_secs(30),
+    )
+}
+
+fn spawn_scheduler<F>(mut tick: F, interval: std::time::Duration) -> Result<SchedulerHandle, String>
+where
+    F: FnMut() -> Result<(), String> + Send + 'static,
+{
+    let (stop_sender, stop_receiver) = mpsc::channel();
+    let thread = std::thread::Builder::new()
         .name("enso-checkin-scheduler".into())
         .spawn(move || loop {
-            if let Err(error) = scheduler_tick(&app, &store, &activity) {
+            if let Err(error) = tick() {
                 eprintln!("Ensō Time scheduler: {error}");
             }
-            std::thread::sleep(std::time::Duration::from_secs(30));
+            match stop_receiver.recv_timeout(interval) {
+                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
         })
-        .expect("failed to spawn Ensō Time scheduler");
+        .map_err(|error| format!("No se pudo iniciar el scheduler: {error}"))?;
+    Ok(SchedulerHandle {
+        state: Mutex::new(SchedulerState {
+            stop_sender: Some(stop_sender),
+            thread: Some(thread),
+        }),
+    })
 }
 
 fn scheduler_tick(
@@ -510,6 +568,7 @@ fn csv_escape(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn external_allowlist_does_not_accept_lookalike_hosts() {
@@ -529,5 +588,36 @@ mod tests {
             "\"'=HYPERLINK(\"\"https://evil.test\"\")\""
         );
         assert_eq!(csv_escape("+1+1"), "'+1+1");
+    }
+
+    #[test]
+    fn scheduler_shutdown_is_prompt_idempotent_and_joins_thread() {
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let worker_ticks = Arc::clone(&ticks);
+        let held_runtime = Arc::new(());
+        let worker_runtime = Arc::clone(&held_runtime);
+        let scheduler = spawn_scheduler(
+            move || {
+                let _ = &worker_runtime;
+                worker_ticks.fetch_add(1, Ordering::Release);
+                Ok(())
+            },
+            std::time::Duration::from_secs(30),
+        )
+        .unwrap();
+        for _ in 0..100 {
+            if ticks.load(Ordering::Acquire) > 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(ticks.load(Ordering::Acquire) > 0);
+
+        scheduler.shutdown().unwrap();
+        scheduler.shutdown().unwrap();
+        assert_eq!(Arc::strong_count(&held_runtime), 1);
+        let stopped_at = ticks.load(Ordering::Acquire);
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        assert_eq!(ticks.load(Ordering::Acquire), stopped_at);
     }
 }

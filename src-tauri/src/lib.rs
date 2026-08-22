@@ -47,14 +47,6 @@ pub fn run() {
                 &app_data_dir.join("activitywatch"),
                 resource_dir,
             )?);
-            let state = AppState {
-                store: Arc::clone(&store),
-                activity: Arc::clone(&activity),
-                app_data_dir,
-            };
-            app.manage(state);
-            install_tray(app)?;
-
             let settings = store.settings()?;
             if settings.onboarding_completed && settings.autostart {
                 use tauri_plugin_autostart::ManagerExt;
@@ -87,7 +79,19 @@ pub fn run() {
                         eprintln!("Ensō Time: el servicio local no respondió a tiempo");
                     })?;
             }
-            commands::start_scheduler(app.handle().clone(), store, activity);
+            let scheduler = commands::start_scheduler(
+                app.handle().clone(),
+                Arc::clone(&store),
+                Arc::clone(&activity),
+            )?;
+            let state = AppState {
+                store,
+                activity,
+                app_data_dir,
+                scheduler,
+            };
+            app.manage(state);
+            install_tray(app)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -112,7 +116,12 @@ pub fn run() {
     app.run(|app, event| {
         if let RunEvent::ExitRequested { .. } | RunEvent::Exit = event {
             if let Some(state) = app.try_state::<AppState>() {
-                let _ = state.activity.stop_watchers();
+                if let Err(error) = state.scheduler.shutdown() {
+                    eprintln!("Ensō Time scheduler shutdown: {error}");
+                }
+                if let Err(error) = state.activity.shutdown() {
+                    eprintln!("Ensō Time runtime shutdown: {error}");
+                }
             }
         }
     });
