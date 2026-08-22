@@ -48,7 +48,7 @@
     },
     "windows": {
       "digestAlgorithm": "sha256",
-      "timestampUrl": "http://timestamp.digicert.com"
+      "timestampUrl": "https://timestamp.digicert.com"
     }
   }
 }

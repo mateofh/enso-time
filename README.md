@@ -48,6 +48,31 @@ Compare the hash with the matching line in `SHA256SUMS` from the same release. A
 checksum confirms that two files are identical; it does not prove who created a file or
 that the file is safe.
 
+Each release also includes a Sigstore bundle named
+`enso-time-<version>-provenance.sigstore.json`. The tag workflow generates GitHub build
+provenance for all four installers using a short-lived GitHub OIDC identity. With a
+current GitHub CLI, replace `OWNER/REPOSITORY` with this repository and verify an
+installer online:
+
+```bash
+gh attestation verify ./enso-time-0.1.0-beta.2-macos-arm64.dmg \
+  --repo OWNER/REPOSITORY \
+  --signer-workflow OWNER/REPOSITORY/.github/workflows/release.yml
+```
+
+To verify against the attached bundle instead of fetching the attestation from GitHub:
+
+```bash
+gh attestation verify ./enso-time-0.1.0-beta.2-macos-arm64.dmg \
+  --repo OWNER/REPOSITORY \
+  --bundle ./enso-time-0.1.0-beta.2-provenance.sigstore.json \
+  --signer-workflow OWNER/REPOSITORY/.github/workflows/release.yml
+```
+
+Provenance links an artifact digest to this GitHub Actions workflow and source ref. It
+does not review the source, make an unsigned binary safe, or replace Apple Developer ID
+signing/notarization or Windows Authenticode.
+
 ### Unsigned beta installers
 
 This beta is built without paid signing or notarization certificates. macOS application
