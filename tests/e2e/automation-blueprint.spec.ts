@@ -48,15 +48,15 @@ function makeBlueprint(overrides: Record<string, unknown> = {}) {
   const sourceIntakeUpdatedAt = intake.updatedAt;
   return {
     schemaVersion: 1,
-    id: "blueprint-e2e-v1",
+    id: `blueprint-${candidateId}`,
     candidateId,
     workflowIntakeId: intake.id,
     sourceIntakeUpdatedAt,
     revision: 2,
     runsPerWeek: 5,
     stepBoundaries: [
-      { stepId: "step-1", disposition: "automatable", rationale: "Reglas repetibles y reversibles." },
-      { stepId: "step-2", disposition: "human-required", rationale: "Requiere resolver excepciones." },
+      { stepId: "step-01", disposition: "automatable", rationale: "Reglas repetibles y reversibles." },
+      { stepId: "step-02", disposition: "human-required", rationale: "Requiere resolver excepciones." },
     ],
     dataSensitivity: "low",
     sideEffectLevel: "reversible",
@@ -71,16 +71,32 @@ function makeBlueprint(overrides: Record<string, unknown> = {}) {
 }
 
 async function seed(page: Page, options: { locale?: "es-419" | "en"; blueprint?: unknown; intakes?: unknown[]; observations?: number } = {}) {
-  await page.addInitScript(({ key, locale, blueprint, intakes, observations }) => {
+  const observations = Array.from({ length: options.observations ?? 2 }, (_, index) => {
+    const day = String(index + 1).padStart(2, "0");
+    return {
+      id: `e2e-blueprint-checkin-${index + 1}`,
+      intervalStart: `2026-08-${day}T15:00:00.000Z`,
+      intervalEnd: `2026-08-${day}T15:15:00.000Z`,
+      reason: "ambiguous",
+      status: "answered",
+      activityLabel: "Actualizar reporte semanal",
+      category: "admin",
+      project: "Operación",
+      repetitive: true,
+      rulesClear: true,
+      createdAt: `2026-08-${day}T15:15:00.000Z`,
+      answeredAt: `2026-08-${day}T15:16:00.000Z`,
+    };
+  });
+  await page.addInitScript(({ key, locale, blueprint, intakes, checkIns }) => {
     localStorage.setItem(key, JSON.stringify({
       settings: { onboardingCompleted: true, locale, theme: "ink", timezone: "America/Bogota", cadenceMinutes: 15, autostart: true, captureWindowTitles: true, retentionDays: 90, updateChecksEnabled: false, goals: ["Recuperar tiempo"], role: "Operaciones", workSchedule: { start: "08:30", end: "18:00", days: [1, 2, 3, 4, 5] }, appRules: [] },
-      checkIns: [],
+      checkIns,
       workflowIntakes: intakes,
       automationBlueprints: blueprint ? [blueprint] : [],
-      automationObservations: observations,
       captureIssue: null,
     }));
-  }, { key: STORAGE_KEY, locale: options.locale ?? "es-419", blueprint: options.blueprint, intakes: options.intakes ?? [intake], observations: options.observations ?? 2 });
+  }, { key: STORAGE_KEY, locale: options.locale ?? "es-419", blueprint: options.blueprint, intakes: options.intakes ?? [intake], checkIns: observations });
   await page.goto("/");
 }
 
