@@ -101,9 +101,17 @@ jobs:
               echo "The pushed tag no longer resolves to the triggering commit." >&2
               exit 1
             }
+            [[ "$WORKFLOW_COMMIT" == "$source_commit" ]] || {
+              echo "The tag-push signer does not match the immutable source commit." >&2
+              exit 1
+            }
           else
             [[ "$source_commit" == "$BACKFILL_SOURCE_COMMIT" ]] || {
               echo "The immutable beta.2 tag no longer resolves to its approved commit." >&2
+              exit 1
+            }
+            [[ "$TRIGGER_SHA" == "$WORKFLOW_COMMIT" ]] || {
+              echo "The backfill OIDC source does not match the audited workflow commit." >&2
               exit 1
             }
           fi
@@ -360,6 +368,7 @@ jobs:
     name: Publish GitHub prerelease
     needs: [resolve, build]
     runs-on: ubuntu-24.04
+    environment: release
     timeout-minutes: 15
     permissions:
       attestations: write
@@ -506,9 +515,9 @@ jobs:
 
             These builds do not use paid signing or notarization certificates. The macOS app is ad-hoc signed for DMG packaging and is not notarized. Windows MSI and NSIS installers are unsigned. Verify downloads against SHA256SUMS.
 
-            GitHub SLSA provenance is available through the attestations API and the attached standard Sigstore bundle. It identifies the release workflow invocation that collected and signed the installer hashes; it does not independently identify each matrix build job. Verify an installer with `gh attestation verify INSTALLER --repo ${{ github.repository }} --signer-workflow ${{ github.repository }}/.github/workflows/release.yml`.
+            GitHub SLSA provenance is available through the attestations API and the attached standard Sigstore bundle. It identifies the release workflow invocation that collected and signed the installer hashes; it does not independently identify each matrix build job. Verify an installer with `gh attestation verify INSTALLER --repo ${{ github.repository }} --signer-workflow ${{ github.repository }}/.github/workflows/release.yml --signer-digest ${{ needs.resolve.outputs.workflow_commit }} --source-digest ${{ github.sha }}`.
 
-            A second signed custom attestation binds each installer digest to the release tag, immutable source commit, and workflow commit/ref recorded in the attached release provenance JSON. Verify it with `gh attestation verify INSTALLER --repo ${{ github.repository }} --signer-workflow ${{ github.repository }}/.github/workflows/release.yml --predicate-type https://github.com/mateofh/enso-time/attestations/release/v1 --format json`. For a manual backfill, the standard attestation identifies the hardened workflow invocation; inspect the custom predicate to confirm the separately checked-out source commit.
+            A second signed custom attestation binds each installer digest to the release tag, immutable source commit, and workflow commit/ref recorded in the attached release provenance JSON. Verify it with the same signer/source digests plus `--predicate-type https://github.com/mateofh/enso-time/attestations/release/v1 --format json`. For the manual beta.2 backfill, GitHub's OIDC source and signer digests both identify the audited workflow commit on `main`; inspect the signed custom predicate to confirm the separately checked-out `fceb6c7929e0cf469de9af482c0fb21da34062d9` source and the installer name/hash. See `docs/RELEASE_PROVENANCE.md` for the fail-closed commands.
 
             Attestations prove the signer workflow and artifact integrity, not that the signed predicate is independently truthful or that the software is secure. Provenance does not replace Apple Developer ID/notarization or Windows Authenticode and does not suppress Gatekeeper or SmartScreen warnings.
           files: |
