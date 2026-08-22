@@ -44,7 +44,8 @@ const intake = {
   updatedAt: "2026-08-21T12:00:00.000Z",
 };
 
-type Mode = "success" | "pending" | "reject" | "conflict";
+type GetMode = "success" | "pending" | "reject" | "native-err";
+type CommandMode = "success" | "reject" | "conflict-ok";
 type DraftSeed = { revision?: number; sourceIntakeUpdatedAt?: string; complete?: boolean };
 
 function checkIns(count: number) {
@@ -77,8 +78,9 @@ async function seedDesktop(page: Page, options: {
   observations?: number;
   intakes?: typeof intake[];
   draft?: DraftSeed;
-  getMode?: Mode;
-  saveMode?: "success" | "reject";
+  getMode?: GetMode;
+  saveMode?: CommandMode;
+  refreshMode?: CommandMode;
   currentRevision?: number;
 } = {}) {
   const locale = options.locale ?? "es-419";
@@ -87,6 +89,7 @@ async function seedDesktop(page: Page, options: {
     const state = {
       getMode: scenario.getMode,
       saveMode: scenario.saveMode,
+      refreshMode: scenario.refreshMode,
       currentRevision: scenario.currentRevision,
       calls: [] as Array<{ command: string; args: Record<string, unknown> }>,
     };
@@ -105,9 +108,12 @@ async function seedDesktop(page: Page, options: {
       item.status === "answered" && item.repetitive && item.activityLabel === selectedIntake?.candidateLabel,
     );
     const evidence = {
-      observed: matchingCheckIns.map((item: { answeredAt: string }) => `Check-in ${item.answeredAt}`),
-      declared: ["Workflow intake supplied by you"],
+      observed: matchingCheckIns.length ? [`${matchingCheckIns.length} check-in(s) repetido(s) entre ${matchingCheckIns.length} observación(es) coincidentes durante ${new Set(matchingCheckIns.map((item: { intervalStart: string }) => item.intervalStart.slice(0, 10))).size} día(s)`] : [],
+      declared: ["Intake del workflow declarado por ti"],
       repeatedObservations: matchingCheckIns.length,
+      observedDays: new Set(matchingCheckIns.map((item: { intervalStart: string }) => item.intervalStart.slice(0, 10))).size,
+      rulesQuality: matchingCheckIns.length ? matchingCheckIns.filter((item: { rulesClear: boolean }) => item.rulesClear).length / matchingCheckIns.length : 0,
+      observedWeeklyFrequency: matchingCheckIns.length * 7 / Math.max(1, new Set(matchingCheckIns.map((item: { intervalStart: string }) => item.intervalStart.slice(0, 10))).size),
     };
     const emptyDraft = () => ({
       schemaVersion: 1,
@@ -162,10 +168,17 @@ async function seedDesktop(page: Page, options: {
         ...(conflict ? { conflict } : {}),
       };
     };
+    const conflictResult = (draft: ReturnType<typeof emptyDraft>) => buildBlueprint({
+      ...draft,
+      revision: state.currentRevision,
+      sourceIntakeUpdatedAt: selectedIntake.updatedAt,
+      runsPerWeek: 9,
+      recoveryPlan: "Revisar la versión actual antes de continuar.",
+    }, { currentRevision: state.currentRevision });
     let currentDraft = selectedIntake ? emptyDraft() : undefined;
     const testApi = {
       state,
-      setGetMode(mode: Mode) { state.getMode = mode; },
+      setGetMode(mode: GetMode) { state.getMode = mode; },
       calls(command: string) { return state.calls.filter((call) => call.command === command); },
     };
     (window as Window & { __blueprintE2E?: typeof testApi }).__blueprintE2E = testApi;
@@ -183,14 +196,18 @@ async function seedDesktop(page: Page, options: {
           case "get_automation_blueprint_v1":
             if (state.getMode === "pending") return new Promise<never>(() => undefined);
             if (state.getMode === "reject") throw new Error("backend unavailable");
-            return buildBlueprint(currentDraft!, state.getMode === "conflict" ? { currentRevision: state.currentRevision } : undefined);
+            if (state.getMode === "native-err") throw 'Err("blueprint.not_ready")';
+            return buildBlueprint(currentDraft!);
           case "save_automation_blueprint_v1":
             if (state.saveMode === "reject") throw new Error("save unavailable");
             const input = args.input as { draft: ReturnType<typeof emptyDraft>; expectedRevision?: number };
             currentDraft = { ...input.draft, revision: (input.expectedRevision ?? input.draft.revision) + 1, updatedAt: "2026-08-22T12:00:00.000Z" };
+            if (state.saveMode === "conflict-ok") return conflictResult(currentDraft);
             return buildBlueprint(currentDraft);
           case "refresh_automation_blueprint_source_v1":
             currentDraft = { ...currentDraft!, sourceIntakeUpdatedAt: selectedIntake.updatedAt, revision: currentDraft!.revision + 1 };
+            if (state.refreshMode === "reject") throw new Error("refresh unavailable");
+            if (state.refreshMode === "conflict-ok") return conflictResult(currentDraft);
             return buildBlueprint(currentDraft);
           case "export_automation_blueprint_v1": return `desktop://automation-blueprint-${selectedIntake.candidateId}.md`;
           case "delete_automation_blueprint_v1": return undefined;
@@ -201,6 +218,7 @@ async function seedDesktop(page: Page, options: {
   }, {
     getMode: options.getMode ?? "success",
     saveMode: options.saveMode ?? "success",
+    refreshMode: options.refreshMode ?? "success",
     currentRevision: options.currentRevision ?? 4,
     draft: options.draft ?? {},
     intakes: options.intakes ?? [intake],
@@ -273,6 +291,18 @@ test.describe("Automation Blueprint v0.2 contract", () => {
     await expect(page.locator('input[name*="oauth" i], input[name*="token" i], input[name*="secret" i], input[name*="credential" i]')).toHaveCount(0);
   });
 
+  test("ready evidence separates recorded intervals from signals confirmed by the person", async ({ page }) => {
+    await seedDesktop(page, { draft: { complete: true } });
+    await openBlueprint(page);
+    const evidence = page.getByTestId("blueprint-source-map");
+    const panel = page.getByTestId("blueprint-panel");
+    await expect(page.getByTestId("blueprint-status")).toContainText(/respaldado.*confirmadas|backed.*confirmed/i);
+    await expect(evidence).toContainText(/intervalos.*registrados|recorded intervals/i);
+    await expect(evidence).toContainText(/confirmado por ti|confirmed by you/i);
+    await expect(panel).toContainText(/intervalos\/check-ins registrados son de solo lectura|recorded intervals\/check-ins are read-only/i);
+    await expect(panel).toContainText(/actividad, repetición y reglas son confirmaciones declaradas por ti|activity, repetition, and rules are confirmations you declared/i);
+  });
+
   test("mobile and keyboard users can complete boundaries with visible focus", async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await seedDesktop(page);
@@ -313,19 +343,42 @@ test.describe("Automation Blueprint v0.2 contract", () => {
     await expect(page.getByTestId("blueprint-panel")).toBeVisible();
   });
 
-  test("save rejection and currentRevision conflict are explicit desktop states", async ({ page }) => {
+  test("native Rust Err(String) is localized without leaking its transport wrapper", async ({ page }) => {
+    await seedDesktop(page, { getMode: "native-err" });
+    await openBlueprint(page);
+    await expect(page.getByTestId("blueprint-error")).toContainText(/completa.*blueprint|complete.*blueprint/i);
+    await expect(page.getByTestId("blueprint-error")).not.toContainText(/Err\(/);
+  });
+
+  test("save rejection is explicit", async ({ page }) => {
     await seedDesktop(page, { draft: { complete: true, revision: 3 }, saveMode: "reject" });
     await openBlueprint(page);
     await page.getByTestId("blueprint-save").click();
     await expect(page.getByRole("alert")).toContainText(/save|guardar|unavailable/i);
     const [save] = await invokeCalls(page, "save_automation_blueprint_v1") ?? [];
     expect(save.args).toMatchObject({ locale: "es-419", input: { expectedRevision: 3 } });
+  });
 
-    await seedDesktop(page, { draft: { complete: true, revision: 3 }, getMode: "conflict", currentRevision: 4 });
+  test("save and refresh Ok conflicts keep the current draft and suppress success", async ({ page }) => {
+    await seedDesktop(page, { draft: { complete: true, revision: 3 }, saveMode: "conflict-ok", currentRevision: 4 });
     await openBlueprint(page);
+    await page.getByTestId("blueprint-save").click();
     await expect(page.getByTestId("blueprint-conflict")).toContainText(/conflicto|conflict/i);
     await expect(page.getByTestId("blueprint-conflict")).toContainText("4");
     await expect(page.getByTestId("blueprint-save")).toBeDisabled();
+    await expect(page.getByLabel(/Frecuencia semanal|Runs per week/i)).toHaveValue("9");
+    await expect(page.getByLabel(/Plan de recuperación|Recovery plan/i)).toHaveValue("Revisar la versión actual antes de continuar.");
+    await expect(page.getByRole("status")).toHaveCount(0);
+
+    await seedDesktop(page, { draft: { complete: true, revision: 3, sourceIntakeUpdatedAt: "2026-08-20T12:00:00.000Z" }, refreshMode: "conflict-ok", currentRevision: 4 });
+    await openBlueprint(page);
+    await page.getByTestId("blueprint-refresh").click();
+    await expect(page.getByTestId("blueprint-conflict")).toContainText(/conflicto|conflict/i);
+    await expect(page.getByTestId("blueprint-conflict")).toContainText("4");
+    await expect(page.getByTestId("blueprint-refresh-confirmation")).toHaveCount(0);
+    await expect(page.getByLabel(/Frecuencia semanal|Runs per week/i)).toHaveValue("9");
+    await expect(page.getByLabel(/Plan de recuperación|Recovery plan/i)).toHaveValue("Revisar la versión actual antes de continuar.");
+    await expect(page.getByRole("status")).toHaveCount(0);
   });
 
   test("one repeated observation keeps a valid candidate visible but blocks copy/export", async ({ page }) => {
@@ -347,8 +400,8 @@ test.describe("Automation Blueprint v0.2 contract", () => {
     const dialog = page.getByRole("dialog");
 
     await deleteTrigger.click();
-    await expect(dialog).toContainText(/clipboard|portapapeles/i);
-    await expect(dialog).toContainText(/backups|copias/i);
+    await expect(dialog).toContainText(/borra solo el blueprint guardado|deletes only the saved blueprint/i);
+    await expect(dialog).toContainText(/no elimina exportaciones previas, contenido del portapapeles, copias movidas, backups ni copias sincronizadas|does not delete prior exports, clipboard contents, moved copies, backups, or synced copies/i);
     await page.keyboard.press("Escape");
     await expect(dialog).toHaveCount(0);
     await expect(deleteTrigger).toBeFocused();
