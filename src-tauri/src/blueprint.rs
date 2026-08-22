@@ -108,7 +108,10 @@ pub struct BlueprintEvidenceV1 {
     pub declared: Vec<String>,
     pub repeated_observations: u32,
     pub observed_days: f64,
+    pub declared_repeated_days: f64,
     pub rules_quality: f64,
+    /// Kept for v1 wire compatibility. This is the weekly rate of repetitions
+    /// explicitly confirmed by the user, not an independently observed rate.
     pub observed_weekly_frequency: f64,
 }
 
@@ -381,8 +384,8 @@ pub fn assess_blueprint(
     total_observations: u32,
     repeated_observations: u32,
     observed_days: f64,
+    declared_repeated_days: f64,
     rules_quality: f64,
-    observed_weekly_frequency: f64,
     locale: &str,
 ) -> Result<AutomationBlueprintV1, String> {
     validate_blueprint_locale(locale)?;
@@ -442,17 +445,21 @@ pub fn assess_blueprint(
         ]
     };
     let rules_percentage = (rules_quality.clamp(0.0, 1.0) * 100.0).round();
+    let confirmed_weekly_frequency =
+        f64::from(user_confirmed_repetitions) * 7.0 / declared_repeated_days.max(1.0);
     let declared = if locale == "en" {
         vec![
             "Workflow intake and activity-label association supplied by you".into(),
-            format!("You marked {user_confirmed_repetitions} linked check-in(s) as repetitive"),
+            format!("You marked {user_confirmed_repetitions} linked check-in(s) as repetitive across {declared_repeated_days} distinct UTC day(s)"),
             format!("Your clear-rules confirmations yield {rules_percentage}% rules quality"),
+            format!("Your confirmations imply {confirmed_weekly_frequency:.2} repetitive check-in(s) per week"),
         ]
     } else {
         vec![
             "Intake del workflow y asociación por etiqueta de actividad declarados por ti".into(),
-            format!("Marcaste {user_confirmed_repetitions} check-in(s) vinculado(s) como repetitivo(s)"),
+            format!("Marcaste {user_confirmed_repetitions} check-in(s) vinculado(s) como repetitivo(s) durante {declared_repeated_days} día(s) UTC distinto(s)"),
             format!("Tus confirmaciones de reglas claras producen {rules_percentage}% de calidad de reglas"),
+            format!("Tus confirmaciones implican {confirmed_weekly_frequency:.2} check-in(s) repetitivo(s) por semana"),
         ]
     };
     let evidence = BlueprintEvidenceV1 {
@@ -460,8 +467,9 @@ pub fn assess_blueprint(
         declared,
         repeated_observations,
         observed_days,
+        declared_repeated_days,
         rules_quality,
-        observed_weekly_frequency,
+        observed_weekly_frequency: confirmed_weekly_frequency,
     };
     let estimates = estimates(&draft, intake, &evidence);
     let assumptions = assumptions(&draft, locale);
@@ -664,6 +672,9 @@ pub fn estimates(
         18.0 * human_share + risk_sensitivity + risk_effect + verification + recovery_absent,
     );
     let completeness = f64::from(completeness(draft, intake).score);
+    // Confidence combines declared repetition count/quality with actual recorded
+    // coverage. Frequency agreement uses the rate implied only by user-confirmed
+    // repetitions and their distinct UTC days.
     let observation_component = (6.0 * f64::from(evidence.repeated_observations)).min(30.0);
     let duration_component = (20.0 * evidence.observed_days.min(14.0) / 14.0).round();
     let quality_component = (20.0 * evidence.rules_quality.clamp(0.0, 1.0)).round();
@@ -694,6 +705,10 @@ pub fn estimates(
         f64::from(evidence.repeated_observations),
     );
     components.insert("observedDays".into(), evidence.observed_days);
+    components.insert(
+        "declaredRepeatedDays".into(),
+        evidence.declared_repeated_days,
+    );
     components.insert("rulesQuality".into(), evidence.rules_quality);
     components.insert(
         "observedWeeklyFrequency".into(),
@@ -790,7 +805,7 @@ fn render(
                 BlueprintStatusV1::Stale => "stale",
                 BlueprintStatusV1::Blocked => "blocked",
             },
-            "Repeated observations",
+            "User-confirmed repetitions",
             "Estimated weekly savings",
             "Human / automation boundary",
             "Assumptions",
@@ -805,7 +820,7 @@ fn render(
                 BlueprintStatusV1::Stale => "desactualizado",
                 BlueprintStatusV1::Blocked => "bloqueado",
             },
-            "Observaciones repetidas",
+            "Repeticiones confirmadas por ti",
             "Ahorro semanal estimado",
             "Límite humano / automatización",
             "Supuestos",
@@ -914,16 +929,18 @@ mod tests {
     fn evidence(
         repeated_observations: u32,
         observed_days: f64,
+        declared_repeated_days: f64,
         rules_quality: f64,
-        observed_weekly_frequency: f64,
     ) -> BlueprintEvidenceV1 {
         BlueprintEvidenceV1 {
             observed: vec![],
             declared: vec![],
             repeated_observations,
             observed_days,
+            declared_repeated_days,
             rules_quality,
-            observed_weekly_frequency,
+            observed_weekly_frequency: f64::from(repeated_observations) * 7.0
+                / declared_repeated_days.max(1.0),
         }
     }
 
@@ -945,7 +962,7 @@ mod tests {
         assert!(serde_json::from_value::<SaveAutomationBlueprintInputV1>(input).is_err());
 
         let blueprint =
-            assess_blueprint(ready_draft(), &intake(), 4, 4, 14.0, 0.75, 5.0, "en").unwrap();
+            assess_blueprint(ready_draft(), &intake(), 4, 4, 14.0, 5.6, 0.75, "en").unwrap();
         let output = serde_json::to_value(blueprint).unwrap();
         let keys = |value: &serde_json::Value| {
             value
@@ -992,6 +1009,7 @@ mod tests {
             keys(&output["evidence"]),
             [
                 "declared",
+                "declaredRepeatedDays",
                 "observed",
                 "observedDays",
                 "observedWeeklyFrequency",
@@ -1002,6 +1020,9 @@ mod tests {
             .map(str::to_string)
             .collect()
         );
+        assert_eq!(output["evidence"]["observedDays"], 14.0);
+        assert_eq!(output["evidence"]["declaredRepeatedDays"], 5.6);
+        assert_eq!(output["evidence"]["observedWeeklyFrequency"], 5.0);
         assert_eq!(
             keys(&output["estimates"]),
             [
@@ -1024,7 +1045,7 @@ mod tests {
         let intake = intake();
         let draft = ready_draft();
         assert_eq!(completeness(&draft, &intake).score, 100);
-        let values = estimates(&draft, &intake, &evidence(4, 14.0, 0.75, 5.0));
+        let values = estimates(&draft, &intake, &evidence(4, 14.0, 5.6, 0.75));
         assert_eq!(values.weekly_baseline_minutes, 300);
         assert_eq!(values.weekly_residual_minutes, 100);
         assert_eq!(values.weekly_savings_minutes, 200);
@@ -1047,7 +1068,7 @@ mod tests {
         proportional.step_boundaries.truncate(2);
         assert_eq!(completeness(&proportional, &two_step_intake).score, 90);
         let proportional_values =
-            estimates(&proportional, &two_step_intake, &evidence(2, 7.0, 0.5, 2.0));
+            estimates(&proportional, &two_step_intake, &evidence(2, 7.0, 7.0, 0.5));
         assert_eq!(proportional_values.effort, 34);
         assert_eq!(proportional_values.operational_risk, 19);
         assert_eq!(proportional_values.confidence, 60);
@@ -1062,7 +1083,7 @@ mod tests {
         let values = estimates(
             &draft,
             &intake,
-            &evidence(u32::MAX, f64::MAX, 20.0, f64::MAX),
+            &evidence(u32::MAX, f64::MAX, f64::MAX, 20.0),
         );
         for value in [
             completeness(&draft, &intake).score,
@@ -1073,7 +1094,7 @@ mod tests {
             assert!(value <= 100);
         }
         assert_eq!(
-            estimates(&draft, &intake, &evidence(4, 14.0, 1.0, 5.0)).weekly_savings_minutes,
+            estimates(&draft, &intake, &evidence(4, 14.0, 5.6, 1.0)).weekly_savings_minutes,
             0
         );
     }
@@ -1083,13 +1104,13 @@ mod tests {
         let intake = intake();
         let draft = ready_draft();
         assert_eq!(
-            assess_blueprint(draft.clone(), &intake, 4, 3, 14.0, 0.75, 1.5, "en")
+            assess_blueprint(draft.clone(), &intake, 4, 3, 14.0, 14.0, 0.75, "en")
                 .unwrap()
                 .status,
             BlueprintStatusV1::Ready
         );
         assert_eq!(
-            assess_blueprint(draft.clone(), &intake, 1, 1, 7.0, 1.0, 1.0, "en")
+            assess_blueprint(draft.clone(), &intake, 1, 1, 7.0, 7.0, 1.0, "en")
                 .unwrap()
                 .status,
             BlueprintStatusV1::Draft
@@ -1097,7 +1118,7 @@ mod tests {
         let mut changed = intake.clone();
         changed.updated_at = "2025-01-03T00:00:00Z".into();
         assert_eq!(
-            assess_blueprint(draft, &changed, 4, 3, 14.0, 0.75, 1.5, "en")
+            assess_blueprint(draft, &changed, 4, 3, 14.0, 14.0, 0.75, "en")
                 .unwrap()
                 .status,
             BlueprintStatusV1::Stale
@@ -1107,7 +1128,12 @@ mod tests {
     #[test]
     fn evidence_separates_recorded_facts_from_user_declarations() {
         let blueprint =
-            assess_blueprint(ready_draft(), &intake(), 4, 3, 2.0, 2.0 / 3.0, 10.5, "en").unwrap();
+            assess_blueprint(ready_draft(), &intake(), 3, 2, 3.0, 2.0, 0.5, "en").unwrap();
+        assert_eq!(blueprint.evidence.observed_days, 3.0);
+        assert_eq!(blueprint.evidence.declared_repeated_days, 2.0);
+        assert_eq!(blueprint.evidence.repeated_observations, 2);
+        assert_eq!(blueprint.evidence.observed_weekly_frequency, 7.0);
+        assert_eq!(blueprint.estimates.confidence, 52);
         let observed = blueprint.evidence.observed.join(" ").to_lowercase();
         assert!(observed.contains("recorded"));
         assert!(observed.contains("interval"));
@@ -1119,6 +1145,7 @@ mod tests {
         assert!(declared.contains("activity-label"));
         assert!(declared.contains("repetitive"));
         assert!(declared.contains("rules"));
+        assert!(declared.contains("2 distinct utc day"));
     }
 
     #[test]
@@ -1126,13 +1153,13 @@ mod tests {
         let intake = intake();
         let draft = ready_draft();
         assert_eq!(
-            assess_blueprint(draft.clone(), &intake, 4, 0, 0.0, 0.0, 0.0, "en")
+            assess_blueprint(draft.clone(), &intake, 4, 0, 4.0, 0.0, 0.0, "en")
                 .unwrap()
                 .status,
             BlueprintStatusV1::Draft
         );
         assert_eq!(
-            assess_blueprint(draft, &intake, 4, 2, 2.0, 1.0, 7.0, "en")
+            assess_blueprint(draft, &intake, 4, 2, 4.0, 2.0, 1.0, "en")
                 .unwrap()
                 .status,
             BlueprintStatusV1::Ready
@@ -1159,7 +1186,7 @@ mod tests {
         let mut whitespace = ready_draft();
         whitespace.step_boundaries[0].rationale = Some(" \n\t ".into());
         assert!(completeness(&whitespace, &intake).score < 100);
-        assert!(assess_blueprint(whitespace.clone(), &intake, 2, 2, 2.0, 1.0, 7.0, "en").is_err());
+        assert!(assess_blueprint(whitespace.clone(), &intake, 2, 2, 2.0, 2.0, 1.0, "en").is_err());
         assert!(draft_from_input(&intake, None, whitespace).is_err());
 
         let mut spaced = ready_draft();

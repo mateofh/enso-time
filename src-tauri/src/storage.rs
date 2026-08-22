@@ -28,8 +28,8 @@ pub struct BlueprintObservationSummary {
     pub total: u32,
     pub repeated: u32,
     pub observed_days: f64,
+    pub declared_repeated_days: f64,
     pub rules_quality: f64,
-    pub observed_weekly_frequency: f64,
 }
 
 impl LocalStore {
@@ -611,34 +611,37 @@ impl LocalStore {
         let mut total = 0_u32;
         let mut repeated = 0_u32;
         let mut rules_clear = 0_u32;
+        let mut observed_utc_days = HashSet::new();
         let mut repeated_utc_days = HashSet::new();
         for row in rows {
             let (label, is_repetitive, has_clear_rules, interval_start) =
                 row.map_err(|error| error.to_string())?;
             if automation_candidate_id(&label) == candidate_id {
                 total = total.saturating_add(1);
+                let utc_day = parse_utc(&interval_start)?.date_naive();
+                observed_utc_days.insert(utc_day);
                 if is_repetitive.is_some_and(|value| value != 0) {
                     repeated = repeated.saturating_add(1);
                     if has_clear_rules.is_some_and(|value| value != 0) {
                         rules_clear = rules_clear.saturating_add(1);
                     }
-                    repeated_utc_days.insert(parse_utc(&interval_start)?.date_naive());
+                    repeated_utc_days.insert(utc_day);
                 }
             }
         }
-        let observed_days = repeated_utc_days.len() as f64;
+        let observed_days = observed_utc_days.len() as f64;
+        let declared_repeated_days = repeated_utc_days.len() as f64;
         let rules_quality = if repeated == 0 {
             0.0
         } else {
             f64::from(rules_clear) / f64::from(repeated)
         };
-        let observed_weekly_frequency = f64::from(repeated) * 7.0 / observed_days.max(1.0);
         Ok(BlueprintObservationSummary {
             total,
             repeated,
             observed_days,
+            declared_repeated_days,
             rules_quality,
-            observed_weekly_frequency,
         })
     }
 
@@ -1173,7 +1176,7 @@ mod tests {
     }
 
     #[test]
-    fn blueprint_evidence_aggregates_days_rule_quality_and_weekly_frequency() {
+    fn three_matching_checkins_separate_observed_and_declared_repeated_days() {
         let store = store();
         let candidate_id = automation_candidate_id("Reporte blueprint");
         for (position, start, repetitive, clear) in [
@@ -1211,9 +1214,9 @@ mod tests {
         let evidence = store.blueprint_observation_counts(&candidate_id).unwrap();
         assert_eq!(evidence.total, 3);
         assert_eq!(evidence.repeated, 2);
-        assert_eq!(evidence.observed_days, 2.0);
+        assert_eq!(evidence.observed_days, 3.0);
+        assert_eq!(evidence.declared_repeated_days, 2.0);
         assert_eq!(evidence.rules_quality, 0.5);
-        assert_eq!(evidence.observed_weekly_frequency, 7.0);
     }
 
     #[test]

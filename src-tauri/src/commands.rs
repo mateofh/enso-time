@@ -386,8 +386,8 @@ fn assess_stored_blueprint(
         observed.total,
         observed.repeated,
         observed.observed_days,
+        observed.declared_repeated_days,
         observed.rules_quality,
-        observed.observed_weekly_frequency,
         locale,
     )
 }
@@ -414,8 +414,8 @@ fn get_automation_blueprint_inner(
         observed.total,
         observed.repeated,
         observed.observed_days,
+        observed.declared_repeated_days,
         observed.rules_quality,
-        observed.observed_weekly_frequency,
         locale,
     )
     .map(Some)
