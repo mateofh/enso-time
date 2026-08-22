@@ -97,7 +97,7 @@ jobs:
         run: node scripts/prepare-activitywatch.mjs --target ${{ matrix.aw_target }}
 
       - name: Run Rust tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml --locked --target ${{ matrix.rust_target }}
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked --target ${{ matrix.rust_target }} -- --test-threads=1
 
       - name: Force ad-hoc macOS signing and no certificate configuration
         shell: bash
