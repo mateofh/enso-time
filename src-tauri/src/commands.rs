@@ -256,7 +256,7 @@ pub fn delete_all_data(state: State<'_, AppState>, confirmation: String) -> Resu
             .activity
             .start_watchers(settings.capture_window_titles);
         return Err(format!(
-            "No se borraron los datos porque el almacén de actividad falló: {error}"
+            "No se pudo completar el borrado seguro del almacén de actividad: {error}"
         ));
     }
     state.store.delete_all()?;
