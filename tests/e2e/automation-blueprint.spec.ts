@@ -111,7 +111,7 @@ async function seedDesktop(page: Page, options: {
     };
     const emptyDraft = () => ({
       schemaVersion: 1,
-      id: `blueprint-${selectedIntake.id}`,
+      id: `blueprint-${selectedIntake.candidateId}`,
       candidateId: selectedIntake.candidateId,
       workflowIntakeId: selectedIntake.id,
       sourceIntakeUpdatedAt: scenario.draft.sourceIntakeUpdatedAt ?? selectedIntake.updatedAt,
@@ -256,7 +256,7 @@ test.describe("Automation Blueprint v0.2 contract", () => {
     await expect(page.getByTestId("blueprint-assumptions")).toContainText(/mismo tiempo|equal[- ]time/i);
 
     const [save] = await invokeCalls(page, "save_automation_blueprint_v1") ?? [];
-    expect(save.args).toMatchObject({ locale: "es-419", input: { expectedRevision: 0, draft: { candidateId, sourceIntakeUpdatedAt: intake.updatedAt } } });
+    expect(save.args).toMatchObject({ locale: "es-419", input: { expectedRevision: 0, draft: { id: `blueprint-${candidateId}`, candidateId, sourceIntakeUpdatedAt: intake.updatedAt } } });
     await page.getByTestId("blueprint-export").click();
     await expect(page.getByRole("status")).toContainText(/exportado|exported/i);
     const [exportCall] = await invokeCalls(page, "export_automation_blueprint_v1") ?? [];
@@ -340,21 +340,37 @@ test.describe("Automation Blueprint v0.2 contract", () => {
     await expect(page.getByTestId("blueprint-export")).toBeDisabled();
   });
 
-  test("delete remains preview-only", async ({ page }) => {
+  test("delete confirms its boundary, restores focus on cancellation, and returns to diagnosis", async ({ page }) => {
     await seedDesktop(page, { draft: { complete: true } });
     await openBlueprint(page);
-    await page.getByTestId("blueprint-delete-preview").click();
-    await expect(page.getByRole("dialog")).toContainText(/clipboard|portapapeles|copias|backups/i);
-    await expect(page.getByRole("dialog")).toContainText(/no.*ejecut|not.*run/i);
-    await page.getByRole("dialog").getByRole("button", { name: /Cancelar|Cancel/ }).click();
-    await expect(page.getByTestId("blueprint-panel")).toBeVisible();
-    expect(await invokeCalls(page, "delete_automation_blueprint_v1")).toEqual([]);
+    const deleteTrigger = page.getByTestId("blueprint-delete-preview");
+    const dialog = page.getByRole("dialog");
+
+    await deleteTrigger.click();
+    await expect(dialog).toContainText(/clipboard|portapapeles/i);
+    await expect(dialog).toContainText(/backups|copias/i);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(deleteTrigger).toBeFocused();
+
+    await deleteTrigger.click();
+    await dialog.getByRole("button", { name: /Cancelar|Cancel/ }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(deleteTrigger).toBeFocused();
+
+    await deleteTrigger.click();
+    await dialog.getByRole("button", { name: /confirmar|confirm|eliminar|delete/i }).click();
+    await expect(page.getByTestId("blueprint-panel")).toHaveCount(0);
+    await expect(page.getByTestId("blueprint-entry")).toBeVisible();
+    await expect(page.getByRole("status")).toContainText(/blueprint.*(eliminado|deleted)|(eliminado|deleted).*blueprint/i);
+    const [deleted] = await invokeCalls(page, "delete_automation_blueprint_v1") ?? [];
+    expect(deleted.args).toEqual({ candidateId, expectedRevision: 0, confirmation: "DELETE_AUTOMATION_BLUEPRINT", locale: "es-419" });
   });
 });
 
 test("golden vectors are available to the browser suite", async () => {
   expect(vectors.schemaVersion).toBe(1);
-  expect(vectors.vectors.find((vector) => vector.name === "complete four-step workflow")?.expected).toMatchObject({ completeness: 100, weeklySavingsMinutes: 200 });
+  expect(vectors.vectors.find((vector) => vector.name === "complete four-step workflow")?.expected).toMatchObject({ completeness: 100, weeklySavingsMinutes: 200, draftId: `blueprint-${candidateId}` });
   expect(vectors.vectors.find((vector) => vector.name === "single observation keeps a complete blueprint as draft")?.expected).toMatchObject({ completeness: 100, status: "draft" });
   expect(vectors.edgeCases.oversizeDraftBytes).toBe(40001);
 });
