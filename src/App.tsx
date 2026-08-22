@@ -3,11 +3,9 @@ import {
   Activity,
   AlertCircle,
   ArrowLeft,
-  ArrowUpRight,
   Bot,
   Check,
   ChevronRight,
-  Clipboard,
   Clock3,
   Download,
   Focus,
@@ -25,6 +23,7 @@ import {
 } from "lucide-react";
 import { bridge } from "./lib/bridge";
 import { WorkflowIntakeView } from "./components/WorkflowIntakeView";
+import { AutomationBlueprintView } from "./components/AutomationBlueprintView";
 import { CATEGORY_ORDER, categoryColor } from "./lib/categories";
 import { categoryLabel, formatDuration, formatTime, messages } from "./lib/i18n";
 import type {
@@ -42,7 +41,7 @@ import type {
   WorkflowIntakeV1,
 } from "./lib/types";
 
-type View = "today" | "checkins" | "study" | "automate" | "workflow" | "settings";
+type View = "today" | "checkins" | "study" | "automate" | "workflow" | "blueprint" | "settings";
 type Notice = { kind: "success" | "error"; message: string };
 
 const EMPTY_STATUS: TrackingStatus = {
@@ -318,7 +317,7 @@ function StudyView({ progress, locale, onDays }: { progress: StudyProgress; loca
   );
 }
 
-function AutomateView({ diagnostic, locale, busy, onGenerate, onCopy, onOpen, onWorkflow }: { diagnostic: DiagnosticV1; locale: Locale; busy: boolean; onGenerate: () => Promise<void>; onCopy: () => Promise<void>; onOpen: (url: string) => Promise<void>; onWorkflow: (candidate: AutomationCandidateV1) => void }) {
+function AutomateView({ diagnostic, locale, busy, onGenerate, onWorkflow, blueprintCandidate }: { diagnostic: DiagnosticV1; locale: Locale; busy: boolean; onGenerate: () => Promise<void>; onWorkflow: (candidate: AutomationCandidateV1) => void; blueprintCandidate: AutomationCandidateV1 | null }) {
   const copy = messages(locale).automate;
   const candidate = diagnostic.candidates[0];
   return (
@@ -333,11 +332,7 @@ function AutomateView({ diagnostic, locale, busy, onGenerate, onCopy, onOpen, on
         </section>
       ) : <section className="empty-state"><Target size={30} aria-hidden="true" /><h2>{copy.empty}</h2><p>{copy.emptyCopy}</p></section>}
       <section className="recommendations"><h2>{copy.recommendations}</h2><ol>{diagnostic.recommendations.map((recommendation, index) => <li key={recommendation}><span>{String(index + 1).padStart(2, "0")}</span><p>{recommendation}</p></li>)}</ol></section>
-      <section className="prompt-section" aria-labelledby="prompt-title">
-        <div className="prompt-heading"><div><p className="section-note">{copy.promptIntro}</p><h2 id="prompt-title">{copy.promptTitle}</h2></div><button type="button" className="primary-button" onClick={() => void onCopy()}><Clipboard size={16} aria-hidden="true" />{copy.copyPrompt}</button></div>
-        <pre tabIndex={0}>{diagnostic.prompt}</pre>
-        <div className="prompt-links"><button type="button" onClick={() => void onOpen("https://chatgpt.com/")}>{copy.openChatGpt} <ArrowUpRight size={15} aria-hidden="true" /></button><button type="button" onClick={() => void onOpen("https://claude.ai/new")}>{copy.openClaude} <ArrowUpRight size={15} aria-hidden="true" /></button><span><LockKeyhole size={14} aria-hidden="true" />{copy.outboundNotice}</span></div>
-      </section>
+      {blueprintCandidate ? <section className="blueprint-entry-card" aria-labelledby="blueprint-entry-title"><div><p className="section-note">{messages(locale).blueprint.context}</p><h2 id="blueprint-entry-title">{blueprintCandidate.activityLabel}</h2><p>{messages(locale).blueprint.intro}</p></div><button type="button" className="primary-button" data-testid="blueprint-entry" onClick={() => onWorkflow(blueprintCandidate)}>{messages(locale).blueprint.mapAction}<ChevronRight size={16} aria-hidden="true" /></button></section> : <section className="empty-state blueprint-no-candidate" data-testid="blueprint-no-candidate"><Target size={30} aria-hidden="true" /><h2>{copy.empty}</h2><p>{copy.emptyCopy}</p></section>}
     </>
   );
 }
@@ -378,6 +373,7 @@ export default function App() {
   const [notice, setNotice] = useState<Notice>();
   const [diagnosticBusy, setDiagnosticBusy] = useState(false);
   const [workflowCandidate, setWorkflowCandidate] = useState<AutomationCandidateV1 | null>(null);
+  const [workflowIntakes, setWorkflowIntakes] = useState<WorkflowIntakeV1[]>([]);
 
   async function load() {
     setLoading(true);
@@ -385,11 +381,18 @@ export default function App() {
     try {
       const from = new Date(); from.setHours(0, 0, 0, 0);
       const to = new Date(); to.setHours(23, 59, 59, 999);
-      const [nextSettings, nextStatus, nextBlocks, nextCheckIns, nextStudy] = await Promise.all([
-        bridge.getSettings(), bridge.getTrackingStatus(), bridge.getTimeline(from.toISOString(), to.toISOString()), bridge.listCheckIns(), bridge.getStudyProgress(),
+      const [nextSettings, nextStatus, nextBlocks, nextCheckIns, nextStudy, nextWorkflowIntakes] = await Promise.all([
+        bridge.getSettings(), bridge.getTrackingStatus(), bridge.getTimeline(from.toISOString(), to.toISOString()), bridge.listCheckIns(), bridge.getStudyProgress(), bridge.listWorkflowIntakes(),
       ]);
-      setSettings(nextSettings); setStatus(nextStatus); setBlocks(nextBlocks); setCheckIns(nextCheckIns); setStudy(nextStudy);
+      setSettings(nextSettings); setStatus(nextStatus); setBlocks(nextBlocks); setCheckIns(nextCheckIns); setStudy(nextStudy); setWorkflowIntakes(nextWorkflowIntakes);
       setDiagnostic(await bridge.generateDiagnostic(nextStudy.selectedDays));
+      if (bridge.shouldResumeAutomationBlueprint()) {
+        const intake = nextWorkflowIntakes.find((item) => nextCheckIns.filter((checkIn) => checkIn.status === "answered" && checkIn.repetitive && checkIn.activityLabel === item.candidateLabel).length >= 2);
+        if (intake) {
+          setWorkflowCandidate({ id: intake.candidateId, activityLabel: intake.candidateLabel, estimatedWeeklyHours: 0, weeklyFrequency: 0, impactScore: 0, feasibilityScore: 0, riskScore: 0, priorityScore: 0, evidence: [] });
+          setView("blueprint");
+        }
+      }
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : "Unable to load Ensō Time");
     } finally {
@@ -447,10 +450,13 @@ export default function App() {
   };
   const saveWorkflowIntake = async (intake: WorkflowIntakeV1) => {
     const saved = await bridge.saveWorkflowIntake(intake);
+    setWorkflowIntakes(await bridge.listWorkflowIntakes());
     setDiagnostic(await bridge.generateDiagnostic(study.selectedDays));
     setNotice({ kind: "success", message: copy.workflow.savedTitle });
     return saved;
   };
+  const blueprintCandidate = workflowIntakes.find((intake) => checkIns.filter((item) => item.status === "answered" && item.repetitive && item.activityLabel === intake.candidateLabel).length >= 2);
+  const blueprintEntry: AutomationCandidateV1 | null = blueprintCandidate ? { id: blueprintCandidate.candidateId, activityLabel: blueprintCandidate.candidateLabel, estimatedWeeklyHours: 0, weeklyFrequency: 0, impactScore: 0, feasibilityScore: 0, riskScore: 0, priorityScore: 0, evidence: [] } : null;
 
   return (
     <div className="app-shell">
@@ -465,8 +471,9 @@ export default function App() {
         {view === "today" && <TodayView settings={settings} status={status} blocks={blocks} checkIns={checkIns} onNavigate={setView} onPause={() => action(async () => { setStatus(await bridge.pauseTracking(30)); }, copy.notices.paused)} onResume={() => action(async () => { setStatus(await bridge.resumeTracking()); }, copy.notices.resumed)} />}
         {view === "checkins" && <CheckInsView checkIns={checkIns} settings={settings} onAnswer={answer} />}
         {view === "study" && <StudyView progress={study} locale={settings.locale} onDays={selectDays} />}
-        {view === "automate" && <AutomateView diagnostic={diagnostic} locale={settings.locale} busy={diagnosticBusy} onGenerate={async () => { setDiagnosticBusy(true); await action(async () => { setDiagnostic(await bridge.generateDiagnostic(study.selectedDays)); }, copy.notices.diagnosticUpdated); setDiagnosticBusy(false); }} onCopy={() => action(async () => { await navigator.clipboard.writeText(diagnostic.prompt); }, copy.notices.promptCopied)} onOpen={(url) => action(() => bridge.openExternal(url))} onWorkflow={(candidate) => { setWorkflowCandidate(candidate); setView("workflow"); }} />}
+        {view === "automate" && <AutomateView diagnostic={diagnostic} locale={settings.locale} busy={diagnosticBusy} onGenerate={async () => { setDiagnosticBusy(true); await action(async () => { setDiagnostic(await bridge.generateDiagnostic(study.selectedDays)); }, copy.notices.diagnosticUpdated); setDiagnosticBusy(false); }} onWorkflow={(candidate) => { setWorkflowCandidate(candidate); setView(candidate.id === blueprintEntry?.id ? "blueprint" : "workflow"); }} blueprintCandidate={blueprintEntry} />}
         {view === "workflow" && <WorkflowIntakeView candidate={workflowCandidate} locale={settings.locale} onBack={() => setView("automate")} onSaved={saveWorkflowIntake} />}
+        {view === "blueprint" && <AutomationBlueprintView candidate={workflowCandidate} locale={settings.locale} onBack={() => setView("automate")} onMapWorkflow={(candidate) => { setWorkflowCandidate(candidate); setView("workflow"); }} />}
         {view === "settings" && <SettingsView settings={settings} status={status} onSave={saveSettings} onExport={(format) => action(async () => { const path = await bridge.exportData(format); setNotice({ kind: "success", message: copy.notices.exported(path) }); })} onDelete={() => action(async () => { if (!window.confirm(copy.settings.deleteConfirm)) return; await bridge.deleteAllData(); setNotice({ kind: "success", message: copy.notices.deleted }); await load(); })} />}
       </main>
       {notice && <div className={`toast ${notice.kind === "error" ? "is-error" : ""}`} role={notice.kind === "error" ? "alert" : "status"}>{notice.kind === "error" ? <AlertCircle size={15} aria-hidden="true" /> : <Check size={15} aria-hidden="true" />}{notice.message}</div>}

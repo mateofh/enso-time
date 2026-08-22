@@ -237,6 +237,46 @@ input:hover, select:hover, textarea:hover { border-color: var(--border-strong); 
 .workflow-empty h1 { margin-top: 18px; color: var(--text); font-size: 36px; }
 .workflow-empty p { max-width: 580px; color: var(--text-secondary); line-height: 1.55; }
 
+.blueprint-entry-card { margin-top: 32px; padding: 26px; border: 1px solid var(--border); background: var(--surface); display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+.blueprint-entry-card h2 { margin: 5px 0; font-size: 22px; }
+.blueprint-entry-card p:not(.section-note) { margin: 0; max-width: 600px; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+.blueprint-no-candidate { margin-top: 32px; }
+.blueprint-panel { overflow: visible; }
+.blueprint-status { min-width: 170px; padding: 15px 17px; border-left: 2px solid var(--yellow); background: var(--surface); display: grid; gap: 4px; }
+.blueprint-status.is-ready { border-color: var(--sage); }
+.blueprint-status.is-stale, .blueprint-status.is-blocked { border-color: var(--danger); }
+.blueprint-status span, .blueprint-status small { color: var(--text-secondary); font-size: 10px; text-transform: uppercase; letter-spacing: .05em; }
+.blueprint-status strong { font-size: 13px; }
+.blueprint-evidence { display: grid; grid-template-columns: minmax(190px, .65fr) minmax(0, 1.5fr); gap: 54px; padding: 38px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+.blueprint-evidence > div:first-child > p:not(.section-note) { margin: 8px 0 0; color: var(--text-secondary); font-size: 11px; line-height: 1.55; }
+.source-map { display: grid; gap: 22px; }
+.source-map dl { display: grid; grid-template-columns: 112px 1fr; gap: 10px 16px; margin: 0; font-size: 12px; }
+.source-map dt { color: var(--text-secondary); }
+.source-map dd { margin: 0; line-height: 1.45; overflow-wrap: anywhere; }
+.evidence-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; border-top: 1px solid var(--border); padding-top: 16px; }
+.evidence-columns strong { font-size: 11px; }
+.evidence-columns ul { margin: 8px 0 0; padding-left: 16px; color: var(--text-secondary); font-size: 11px; line-height: 1.55; }
+.evidence-columns small { color: var(--blue); font-variant-numeric: tabular-nums; }
+.blueprint-alert { margin: -10px 0 30px; padding: 16px; border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border)); background: color-mix(in srgb, var(--danger) 7%, var(--surface)); display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: start; color: var(--danger); }
+.blueprint-alert strong { color: var(--text); font-size: 13px; }
+.blueprint-alert p { margin: 4px 0 0; color: var(--text-secondary); font-size: 11px; line-height: 1.45; }
+.boundary-row { margin: 0; border: 1px solid var(--border); padding: 16px; display: grid; gap: 13px; }
+.boundary-row legend { padding: 0 5px; color: var(--text); font-size: 12px; font-weight: 600; }
+.boundary-row label { display: grid; gap: 8px; color: var(--text-secondary); font-size: 12px; }
+.blueprint-estimates { display: grid; grid-template-columns: minmax(190px, .65fr) minmax(0, 1.5fr); gap: 54px; padding: 38px 0; border-bottom: 1px solid var(--border); }
+.blueprint-estimates h2 { font-size: 20px; }
+.blueprint-estimates p:not(.section-note) { color: var(--text-secondary); font-size: 11px; line-height: 1.55; }
+.estimate-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; align-content: start; background: var(--border); border: 1px solid var(--border); }
+.estimate-grid span { min-height: 82px; padding: 14px; background: var(--surface); display: grid; align-content: center; gap: 4px; color: var(--text-secondary); font-size: 10px; }
+.estimate-grid b { color: var(--text); font-size: 17px; font-variant-numeric: tabular-nums; }
+.blueprint-export { margin-top: 40px; padding: 24px; border: 1px solid var(--border); background: var(--surface); display: flex; align-items: center; justify-content: space-between; gap: 22px; }
+.blueprint-export h2 { font-size: 18px; }
+.blueprint-export p { margin: 5px 0 0; color: var(--text-secondary); font-size: 11px; line-height: 1.45; }
+.blueprint-dialog-backdrop { position: fixed; z-index: 30; inset: 0; background: rgba(0, 0, 0, .55); display: grid; place-items: center; padding: 20px; }
+.blueprint-dialog { width: min(480px, 100%); padding: 28px; border: 1px solid var(--border-strong); background: var(--surface-raised); box-shadow: var(--shadow); }
+.blueprint-dialog h2 { margin: 0; font-size: 22px; }
+.blueprint-dialog p { margin: 14px 0 22px; color: var(--text-secondary); font-size: 12px; line-height: 1.55; }
+
 .settings-group { display: grid; grid-template-columns: minmax(200px, .8fr) minmax(350px, 1.5fr); gap: 50px; padding: 32px 0; border-top: 1px solid var(--border); }
 .settings-group:last-child { border-bottom: 1px solid var(--border); }
 .settings-intro { display: flex; align-items: flex-start; gap: 12px; color: var(--blue); }
@@ -293,7 +333,7 @@ input:hover, select:hover, textarea:hover { border-color: var(--border-strong); 
   .sidebar nav button b { position: absolute; margin: -30px 0 0 27px; }
   .today-layout { grid-template-columns: 1fr; }
   .day-summary { border-left: 0; border-top: 1px solid var(--border); padding: 30px 0 0; }
-  .settings-group, .recommendations, .period-section, .workflow-section { grid-template-columns: 1fr; gap: 24px; }
+  .settings-group, .recommendations, .period-section, .workflow-section, .blueprint-evidence, .blueprint-estimates { grid-template-columns: 1fr; gap: 24px; }
 }
 @media (max-width: 620px) {
   .app-shell { display: block; }
@@ -321,6 +361,11 @@ input:hover, select:hover, textarea:hover { border-color: var(--border-strong); 
   .workflow-section { padding: 30px 0; }
   .workflow-actions { align-items: stretch; flex-direction: column; }
   .workflow-actions .primary-button { width: 100%; }
+  .blueprint-entry-card, .blueprint-export { align-items: stretch; flex-direction: column; }
+  .blueprint-entry-card .primary-button { width: 100%; }
+  .blueprint-alert { grid-template-columns: auto 1fr; }
+  .blueprint-alert .primary-button { grid-column: 2; justify-self: start; }
+  .evidence-columns, .estimate-grid { grid-template-columns: 1fr; }
   .ordered-list > .dynamic-row { grid-template-columns: 20px minmax(0, 1fr) 38px; }
   .prompt-heading { display: grid; }
   .prompt-links { flex-wrap: wrap; }

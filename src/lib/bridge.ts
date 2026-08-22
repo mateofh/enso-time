@@ -2,7 +2,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { demoCheckIns, demoDiagnostic, demoSettings, demoStudy, demoTimeline, demoTrackingStatus } from "./demo";
 import { buildPrompt, createDiagnostic } from "./diagnostics";
 import { migrateWorkflowIntakes, upsertWorkflowIntake } from "./workflowIntakes";
+import { buildPreviewBlueprint, emptyBlueprintDraft } from "./blueprints";
 import type {
+  AutomationBlueprintDraftV1,
+  AutomationBlueprintV1,
   CheckInAnswer,
   CheckInV1,
   CaptureIssue,
@@ -13,6 +16,7 @@ import type {
   TrackingStatus,
   UpdateInfo,
   WorkflowIntakeV1,
+  SaveAutomationBlueprintInputV1,
 } from "./types";
 
 const STORAGE_KEY = "enso-time-web-state-v1";
@@ -23,6 +27,15 @@ interface WebState {
   pausedUntil?: string;
   captureIssue?: CaptureIssue | null;
   workflowIntakes?: WorkflowIntakeV1[];
+  automationBlueprints?: AutomationBlueprintDraftV1[];
+  automationBlueprintError?: string | null;
+  automationBlueprintConflict?: { currentRevision: number } | null;
+}
+
+export class BlueprintBridgeError extends Error {
+  constructor(public readonly code: string, public readonly current?: AutomationBlueprintV1) {
+    super(code);
+  }
 }
 
 function isTauri(): boolean {
@@ -72,6 +85,12 @@ function enrichPreviewDiagnostic(diagnostic: DiagnosticV1, state: WebState): Dia
 }
 
 export const bridge = {
+  shouldResumeAutomationBlueprint(): boolean {
+    if (isTauri()) return false;
+    const state = loadWebState();
+    return Boolean(state.automationBlueprintError || state.automationBlueprintConflict);
+  },
+
   async getSettings(): Promise<SettingsV1> {
     return isTauri() ? invoke("get_settings") : loadWebState().settings;
   },
@@ -131,6 +150,71 @@ export const bridge = {
     const result = upsertWorkflowIntake(state.workflowIntakes ?? [], intake);
     saveWebState({ ...state, workflowIntakes: result.items });
     return result.persisted;
+  },
+
+  async getAutomationBlueprint(candidateId: string, locale: string): Promise<AutomationBlueprintV1 | null> {
+    if (isTauri()) return invoke("get_automation_blueprint_v1", { candidateId, locale });
+    const state = loadWebState();
+    if (state.automationBlueprintError) throw new Error(state.automationBlueprintError);
+    const intake = (state.workflowIntakes ?? []).find((item) => item.candidateId === candidateId);
+    if (!intake) return null;
+    const raw = state.automationBlueprints?.find((item) => item.candidateId === candidateId);
+    const base = emptyBlueprintDraft(intake);
+    const draft: AutomationBlueprintDraftV1 = raw ? { ...base, ...raw, candidateId, workflowIntakeId: raw.workflowIntakeId ?? intake.id, sourceIntakeUpdatedAt: raw.sourceIntakeUpdatedAt ?? intake.updatedAt, revision: raw.revision ?? 0, stepBoundaries: raw.stepBoundaries ?? base.stepBoundaries } : base;
+    const matchingCheckIns = state.checkIns.filter((item) => item.status === "answered" && item.repetitive && item.activityLabel === intake.candidateLabel);
+    const evidence = {
+      observed: matchingCheckIns.map((item) => item.answeredAt ? `Check-in ${item.answeredAt}` : "Answered check-in"),
+      declared: ["Workflow intake supplied by you"],
+      repeatedObservations: matchingCheckIns.length,
+    };
+    return { ...buildPreviewBlueprint(intake, draft, evidence), conflict: state.automationBlueprintConflict ?? undefined };
+  },
+
+  async saveAutomationBlueprint(input: SaveAutomationBlueprintInputV1, locale: string): Promise<AutomationBlueprintV1> {
+    if (isTauri()) return invoke("save_automation_blueprint_v1", { input, locale });
+    const state = loadWebState();
+    const intake = (state.workflowIntakes ?? []).find((item) => item.candidateId === input.draft.candidateId);
+    if (!intake) throw new BlueprintBridgeError("blueprint.intake_missing");
+    const existing = state.automationBlueprints?.find((item) => item.candidateId === input.draft.candidateId);
+    if (input.expectedRevision !== undefined && input.expectedRevision !== (existing?.revision ?? 0)) {
+      throw new BlueprintBridgeError("blueprint.conflict", existing ? buildPreviewBlueprint(intake, existing) : undefined);
+    }
+    const now = new Date().toISOString();
+    const draft: AutomationBlueprintDraftV1 = { ...input.draft, revision: (existing?.revision ?? 0) + 1, updatedAt: now, createdAt: existing?.createdAt ?? input.draft.createdAt };
+    const automationBlueprints = [...(state.automationBlueprints ?? []).filter((item) => item.candidateId !== draft.candidateId), draft];
+    saveWebState({ ...state, automationBlueprints });
+    return buildPreviewBlueprint(intake, draft);
+  },
+
+  async refreshAutomationBlueprintSource(candidateId: string, expectedRevision: number, locale: string): Promise<AutomationBlueprintV1> {
+    if (isTauri()) return invoke("refresh_automation_blueprint_source_v1", { candidateId, expectedRevision, locale });
+    const state = loadWebState();
+    const intake = (state.workflowIntakes ?? []).find((item) => item.candidateId === candidateId);
+    const existing = state.automationBlueprints?.find((item) => item.candidateId === candidateId);
+    if (!intake || !existing) throw new BlueprintBridgeError("blueprint.not_found");
+    if (existing.revision !== expectedRevision) throw new BlueprintBridgeError("blueprint.conflict", buildPreviewBlueprint(intake, existing));
+    const reset = emptyBlueprintDraft(intake);
+    const draft: AutomationBlueprintDraftV1 = { ...reset, revision: existing.revision + 1, createdAt: existing.createdAt, runsPerWeek: existing.runsPerWeek, dataSensitivity: existing.dataSensitivity, sideEffectLevel: existing.sideEffectLevel, verificationMode: existing.verificationMode, verificationMinutesPerRun: existing.verificationMinutesPerRun, recoveryPlan: existing.recoveryPlan };
+    saveWebState({ ...state, automationBlueprints: [...(state.automationBlueprints ?? []).filter((item) => item.candidateId !== candidateId), draft] });
+    return buildPreviewBlueprint(intake, draft);
+  },
+
+  async exportAutomationBlueprint(candidateId: string, expectedRevision: number, format: "markdown" | "json", locale: string): Promise<string> {
+    if (isTauri()) return invoke("export_automation_blueprint_v1", { candidateId, expectedRevision, format, locale });
+    const blueprint = await bridge.getAutomationBlueprint(candidateId, locale);
+    if (!blueprint || blueprint.status !== "ready") throw new BlueprintBridgeError("blueprint.not_ready");
+    if (blueprint.draft.revision !== expectedRevision) throw new BlueprintBridgeError("blueprint.conflict", blueprint);
+    return `preview://automation-blueprint-${candidateId}.${format === "markdown" ? "md" : "json"}`;
+  },
+
+  async deleteAutomationBlueprint(candidateId: string, expectedRevision: number, confirmation: string, locale: string): Promise<void> {
+    if (isTauri()) return invoke("delete_automation_blueprint_v1", { candidateId, expectedRevision, confirmation, locale });
+    const state = loadWebState();
+    const current = state.automationBlueprints?.find((item) => item.candidateId === candidateId);
+    if (!current) throw new BlueprintBridgeError("blueprint.not_found");
+    if (current.revision !== expectedRevision) throw new BlueprintBridgeError("blueprint.conflict");
+    // The UI only exposes a deletion-boundary preview; this stays available for a future explicit confirmation flow.
+    saveWebState({ ...state, automationBlueprints: (state.automationBlueprints ?? []).filter((item) => item.candidateId !== candidateId) });
   },
 
   async pauseTracking(minutes: number): Promise<TrackingStatus> {
