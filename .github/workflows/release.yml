@@ -113,7 +113,23 @@ jobs:
       - name: Run Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked --target ${{ matrix.rust_target }} -- --test-threads=1
 
-      - name: Force ad-hoc macOS signing and no certificate configuration
+      - name: Enable the Windows VBSCRIPT feature required by WiX
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $feature = Get-WindowsOptionalFeature -Online -FeatureName VBSCRIPT
+          if ($feature.State -ne "Enabled") {
+            $result = Enable-WindowsOptionalFeature -Online -FeatureName VBSCRIPT -All -NoRestart
+            if ($result.RestartNeeded) {
+              throw "VBSCRIPT requires a runner restart before WiX can build the MSI."
+            }
+          }
+          $enabled = Get-WindowsOptionalFeature -Online -FeatureName VBSCRIPT
+          if ($enabled.State -ne "Enabled") {
+            throw "VBSCRIPT is not enabled; refusing to run WiX with incomplete prerequisites."
+          }
+
+      - name: Configure release packaging
         shell: bash
         run: |
           node <<'NODE'
