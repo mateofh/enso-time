@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { AlertCircle, ArrowLeft, Check, Clipboard, Download, RefreshCw, ShieldCheck } from "lucide-react";
 import { BlueprintBridgeError, bridge } from "../lib/bridge";
 import { messages } from "../lib/i18n";
@@ -10,11 +10,12 @@ function errorCode(error: unknown) {
   return error instanceof BlueprintBridgeError ? error.code : error instanceof Error ? error.message : "blueprint.unexpected";
 }
 
-export function AutomationBlueprintView({ candidate, locale, onBack, onMapWorkflow }: {
+export function AutomationBlueprintView({ candidate, locale, onBack, onMapWorkflow, onDeleted }: {
   candidate: AutomationCandidateV1 | null;
   locale: Locale;
   onBack: () => void;
   onMapWorkflow: (candidate: AutomationCandidateV1) => void;
+  onDeleted: () => void;
 }) {
   const copy = messages(locale).blueprint;
   const title = useRef<HTMLHeadingElement>(null);
@@ -25,6 +26,9 @@ export function AutomationBlueprintView({ candidate, locale, onBack, onMapWorkfl
   const [error, setError] = useState<string>();
   const [notice, setNotice] = useState<string>();
   const [showDeletePreview, setShowDeletePreview] = useState(false);
+  const deleteActivator = useRef<HTMLButtonElement>(null);
+  const deleteDialog = useRef<HTMLElement>(null);
+  const deleteCancel = useRef<HTMLButtonElement>(null);
 
   async function load() {
     if (!candidate) return;
@@ -39,6 +43,32 @@ export function AutomationBlueprintView({ candidate, locale, onBack, onMapWorkfl
   }
 
   useEffect(() => { void load(); }, [candidate?.id, locale]);
+  useEffect(() => {
+    if (showDeletePreview) deleteCancel.current?.focus();
+  }, [showDeletePreview]);
+
+  function closeDeletePreview() {
+    setShowDeletePreview(false);
+    window.setTimeout(() => deleteActivator.current?.focus(), 0);
+  }
+
+  function trapDeleteDialog(event: KeyboardEvent<HTMLElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeDeletePreview();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = [...(deleteDialog.current?.querySelectorAll<HTMLElement>('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])') ?? [])];
+    if (!focusable.length) return;
+    const first = focusable[0]!;
+    const last = focusable.at(-1)!;
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault(); last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault(); first.focus();
+    }
+  }
 
   function update<K extends keyof AutomationBlueprintDraftV1>(key: K, value: AutomationBlueprintDraftV1[K]) {
     setDraft((current) => current ? { ...current, [key]: value } : current);
@@ -89,6 +119,23 @@ export function AutomationBlueprintView({ candidate, locale, onBack, onMapWorkfl
     catch (cause) { setError(errorCode(cause) === "blueprint.unexpected" ? "blueprint.export" : errorCode(cause)); } finally { setBusy(false); }
   }
 
+  async function deleteBlueprint() {
+    if (!blueprint || !candidate) return;
+    setBusy(true); setError(undefined);
+    try {
+      await bridge.deleteAutomationBlueprint(candidate.id, blueprint.draft.revision, "DELETE_AUTOMATION_BLUEPRINT", locale);
+      closeDeletePreview();
+      onDeleted();
+    } catch (cause) {
+      const code = errorCode(cause);
+      setError(code === "blueprint.unexpected" ? "blueprint.deleteError" : code);
+      if (code === "blueprint.conflict") {
+        await load();
+        setError("blueprint.conflict");
+      }
+    } finally { setBusy(false); }
+  }
+
   if (!candidate) return <section className="workflow-empty"><AlertCircle size={28} aria-hidden="true" /><h1>{copy.emptyTitle}</h1><p>{copy.emptyCopy}</p><button type="button" className="secondary-button" onClick={onBack}><ArrowLeft size={16} aria-hidden="true" />{copy.back}</button></section>;
   if (loadState === "loading") return <section className="workflow-loading" data-testid="blueprint-loading" aria-busy="true"><span className="loading-line" /><p>{copy.loading}</p></section>;
   if (loadState === "error") return <section className="workflow-empty" data-testid="blueprint-error" role="alert"><AlertCircle size={28} aria-hidden="true" /><h1>{copy.errorTitle}</h1><p>{copy.errors[error ?? ""] ?? error ?? copy.errors["blueprint.unexpected"]}</p><button type="button" className="primary-button" data-testid="blueprint-retry" onClick={() => void load()}><RefreshCw size={16} aria-hidden="true" />{copy.retry}</button></section>;
@@ -120,7 +167,7 @@ export function AutomationBlueprintView({ candidate, locale, onBack, onMapWorkfl
       <section className="blueprint-estimates" aria-labelledby="estimate-title"><div><p className="section-note">{copy.simulation}</p><h2 id="estimate-title">{copy.estimateTitle}</h2><p data-testid="blueprint-assumptions">{copy.assumptions}</p></div><div className="estimate-grid"><span><b>{blueprint.estimates.weeklyBaselineMinutes}</b>{copy.baseline}</span><span><b>{blueprint.estimates.weeklyResidualMinutes}</b>{copy.residual}</span><span><b>{blueprint.estimates.weeklySavingsMinutes}</b>{copy.savings}</span><span><b>{blueprint.estimates.effort}/100</b>{copy.effort}</span><span><b>{blueprint.estimates.operationalRisk}/100</b>{copy.risk}</span><span><b>{blueprint.estimates.confidence}/100</b>{copy.confidence}</span></div></section>
       <div className="workflow-actions"><p><strong>{copy.localTitle}</strong>{copy.localCopy}</p><button type="submit" className="primary-button" data-testid="blueprint-save" disabled={busy || Boolean(blueprint.conflict) || blueprint.status === "stale" || blueprint.status === "blocked"}><Check size={17} aria-hidden="true" />{busy ? copy.saving : copy.save}</button></div>
     </form>
-    <section className="blueprint-export" aria-labelledby="export-title"><div><h2 id="export-title">{copy.exportTitle}</h2><p>{copy.exportHint}</p></div><div className="data-actions"><button type="button" className="secondary-button" data-testid="blueprint-copy" disabled={!isReady || busy} onClick={() => void copyBlueprint()}><Clipboard size={16} aria-hidden="true" />{copy.copy}</button><button type="button" className="secondary-button" data-testid="blueprint-export" disabled={!isReady || busy} onClick={() => void exportBlueprint("markdown")}><Download size={16} aria-hidden="true" />{copy.exportMarkdown}</button><button type="button" className="secondary-button" disabled={!isReady || busy} onClick={() => void exportBlueprint("json")}><Download size={16} aria-hidden="true" />{copy.exportJson}</button><button type="button" className="text-button" data-testid="blueprint-delete-preview" onClick={() => setShowDeletePreview(true)}>{copy.deletePreview}</button></div></section>
-    {showDeletePreview && <div className="blueprint-dialog-backdrop"><section className="blueprint-dialog" role="dialog" aria-modal="true" aria-labelledby="blueprint-delete-title"><h2 id="blueprint-delete-title">{copy.deleteTitle}</h2><p>{copy.deleteCopy}</p><button type="button" className="secondary-button" onClick={() => setShowDeletePreview(false)}>{copy.cancel}</button></section></div>}
+    <section className="blueprint-export" aria-labelledby="export-title"><div><h2 id="export-title">{copy.exportTitle}</h2><p>{copy.exportHint}</p></div><div className="data-actions"><button type="button" className="secondary-button" data-testid="blueprint-copy" disabled={!isReady || busy} onClick={() => void copyBlueprint()}><Clipboard size={16} aria-hidden="true" />{copy.copy}</button><button type="button" className="secondary-button" data-testid="blueprint-export" disabled={!isReady || busy} onClick={() => void exportBlueprint("markdown")}><Download size={16} aria-hidden="true" />{copy.exportMarkdown}</button><button type="button" className="secondary-button" disabled={!isReady || busy} onClick={() => void exportBlueprint("json")}><Download size={16} aria-hidden="true" />{copy.exportJson}</button><button type="button" className="text-button" ref={deleteActivator} data-testid="blueprint-delete-preview" onClick={() => setShowDeletePreview(true)}>{copy.deletePreview}</button></div></section>
+    {showDeletePreview && <div className="blueprint-dialog-backdrop"><section className="blueprint-dialog" ref={deleteDialog} role="dialog" aria-modal="true" aria-labelledby="blueprint-delete-title" aria-describedby="blueprint-delete-copy" onKeyDown={trapDeleteDialog}><h2 id="blueprint-delete-title">{copy.deleteTitle}</h2><p id="blueprint-delete-copy">{copy.deleteCopy}</p>{error && <p className="blueprint-dialog-error" role="alert">{copy.errors[error] ?? copy.deleteError}</p>}<div className="data-actions"><button type="button" className="secondary-button" ref={deleteCancel} disabled={busy} onClick={closeDeletePreview}>{copy.cancel}</button><button type="button" className="danger-button" disabled={busy} onClick={() => void deleteBlueprint()}>{copy.confirmDelete}</button></div></section></div>}
   </section>;
 }

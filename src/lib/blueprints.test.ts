@@ -11,6 +11,13 @@ function intake(steps = ["Export", "Validate", "Review", "Publish"], minutesPerR
 }
 
 describe("automation blueprint preview golden vectors", () => {
+  it("derives the stable blueprint id from the candidate, not the intake id", () => {
+    const sourceIntake = intake();
+    sourceIntake.id = "workflow-revision-two";
+    sourceIntake.candidateId = "candidate-stable-id";
+    expect(emptyBlueprintDraft(sourceIntake).id).toBe("blueprint-candidate-stable-id");
+  });
+
   it("matches the complete four-step workflow vector", () => {
     const sourceIntake = intake();
     const draft = {
