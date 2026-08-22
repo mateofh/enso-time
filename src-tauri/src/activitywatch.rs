@@ -1813,7 +1813,7 @@ mod tests {
     use serde_json::Map;
     use std::collections::HashMap;
     use std::ffi::{OsStr, OsString};
-    use std::net::{Ipv4Addr, TcpListener};
+    use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
     use tempfile::TempDir;
 
     #[test]
@@ -2120,7 +2120,7 @@ mod tests {
         assert!(elapsed < StdDuration::from_secs(2), "elapsed: {elapsed:?}");
         assert!(runtime.test_watchers_are_stopped());
         assert_eq!(runtime.port_if_ready(), None);
-        TcpListener::bind((Ipv4Addr::LOCALHOST, port)).unwrap();
+        assert_server_stopped(port);
         assert!(!sqlite_sidecar_path(&runtime.database_path, "-wal").exists());
         assert!(!sqlite_sidecar_path(&runtime.database_path, "-shm").exists());
     }
@@ -2406,5 +2406,16 @@ fn main() {{
             std::thread::sleep(StdDuration::from_millis(25));
         }
         panic!("private server did not become ready");
+    }
+
+    fn assert_server_stopped(port: u16) {
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        for _ in 0..10 {
+            if TcpStream::connect_timeout(&address, StdDuration::from_millis(50)).is_err() {
+                return;
+            }
+            std::thread::sleep(StdDuration::from_millis(25));
+        }
+        panic!("private server still accepts connections on {address}");
     }
 }
