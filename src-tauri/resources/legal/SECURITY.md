@@ -29,3 +29,10 @@ and NSIS installers are unsigned. Gatekeeper or SmartScreen warnings are therefo
 expected. Verify the release's `SHA256SUMS` entry against your download and obtain
 installers only from the project's GitHub Releases page. A checksum confirms file
 identity, not publisher identity or safety.
+
+The release workflow also creates GitHub artifact attestations with a short-lived OIDC
+identity and attaches the Sigstore bundle to the release. Use `gh attestation verify`
+as documented in the README to check that an installer digest was produced by this
+repository's release workflow. This provenance is complementary supply-chain evidence;
+it is not Apple Developer ID signing/notarization, Windows Authenticode, malware
+analysis, or a warranty, and it does not suppress operating-system warnings.

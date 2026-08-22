@@ -67,6 +67,9 @@ jobs:
       - name: Install JavaScript dependencies
         run: npm ci
 
+      - name: Install the project-pinned Chromium build
+        run: npm run test:e2e:install
+
       - name: Validate release version and license metadata
         shell: bash
         run: |
@@ -113,6 +116,63 @@ jobs:
           tauriScript: npm run tauri
           args: --target ${{ matrix.rust_target }} --bundles ${{ matrix.bundles }} --config src-tauri/ci-bundle.json
 
+      - name: Smoke-test macOS bundle resources
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          bundle_dir="src-tauri/target/${RUST_TARGET}/release/bundle/dmg"
+          test "$(find "$bundle_dir" -type f -name '*.dmg' | wc -l | tr -d ' ')" -eq 1
+          dmg_file="$(find "$bundle_dir" -type f -name '*.dmg' -print -quit)"
+          mount_dir="$(mktemp -d)"
+          cleanup() {
+            hdiutil detach "$mount_dir" -quiet || true
+            rmdir "$mount_dir" || true
+          }
+          trap cleanup EXIT
+          hdiutil attach -readonly -nobrowse -mountpoint "$mount_dir" "$dmg_file"
+          test -n "$(find "$mount_dir" -type d -name '*.app' -print -quit)"
+          for required in POLYFORM-NONCOMMERCIAL-1.0.0.txt MPL-2.0.txt THIRD_PARTY_NOTICES.md aw-watcher-window aw-watcher-afk; do
+            test -n "$(find "$mount_dir" -type f -name "$required" -print -quit)"
+          done
+
+      - name: Smoke-test Windows installer resources
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bundle = "src-tauri/target/$env:RUST_TARGET/release/bundle"
+          $msi = @(Get-ChildItem "$bundle/msi" -File -Filter *.msi)
+          $nsis = @(Get-ChildItem "$bundle/nsis" -File -Filter *.exe)
+          if ($msi.Count -ne 1 -or $nsis.Count -ne 1) {
+            throw "Expected exactly one MSI and one NSIS installer before smoke testing."
+          }
+
+          $msiExtract = Join-Path $env:RUNNER_TEMP "enso-time-msi-smoke"
+          $nsisExtract = Join-Path $env:RUNNER_TEMP "enso-time-nsis-smoke"
+          New-Item -ItemType Directory -Force $msiExtract, $nsisExtract | Out-Null
+          $msiArgs = @("/a", "`"$($msi[0].FullName)`"", "/qn", "TARGETDIR=`"$msiExtract`"")
+          $msiProcess = Start-Process msiexec.exe -ArgumentList $msiArgs -Wait -PassThru
+          if ($msiProcess.ExitCode -ne 0) {
+            throw "MSI administrative extraction failed with exit code $($msiProcess.ExitCode)."
+          }
+          & 7z x -y "-o$nsisExtract" $nsis[0].FullName | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "NSIS structural extraction failed with exit code $LASTEXITCODE."
+          }
+
+          foreach ($root in @($msiExtract, $nsisExtract)) {
+            foreach ($required in @(
+              "POLYFORM-NONCOMMERCIAL-1.0.0.txt",
+              "MPL-2.0.txt",
+              "THIRD_PARTY_NOTICES.md",
+              "aw-watcher-window.exe",
+              "aw-watcher-afk.exe"
+            )) {
+              if (-not (Get-ChildItem $root -Recurse -File -Filter $required -ErrorAction SilentlyContinue)) {
+                throw "Missing $required in extracted installer at $root."
+              }
+            }
+          }
+
       - name: Stage macOS DMG
         if: runner.os == 'macOS'
         shell: bash
@@ -153,7 +213,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
+      attestations: write
       contents: write
+      id-token: write
     env:
       RELEASE_TAG: ${{ github.ref_name }}
 
@@ -177,6 +239,19 @@ jobs:
           test "$(wc -l < SHA256SUMS)" -eq 4
           test -s SHA256SUMS
 
+      - name: Generate GitHub build provenance
+        id: provenance
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-checksums: SHA256SUMS
+
+      - name: Stage the Sigstore attestation bundle
+        shell: bash
+        run: |
+          test -s "${{ steps.provenance.outputs.bundle-path }}"
+          cp "${{ steps.provenance.outputs.bundle-path }}" \
+            "enso-time-${RELEASE_TAG#v}-provenance.sigstore.json"
+
       - name: Publish installers and checksums
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
@@ -190,8 +265,11 @@ jobs:
             Public source-available beta. Use is limited by PolyForm Noncommercial 1.0.0.
 
             These builds do not use paid signing or notarization certificates. The macOS app is ad-hoc signed for DMG packaging and is not notarized. Windows MSI and NSIS installers are unsigned. Verify downloads against SHA256SUMS.
+
+            GitHub build provenance is available through the attestations API and the attached Sigstore bundle. Verify an installer with `gh attestation verify INSTALLER --repo ${{ github.repository }} --signer-workflow ${{ github.repository }}/.github/workflows/release.yml`. Provenance does not replace Apple Developer ID/notarization or Windows Authenticode and does not suppress Gatekeeper or SmartScreen warnings.
           files: |
             release-assets/**/*.dmg
             release-assets/**/*.msi
             release-assets/**/*.exe
             SHA256SUMS
+            enso-time-*-provenance.sigstore.json

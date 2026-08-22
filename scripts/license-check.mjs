@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import process from "node:process";
+import { TARGETS } from "./prepare-activitywatch.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const strictManifests = process.argv.includes("--strict-manifests");
@@ -102,6 +103,20 @@ requireCondition(vendorReadme.includes("Mozilla Public License 2.0"), "ActivityW
 if (vendorReadme.includes("repository root `LICENSE`")) {
   warnings.push(
     "handoff: vendor/activitywatch/README.md still points to the root LICENSE; its owner must point it to LICENSES/MPL-2.0.txt",
+  );
+}
+
+const noticeHashRows = [...thirdParty.matchAll(/^\| `([^`]+)` \| `([0-9a-f]{64})` \|$/gm)];
+const noticeHashes = new Map(noticeHashRows.map((match) => [match[1], match[2]]));
+requireCondition(
+  noticeHashRows.length === Object.keys(TARGETS).length
+    && noticeHashes.size === Object.keys(TARGETS).length,
+  "third-party notice must contain exactly one checksum row for every ActivityWatch target",
+);
+for (const [target, metadata] of Object.entries(TARGETS)) {
+  requireCondition(
+    noticeHashes.get(target) === metadata.sha256,
+    `ActivityWatch checksum mismatch for ${target}: preparer=${metadata.sha256}, notice=${noticeHashes.get(target) ?? "missing"}`,
   );
 }
 

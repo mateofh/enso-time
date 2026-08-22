@@ -53,6 +53,9 @@ jobs:
       - name: Install JavaScript dependencies
         run: npm ci
 
+      - name: Install the project-pinned Chromium build
+        run: npm run test:e2e:install
+
       - name: Validate license boundaries and packaged notices
         run: node scripts/license-check.mjs
 

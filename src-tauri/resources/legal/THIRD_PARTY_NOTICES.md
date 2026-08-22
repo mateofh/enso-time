@@ -19,9 +19,9 @@ does not match these fixed SHA-256 values:
 
 | Target | Official ZIP SHA-256 |
 | --- | --- |
-| macOS arm64 | `70a7ba7e307abe3352b912411f09600075f427b5b5d139a238c051f813e96264` |
-| macOS x86_64 | `eb9bf65f2a0e28489b4f89eb64159a15b82f8f07d6eb6cd3efe0dd3565e61b36` |
-| Windows x86_64 | `45ce0ccc9e12ff60358878d3b8bef06da86957e53fc564ea2316cf2f190eb659` |
+| `macos-arm64` | `e70639b63df662e1c72b4277e073bd80f7b94c516f12a8d01404f4aa526e8731` |
+| `macos-x86_64` | `eb9bf65f2a0e28489b4f89eb64159a15b82f8f07d6eb6cd3efe0dd3565e61b36` |
+| `windows-x86_64` | `45ce0ccc9e12ff60358878d3b8bef06da86957e53fc564ea2316cf2f190eb659` |
 
 Selected crates from <https://github.com/ActivityWatch/aw-server-rust> are vendored at
 commit `7c33810cd44393b3ecad64277b7e69bfeaee817b`. The production CORS allow-list is
