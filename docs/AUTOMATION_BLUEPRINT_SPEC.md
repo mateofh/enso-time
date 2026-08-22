@@ -1,6 +1,6 @@
 # Automation Blueprint v0.2 contract
 
-Status: implementation contract for `v0.2.0-beta.1`  
+Status: implementation contract for `v0.2.0-beta.1`
 Tracking: [GitHub milestone](https://github.com/mateofh/enso-time/milestone/1)
 
 ## Outcome
