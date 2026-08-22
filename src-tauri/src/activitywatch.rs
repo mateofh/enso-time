@@ -2410,12 +2410,9 @@ fn main() {{
 
     fn assert_server_stopped(port: u16) {
         let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-        for _ in 0..10 {
-            if TcpStream::connect_timeout(&address, StdDuration::from_millis(50)).is_err() {
-                return;
-            }
-            std::thread::sleep(StdDuration::from_millis(25));
-        }
-        panic!("private server still accepts connections on {address}");
+        assert!(
+            TcpStream::connect_timeout(&address, StdDuration::from_millis(50)).is_err(),
+            "private server still accepts connections on {address}"
+        );
     }
 }
