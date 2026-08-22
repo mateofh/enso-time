@@ -8,6 +8,7 @@ dist/
 src-tauri/target/
 src-tauri/resources/activitywatch/
 src-tauri/resources/.prepared-*
+src-tauri/resources/.activitywatch-*
 .impeccable/live/
 coverage/
 *.tsbuildinfo
