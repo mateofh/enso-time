@@ -21,7 +21,7 @@ const Spanish = {
   trigger: "Llega el cierre semanal de ventas",
   input: "CSV de ventas y tabla de metas",
   output: "Reporte validado y listo para compartir",
-  tool: "Google Sheets",
+  tool: "Hoja de cálculo local",
   step1: "Exportar las oportunidades cerradas",
   step2: "Validar montos y responsables",
   human: "Excluir cuentas con disputas abiertas",
@@ -32,7 +32,7 @@ const intake = {
   candidateId,
   candidateLabel: "Actualizar reporte semanal",
   trigger: Spanish.trigger,
-  tools: [Spanish.tool, "Slack"],
+  tools: [Spanish.tool, "Mensajería interna"],
   steps: [Spanish.step1, Spanish.step2],
   humanDecisions: Spanish.human,
   inputs: Spanish.input,
@@ -80,7 +80,7 @@ test.describe("Automation Blueprint v0.2 contract", () => {
     await page.getByLabel(/Minutos de verificación|Verification minutes/i).fill("5");
     await page.getByLabel(/Sensibilidad de datos|Data sensitivity/i).selectOption("low");
     await page.getByLabel(/Efectos secundarios|Side effects/i).selectOption("reversible");
-    await page.getByLabel(/Modo de verificación|Verification mode/i).selectOption("sample");
+    await page.getByLabel(/Modo de verificación|Verification mode/i).selectOption("every-run");
     await page.getByLabel(/Plan de recuperación|Recovery plan/i).fill("Revisar el CSV y repetir la validación manual.");
     const boundary = page.getByTestId("blueprint-boundary").first();
     await boundary.getByLabel(/Clasificación|Disposition/i).selectOption("automatable");

@@ -3,22 +3,22 @@
   "vectors": [
     {
       "name": "empty intake is blocked",
-      "inputs": { "trigger": false, "inputs": false, "output": false, "tools": false, "steps": false, "humanDecisions": false, "frequency": false, "boundaries": 0, "totalSteps": 0, "sensitivity": false, "sideEffects": false, "verification": false, "recovery": false },
+      "inputs": { "trigger": "", "inputs": "", "desiredOutput": "", "toolsCount": 0, "totalSteps": 0, "humanDecisions": "", "frequency": "", "runsPerWeek": 0, "minutesPerRun": 0, "classifiedBoundaries": 0, "dataSensitivity": "unassessed", "sideEffectLevel": "unassessed", "verificationMode": "unassessed", "verificationMinutesPerRun": 0, "recoveryPlan": "" },
       "expected": { "completeness": 0, "status": "blocked", "weeklyBaselineMinutes": 0, "weeklyResidualMinutes": 0, "weeklySavingsMinutes": 0 }
     },
     {
       "name": "complete four-step workflow",
-      "inputs": { "trigger": true, "inputs": true, "output": true, "tools": true, "steps": true, "humanDecisions": true, "runsPerWeek": 5, "minutesPerRun": 60, "boundaries": 4, "totalSteps": 4, "sensitivity": true, "sideEffects": true, "verification": true, "verificationMinutesPerRun": 5, "recovery": true, "observations": 2, "sourceCurrent": true, "automatableSteps": 3 },
-      "expected": { "completeness": 100, "status": "ready", "weeklyBaselineMinutes": 300, "weeklyResidualMinutes": 100, "weeklySavingsMinutes": 200, "effort": 34, "operationalRisk": 22, "confidence": 88 }
+      "inputs": { "trigger": "Weekly sales close arrives", "inputs": "Sales CSV and targets table", "desiredOutput": "Validated report", "toolsCount": 2, "totalSteps": 4, "humanDecisions": "Exclude disputed accounts", "runsPerWeek": 5, "observedWeeklyFrequency": 5, "minutesPerRun": 60, "classifiedBoundaries": 4, "automatableSteps": 3, "humanSteps": 1, "dataSensitivity": "low", "sideEffectLevel": "reversible", "verificationMode": "every-run", "verificationMinutesPerRun": 5, "recoveryPlan": "Review the CSV and repeat validation", "observedCount": 4, "observedDays": 14, "rulesRatio": 0.75, "sourceCurrent": true },
+      "expected": { "completeness": 100, "status": "ready", "weeklyBaselineMinutes": 300, "weeklyResidualMinutes": 100, "weeklySavingsMinutes": 200, "effort": 44, "operationalRisk": 17, "confidence": 89 }
     },
     {
       "name": "one classified step is proportional",
-      "inputs": { "trigger": true, "inputs": true, "output": true, "tools": true, "steps": true, "humanDecisions": true, "runsPerWeek": 2, "minutesPerRun": 30, "boundaries": 1, "totalSteps": 2, "sensitivity": true, "sideEffects": true, "verification": true, "verificationMinutesPerRun": 0, "recovery": true, "observations": 2, "sourceCurrent": true, "automatableSteps": 1 },
-      "expected": { "completeness": 90, "status": "draft", "weeklyBaselineMinutes": 60, "weeklyResidualMinutes": 30, "weeklySavingsMinutes": 30 }
+      "inputs": { "trigger": "Monthly close arrives", "inputs": "Ledger export", "desiredOutput": "Reconciled summary", "toolsCount": 1, "totalSteps": 2, "humanDecisions": "Resolve unmatched rows", "runsPerWeek": 2, "observedWeeklyFrequency": 2, "minutesPerRun": 30, "classifiedBoundaries": 1, "automatableSteps": 1, "humanSteps": 1, "dataSensitivity": "moderate", "sideEffectLevel": "none", "verificationMode": "every-run", "verificationMinutesPerRun": 0, "recoveryPlan": "Escalate unresolved rows", "observedCount": 2, "observedDays": 7, "rulesRatio": 0.5, "sourceCurrent": true },
+      "expected": { "completeness": 90, "status": "draft", "weeklyBaselineMinutes": 60, "weeklyResidualMinutes": 30, "weeklySavingsMinutes": 30, "effort": 34, "operationalRisk": 19, "confidence": 60 }
     },
     {
       "name": "verification can exceed manual residual without negative savings",
-      "inputs": { "runsPerWeek": 1, "minutesPerRun": 10, "totalSteps": 1, "automatableSteps": 1, "verificationMinutesPerRun": 20 },
+      "inputs": { "runsPerWeek": 1, "minutesPerRun": 10, "totalSteps": 1, "automatableSteps": 1, "humanSteps": 0, "verificationMode": "every-run", "verificationMinutesPerRun": 20 },
       "expected": { "weeklyBaselineMinutes": 10, "weeklyResidualMinutes": 20, "weeklySavingsMinutes": 0 }
     }
   ],
