@@ -20,7 +20,7 @@ aw-datastore = { path = "../vendor/activitywatch/aw-datastore" }
 aw-models = { path = "../vendor/activitywatch/aw-models" }
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
-gethostname = "0.4"
+gethostname = "1.1"
 log = "0.4"
 rusqlite = { version = "0.30", features = ["bundled"] }
 rocket = "0.5.1"
