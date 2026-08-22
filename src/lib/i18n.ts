@@ -101,9 +101,61 @@ interface UiCopy {
     promptTitle: string;
     promptIntro: string;
     copyPrompt: string;
+    workflowAction: string;
+    workflowHint: string;
     openChatGpt: string;
     openClaude: string;
     outboundNotice: string;
+  };
+  workflow: {
+    context: string;
+    title: string;
+    intro: string;
+    candidate: string;
+    back: string;
+    loading: string;
+    retry: string;
+    emptyTitle: string;
+    emptyCopy: string;
+    errorTitle: string;
+    loadError: string;
+    saveError: string;
+    validation: string;
+    savedTitle: string;
+    savedCopy: string;
+    startTitle: string;
+    startHint: string;
+    trigger: string;
+    triggerPlaceholder: string;
+    frequency: string;
+    frequencyPlaceholder: string;
+    minutesPerRun: string;
+    toolsTitle: string;
+    toolsHint: string;
+    tool: (index: number) => string;
+    toolPlaceholder: string;
+    addTool: string;
+    removeTool: (index: number) => string;
+    stepsTitle: string;
+    stepsHint: string;
+    step: (index: number) => string;
+    stepPlaceholder: string;
+    addStep: string;
+    removeStep: (index: number) => string;
+    contextTitle: string;
+    contextHint: string;
+    humanDecisions: string;
+    humanDecisionsPlaceholder: string;
+    inputs: string;
+    inputsPlaceholder: string;
+    desiredOutput: string;
+    desiredOutputPlaceholder: string;
+    painPoints: string;
+    painPointsPlaceholder: string;
+    localTitle: string;
+    localCopy: string;
+    save: string;
+    saving: string;
   };
   settings: {
     title: string;
@@ -213,7 +265,57 @@ const copy: Record<Locale, UiCopy> = {
       title: "De actividad a evidencia.", intro: "Mientras más días observes, más confiable será la recomendación de automatización.", available: "Diagnóstico disponible", preliminary: "Diagnóstico preliminar", usefulSignal: "Ya hay una señal útil.", remaining: (days) => `Faltan ${days} días para una primera lectura.`, evidence: (hours, answers) => `Tenemos ${hours} horas observadas y ${answers} intervalos explicados por ti.`, coverage: "cobertura", tracked: "registradas", answers: "respuestas", periodTitle: "Elige el periodo de análisis", periods: { 7: "Primera señal", 14: "Patrones estables", 28: "Lectura profunda" }, days: "días",
     },
     automate: {
-      title: "Qué automatizar primero.", intro: "Una recomendación basada en lo que realmente repites, con supuestos visibles.", refresh: "Actualizar", preliminaryTitle: "Lectura preliminar", preliminaryCopy: (days) => `Hay ${days} días observados. Úsala como hipótesis, no como veredicto.`, candidate: "Primer candidato", signal: "señal", weeklyHours: "h/semana", repetitions: "repeticiones", impact: "Impacto", feasibility: "Facilidad", risk: "Riesgo", empty: "Aún no hay un candidato sólido.", emptyCopy: "Marca tareas repetitivas en tus check-ins para formar una señal.", recommendations: "Recomendaciones", promptTitle: "Prompt listo para conversar", promptIntro: "Lleva el diagnóstico contigo", copyPrompt: "Copiar prompt", openChatGpt: "Abrir ChatGPT", openClaude: "Abrir Claude", outboundNotice: "Solo sale lo que tú copies",
+      title: "Qué automatizar primero.", intro: "Una recomendación basada en lo que realmente repites, con supuestos visibles.", refresh: "Actualizar", preliminaryTitle: "Lectura preliminar", preliminaryCopy: (days) => `Hay ${days} días observados. Úsala como hipótesis, no como veredicto.`, candidate: "Primer candidato", signal: "señal", weeklyHours: "h/semana", repetitions: "repeticiones", impact: "Impacto", feasibility: "Facilidad", risk: "Riesgo", empty: "Aún no hay un candidato sólido.", emptyCopy: "Marca tareas repetitivas en tus check-ins para formar una señal.", recommendations: "Recomendaciones", promptTitle: "Prompt listo para conversar", promptIntro: "Lleva el diagnóstico contigo", copyPrompt: "Copiar prompt", workflowAction: "Levantar workflow", workflowHint: "Documenta el proceso antes de diseñar la automatización.", openChatGpt: "Abrir ChatGPT", openClaude: "Abrir Claude", outboundNotice: "Solo sale lo que tú copies",
+    },
+    workflow: {
+      context: "Levantamiento de workflow",
+      title: "Describe cómo ocurre hoy.",
+      intro: "Captura el proceso real, incluidos sus criterios humanos y fricciones. Aquí no se genera ninguna automatización.",
+      candidate: "Candidato",
+      back: "Volver al diagnóstico",
+      loading: "Buscando un levantamiento guardado…",
+      retry: "Intentar de nuevo",
+      emptyTitle: "No hay un candidato para levantar.",
+      emptyCopy: "Vuelve al diagnóstico y espera una señal con evidencia antes de documentar el workflow.",
+      errorTitle: "No pudimos abrir el levantamiento.",
+      loadError: "No pudimos consultar los levantamientos guardados.",
+      saveError: "No pudimos guardar el levantamiento.",
+      validation: "Completa los campos requeridos antes de guardar.",
+      savedTitle: "Levantamiento guardado",
+      savedCopy: "Puedes volver, editarlo o continuar después. El diagnóstico ya usa este contexto.",
+      startTitle: "Inicio y frecuencia",
+      startHint: "Define qué pone el proceso en marcha y cuánto cuesta cada repetición.",
+      trigger: "¿Qué dispara este workflow?",
+      triggerPlaceholder: "Ej. Llega el cierre semanal del equipo comercial",
+      frequency: "Frecuencia",
+      frequencyPlaceholder: "Ej. Cada viernes",
+      minutesPerRun: "Minutos por ejecución",
+      toolsTitle: "Herramientas",
+      toolsHint: "Incluye cada aplicación, archivo o canal que participa.",
+      tool: (index) => `Herramienta ${index}`,
+      toolPlaceholder: "Ej. Google Sheets",
+      addTool: "Agregar herramienta",
+      removeTool: (index) => `Quitar herramienta ${index}`,
+      stepsTitle: "Pasos en orden",
+      stepsHint: "Describe lo que sucede, un paso observable a la vez.",
+      step: (index) => `Paso ${index}`,
+      stepPlaceholder: "Ej. Exportar las oportunidades cerradas",
+      addStep: "Agregar paso",
+      removeStep: (index) => `Quitar paso ${index}`,
+      contextTitle: "Criterio y resultado",
+      contextHint: "Separa los datos de entrada, las decisiones humanas y el resultado esperado.",
+      humanDecisions: "Decisiones humanas",
+      humanDecisionsPlaceholder: "Ej. Revisar excepciones y decidir qué cuentas excluir",
+      inputs: "Entradas",
+      inputsPlaceholder: "Ej. CSV de ventas, tabla de metas y notas del CRM",
+      desiredOutput: "Resultado deseado",
+      desiredOutputPlaceholder: "Ej. Reporte validado y listo para compartir",
+      painPoints: "Puntos de dolor",
+      painPointsPlaceholder: "Ej. Copiar datos, corregir formatos y perseguir campos faltantes",
+      localTitle: "Guardado local",
+      localCopy: "Este levantamiento permanece en Ensō Time y no crea flujos en servicios externos.",
+      save: "Guardar levantamiento",
+      saving: "Guardando…",
     },
     settings: {
       title: "Configuración.", intro: "Decide cuánto registrar, cuándo preguntar y por cuánto tiempo conservarlo.", save: "Guardar cambios", tracking: "Seguimiento", trackingHint: "Frecuencia y horario del estudio.", cadence: "Cadencia", cadenceOption: (minutes) => `Cada ${minutes} minutos`, retention: "Conservar datos", retention30: "30 días", retention90: "90 días", retention365: "1 año", retentionForever: "Sin límite", autostart: "Iniciar con el sistema", autostartHint: "Activa el registro sin abrir la ventana.", titles: "Guardar títulos de ventana", titlesHint: "Mejora el contexto; puede incluir nombres de documentos.", schedule: "Horario de trabajo", scheduleHint: "Los check-ins se mantienen dentro de esta franja.", start: "Inicio", end: "Fin", appearance: "Apariencia e idioma", appearanceHint: "La interfaz cambia; tus datos no.", language: "Idioma", theme: "Tema", ink: "Tinta", paper: "Papel", system: "Sistema", updates: "Buscar nuevas versiones", updatesHint: "Consulta GitHub al abrir la aplicación; no envía actividad.", data: "Datos", localEngine: (port) => port ? `Motor local en 127.0.0.1:${port}.` : "Motor local; sin nube ni telemetría.", exportJson: "Exportar JSON", exportCsv: "Exportar CSV", delete: "Borrar todo", deleteConfirm: "¿Borrar permanentemente toda la información de Ensō Time? Esta acción no se puede deshacer.",
@@ -253,7 +355,57 @@ const copy: Record<Locale, UiCopy> = {
       title: "From activity to evidence.", intro: "The more days you observe, the more reliable the automation recommendation becomes.", available: "Diagnosis available", preliminary: "Preliminary diagnosis", usefulSignal: "There is a useful signal now.", remaining: (days) => `${days} days until the first reading.`, evidence: (hours, answers) => `We have ${hours} observed hours and ${answers} intervals explained by you.`, coverage: "coverage", tracked: "tracked", answers: "answers", periodTitle: "Choose the analysis period", periods: { 7: "First signal", 14: "Stable patterns", 28: "Deep reading" }, days: "days",
     },
     automate: {
-      title: "What to automate first.", intro: "A recommendation based on what you actually repeat, with visible assumptions.", refresh: "Refresh", preliminaryTitle: "Preliminary reading", preliminaryCopy: (days) => `${days} days have been observed. Use this as a hypothesis, not a verdict.`, candidate: "Top candidate", signal: "signal", weeklyHours: "hrs/week", repetitions: "repetitions", impact: "Impact", feasibility: "Feasibility", risk: "Risk", empty: "There isn't a strong candidate yet.", emptyCopy: "Mark repetitive tasks in your check-ins to build a signal.", recommendations: "Recommendations", promptTitle: "A ready-to-use prompt", promptIntro: "Take the diagnosis with you", copyPrompt: "Copy prompt", openChatGpt: "Open ChatGPT", openClaude: "Open Claude", outboundNotice: "Only what you copy leaves the app",
+      title: "What to automate first.", intro: "A recommendation based on what you actually repeat, with visible assumptions.", refresh: "Refresh", preliminaryTitle: "Preliminary reading", preliminaryCopy: (days) => `${days} days have been observed. Use this as a hypothesis, not a verdict.`, candidate: "Top candidate", signal: "signal", weeklyHours: "hrs/week", repetitions: "repetitions", impact: "Impact", feasibility: "Feasibility", risk: "Risk", empty: "There isn't a strong candidate yet.", emptyCopy: "Mark repetitive tasks in your check-ins to build a signal.", recommendations: "Recommendations", promptTitle: "A ready-to-use prompt", promptIntro: "Take the diagnosis with you", copyPrompt: "Copy prompt", workflowAction: "Map workflow", workflowHint: "Document the process before designing an automation.", openChatGpt: "Open ChatGPT", openClaude: "Open Claude", outboundNotice: "Only what you copy leaves the app",
+    },
+    workflow: {
+      context: "Workflow intake",
+      title: "Describe how it works today.",
+      intro: "Capture the real process, including human judgment and friction. No automation is generated here.",
+      candidate: "Candidate",
+      back: "Back to diagnosis",
+      loading: "Looking for a saved intake…",
+      retry: "Try again",
+      emptyTitle: "There is no candidate to map.",
+      emptyCopy: "Return to the diagnosis and wait for an evidence-backed signal before documenting a workflow.",
+      errorTitle: "We couldn't open the intake.",
+      loadError: "We couldn't retrieve saved workflow intakes.",
+      saveError: "We couldn't save the workflow intake.",
+      validation: "Complete the required fields before saving.",
+      savedTitle: "Workflow intake saved",
+      savedCopy: "You can return, edit it, or continue later. The diagnosis now uses this context.",
+      startTitle: "Start and frequency",
+      startHint: "Define what starts the process and how much each repetition costs.",
+      trigger: "What triggers this workflow?",
+      triggerPlaceholder: "E.g. The sales team's weekly close begins",
+      frequency: "Frequency",
+      frequencyPlaceholder: "E.g. Every Friday",
+      minutesPerRun: "Minutes per run",
+      toolsTitle: "Tools",
+      toolsHint: "Include every app, file, or channel involved.",
+      tool: (index) => `Tool ${index}`,
+      toolPlaceholder: "E.g. Google Sheets",
+      addTool: "Add tool",
+      removeTool: (index) => `Remove tool ${index}`,
+      stepsTitle: "Ordered steps",
+      stepsHint: "Describe what happens, one observable step at a time.",
+      step: (index) => `Step ${index}`,
+      stepPlaceholder: "E.g. Export the closed opportunities",
+      addStep: "Add step",
+      removeStep: (index) => `Remove step ${index}`,
+      contextTitle: "Judgment and result",
+      contextHint: "Separate input data, human decisions, and the expected result.",
+      humanDecisions: "Human decisions",
+      humanDecisionsPlaceholder: "E.g. Review exceptions and decide which accounts to exclude",
+      inputs: "Inputs",
+      inputsPlaceholder: "E.g. Sales CSV, target table, and CRM notes",
+      desiredOutput: "Desired output",
+      desiredOutputPlaceholder: "E.g. A validated report ready to share",
+      painPoints: "Pain points",
+      painPointsPlaceholder: "E.g. Copying data, fixing formats, and chasing missing fields",
+      localTitle: "Saved locally",
+      localCopy: "This intake stays in Ensō Time and does not create workflows in external services.",
+      save: "Save workflow intake",
+      saving: "Saving…",
     },
     settings: {
       title: "Settings.", intro: "Choose how much to track, when to ask, and how long to keep it.", save: "Save changes", tracking: "Tracking", trackingHint: "Study frequency and working hours.", cadence: "Cadence", cadenceOption: (minutes) => `Every ${minutes} minutes`, retention: "Keep data", retention30: "30 days", retention90: "90 days", retention365: "1 year", retentionForever: "No limit", autostart: "Launch at startup", autostartHint: "Starts tracking without opening the window.", titles: "Save window titles", titlesHint: "Improves context; may include document names.", schedule: "Working hours", scheduleHint: "Check-ins stay within this time window.", start: "Start", end: "End", appearance: "Appearance and language", appearanceHint: "The interface changes; your data does not.", language: "Language", theme: "Theme", ink: "Ink", paper: "Paper", system: "System", updates: "Check for new versions", updatesHint: "Checks GitHub when the app opens; no activity data is sent.", data: "Data", localEngine: (port) => port ? `Local engine on 127.0.0.1:${port}.` : "Local engine; no cloud or telemetry.", exportJson: "Export JSON", exportCsv: "Export CSV", delete: "Delete everything", deleteConfirm: "Permanently delete all Ensō Time data? This cannot be undone.",
