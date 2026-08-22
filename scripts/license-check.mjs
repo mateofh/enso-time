@@ -8,6 +8,7 @@ import { TARGETS } from "./prepare-activitywatch.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const strictManifests = process.argv.includes("--strict-manifests");
+const simulateCrlf = process.argv.includes("--simulate-crlf");
 const errors = [];
 const warnings = [];
 
@@ -19,12 +20,22 @@ const expected = {
   requiredNotice: "Required Notice: Copyright 2026 Mateo (@mateofh).",
 };
 
-async function text(path) {
-  return readFile(resolve(root, path), "utf8");
+function normalizeLineEndings(value) {
+  return Buffer.from(value.toString("latin1").replaceAll("\r\n", "\n"), "latin1");
+}
+
+function convertToCrlf(value) {
+  const normalized = normalizeLineEndings(value);
+  return Buffer.from(normalized.toString("latin1").replaceAll("\n", "\r\n"), "latin1");
 }
 
 async function bytes(path) {
-  return readFile(resolve(root, path));
+  const value = await readFile(resolve(root, path));
+  return simulateCrlf ? convertToCrlf(value) : value;
+}
+
+async function text(path) {
+  return normalizeLineEndings(await bytes(path)).toString("utf8");
 }
 
 function sha256(value) {
@@ -37,21 +48,24 @@ function requireCondition(condition, message) {
 
 async function requireIdentical(left, right) {
   const [leftBytes, rightBytes] = await Promise.all([bytes(left), bytes(right)]);
-  requireCondition(leftBytes.equals(rightBytes), `${right} must be byte-identical to ${left}`);
+  requireCondition(
+    normalizeLineEndings(leftBytes).equals(normalizeLineEndings(rightBytes)),
+    `${right} must match ${left}, allowing only CRLF/LF representation differences`,
+  );
 }
 
 const polyform = await bytes("LICENSE");
 const mpl = await bytes("LICENSES/MPL-2.0.txt");
 requireCondition(
-  sha256(polyform) === expected.polyformSha256,
+  sha256(normalizeLineEndings(polyform)) === expected.polyformSha256,
   "LICENSE differs from the canonical PolyForm Noncommercial 1.0.0 text plus the required notice",
 );
 requireCondition(
-  sha256(mpl) === expected.mplSha256,
+  sha256(normalizeLineEndings(mpl)) === expected.mplSha256,
   "LICENSES/MPL-2.0.txt differs from the canonical MPL-2.0 text",
 );
 
-const polyformText = polyform.toString("utf8");
+const polyformText = normalizeLineEndings(polyform).toString("utf8");
 requireCondition(
   polyformText.split(expected.requiredNotice).length === 2,
   "LICENSE must contain the exact Required Notice once",
@@ -146,6 +160,20 @@ requireCondition(
   "Tauri bundle must include resources/**/* so packaged legal terms are distributed",
 );
 
+const attributes = new Set((await text(".gitattributes")).split("\n"));
+for (const rule of [
+  "LICENSE text eol=lf",
+  "LICENSES/** text eol=lf",
+  "COMMERCIAL.md text eol=lf",
+  "PRIVACY.md text eol=lf",
+  "SECURITY.md text eol=lf",
+  "THIRD_PARTY_NOTICES.md text eol=lf",
+  "TRADEMARKS.md text eol=lf",
+  "src-tauri/resources/legal/** text eol=lf",
+]) {
+  requireCondition(attributes.has(rule), `.gitattributes is missing required LF policy: ${rule}`);
+}
+
 if (manifestProblems.length > 0) {
   const prefix = strictManifests ? "" : "handoff: ";
   (strictManifests ? errors : warnings).push(...manifestProblems.map((problem) => prefix + problem));
@@ -156,6 +184,9 @@ if (errors.length > 0) {
   for (const error of errors) console.error(`error: ${error}`);
   process.exitCode = 1;
 } else {
-  const mode = strictManifests ? "strict" : "handoff-aware";
+  const mode = [
+    strictManifests ? "strict" : "handoff-aware",
+    simulateCrlf ? "simulated-CRLF" : "native-line-endings",
+  ].join(", ");
   console.log(`License boundaries and packaged notices validated (${mode} mode).`);
 }
