@@ -8,9 +8,9 @@ use std::io::Read;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration as StdDuration, Instant};
 use uuid::Uuid;
@@ -26,6 +26,44 @@ const WATCHER_STALE_TIMEOUT: StdDuration = StdDuration::from_secs(45);
 struct ManagedWatcher {
     child: Child,
     stderr_path: PathBuf,
+}
+
+struct RuntimeCancellation {
+    cancelled: AtomicBool,
+    wait_lock: Mutex<()>,
+    wait_signal: Condvar,
+}
+
+impl RuntimeCancellation {
+    fn new() -> Self {
+        Self {
+            cancelled: AtomicBool::new(false),
+            wait_lock: Mutex::new(()),
+            wait_signal: Condvar::new(),
+        }
+    }
+
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.wait_signal.notify_all();
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    fn wait_timeout(&self, timeout: StdDuration) -> bool {
+        if self.is_cancelled() {
+            return true;
+        }
+        let Ok(guard) = self.wait_lock.lock() else {
+            return true;
+        };
+        let _ = self
+            .wait_signal
+            .wait_timeout_while(guard, timeout, |_| !self.is_cancelled());
+        self.is_cancelled()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -143,7 +181,10 @@ pub struct ActivityWatchRuntime {
     server_thread: Mutex<Option<JoinHandle<()>>>,
     capture_issue: Arc<Mutex<Option<CaptureIssueCode>>>,
     capture_titles: AtomicBool,
+    capture_generation: AtomicU64,
+    capture_suspended: AtomicBool,
     shutdown_started: AtomicBool,
+    cancellation: Arc<RuntimeCancellation>,
     watcher_lifecycle: Mutex<()>,
     window_health: Mutex<Option<WatcherHealth>>,
     afk_health: Mutex<Option<WatcherHealth>>,
@@ -224,7 +265,10 @@ impl ActivityWatchRuntime {
             server_thread: Mutex::new(None),
             capture_issue,
             capture_titles: AtomicBool::new(false),
+            capture_generation: AtomicU64::new(0),
+            capture_suspended: AtomicBool::new(false),
             shutdown_started: AtomicBool::new(false),
+            cancellation: Arc::new(RuntimeCancellation::new()),
             watcher_lifecycle: Mutex::new(()),
             window_health: Mutex::new(None),
             afk_health: Mutex::new(None),
@@ -247,7 +291,7 @@ impl ActivityWatchRuntime {
     }
 
     fn launch_server(&self) -> Result<(), String> {
-        if self.shutdown_started.load(Ordering::Acquire) {
+        if self.cancellation.is_cancelled() {
             return Err("El runtime de captura ya se cerró".into());
         }
         let server_datastore = self.datastore()?;
@@ -344,7 +388,7 @@ impl ActivityWatchRuntime {
             .watcher_lifecycle
             .lock()
             .map_err(|_| "No se pudo coordinar el capturador".to_string())?;
-        if self.shutdown_started.load(Ordering::Acquire) {
+        if self.cancellation.is_cancelled() || self.capture_suspended.load(Ordering::Acquire) {
             return Err("El runtime de captura ya se cerró".into());
         }
         self.start_watchers_with_timeout(capture_titles, WATCHER_REGISTRATION_TIMEOUT)
@@ -355,18 +399,24 @@ impl ActivityWatchRuntime {
         capture_titles: bool,
         timeout: StdDuration,
     ) -> Result<(), String> {
+        let generation = self.capture_generation.load(Ordering::Acquire);
+        if self.cancellation.is_cancelled() || self.capture_suspended.load(Ordering::Acquire) {
+            return Err("El inicio de captura fue cancelado".into());
+        }
         let port = self.ready_port().map_err(|error| {
             self.set_capture_issue(CaptureIssueCode::ServerUnavailable);
             error
         })?;
         let window_baseline = self.required_watcher_baseline(WatcherKind::Window)?;
         let afk_baseline = self.required_watcher_baseline(WatcherKind::Afk)?;
-        if let Err(error) = self.start_watcher(WatcherKind::Window, port, capture_titles) {
+        if let Err(error) =
+            self.start_watcher(WatcherKind::Window, port, capture_titles, generation)
+        {
             self.set_capture_issue(error.code);
             let _ = self.stop_watchers_unlocked();
             return Err(error.message);
         }
-        if let Err(error) = self.start_watcher(WatcherKind::Afk, port, capture_titles) {
+        if let Err(error) = self.start_watcher(WatcherKind::Afk, port, capture_titles, generation) {
             self.set_capture_issue(error.code);
             let _ = self.stop_watchers_unlocked();
             return Err(error.message);
@@ -377,6 +427,7 @@ impl ActivityWatchRuntime {
                 (WatcherKind::Afk, afk_baseline),
             ],
             timeout,
+            generation,
         );
         if result.is_ok() {
             self.capture_titles.store(capture_titles, Ordering::Release);
@@ -389,6 +440,10 @@ impl ActivityWatchRuntime {
             .watcher_lifecycle
             .lock()
             .map_err(|_| "No se pudo coordinar el capturador".to_string())?;
+        let generation = self.capture_generation.load(Ordering::Acquire);
+        if self.capture_cancelled(generation) {
+            return Err("El inicio de captura fue cancelado".into());
+        }
         // Never stop a healthy watcher until Rocket has confirmed that the private
         // loopback endpoint is ours. This also closes the bind/start TOCTOU window.
         let port = self.ready_port().map_err(|error| {
@@ -397,7 +452,9 @@ impl ActivityWatchRuntime {
         })?;
         let baseline = self.required_watcher_baseline(WatcherKind::Window)?;
         terminate_slot(&self.window_watcher)?;
-        if let Err(error) = self.start_watcher(WatcherKind::Window, port, capture_titles) {
+        if let Err(error) =
+            self.start_watcher(WatcherKind::Window, port, capture_titles, generation)
+        {
             self.set_capture_issue(error.code);
             let _ = self.stop_watchers_unlocked();
             return Err(error.message);
@@ -405,6 +462,7 @@ impl ActivityWatchRuntime {
         let result = self.await_watcher_progress(
             &[(WatcherKind::Window, baseline)],
             WATCHER_REGISTRATION_TIMEOUT,
+            generation,
         );
         if result.is_ok() {
             self.capture_titles.store(capture_titles, Ordering::Release);
@@ -699,7 +757,14 @@ impl ActivityWatchRuntime {
         kind: WatcherKind,
         port: u16,
         capture_titles: bool,
+        generation: u64,
     ) -> Result<(), WatcherStartError> {
+        if self.capture_cancelled(generation) {
+            return Err(WatcherStartError::unavailable(
+                kind,
+                "El inicio de captura fue cancelado".into(),
+            ));
+        }
         let slot = match kind {
             WatcherKind::Window => &self.window_watcher,
             WatcherKind::Afk => &self.afk_watcher,
@@ -752,6 +817,12 @@ impl ActivityWatchRuntime {
         if matches!(kind, WatcherKind::Window) && !capture_titles {
             command.arg("--exclude-title");
         }
+        if self.capture_cancelled(generation) {
+            return Err(WatcherStartError::unavailable(
+                kind,
+                "El inicio de captura fue cancelado".into(),
+            ));
+        }
         let child = command.spawn().map_err(|error| {
             WatcherStartError::unavailable(
                 kind,
@@ -767,17 +838,40 @@ impl ActivityWatchRuntime {
             child,
             stderr_path: stderr_path.clone(),
         });
+        // Cancellation can race the final pre-spawn check. Publishing the child
+        // first and revalidating closes the only window where stop could miss it.
+        if self.capture_cancelled(generation) {
+            let _ = terminate_slot(slot);
+            return Err(WatcherStartError::unavailable(
+                kind,
+                "El inicio de captura fue cancelado".into(),
+            ));
+        }
         Ok(())
+    }
+
+    fn capture_cancelled(&self, generation: u64) -> bool {
+        self.cancellation.is_cancelled()
+            || self.capture_suspended.load(Ordering::Acquire)
+            || self.capture_generation.load(Ordering::Acquire) != generation
     }
 
     fn await_watcher_progress(
         &self,
         baselines: &[(WatcherKind, WatcherBaseline)],
         timeout: StdDuration,
+        generation: u64,
     ) -> Result<(), String> {
         let deadline = std::time::Instant::now() + timeout;
         let mut healthy = vec![false; baselines.len()];
         loop {
+            if self.cancellation.is_cancelled()
+                || self.capture_suspended.load(Ordering::Acquire)
+                || self.capture_generation.load(Ordering::Acquire) != generation
+            {
+                self.stop_watchers_unlocked()?;
+                return Err("La espera de heartbeat fue cancelada".into());
+            }
             for (index, (kind, baseline)) in baselines.iter().enumerate() {
                 if healthy[index] {
                     continue;
@@ -829,7 +923,13 @@ impl ActivityWatchRuntime {
                     failed_kind.label()
                 ));
             }
-            std::thread::sleep(StdDuration::from_millis(50));
+            if self.cancellation.wait_timeout(StdDuration::from_millis(50))
+                || self.capture_suspended.load(Ordering::Acquire)
+                || self.capture_generation.load(Ordering::Acquire) != generation
+            {
+                self.stop_watchers_unlocked()?;
+                return Err("La espera de heartbeat fue cancelada".into());
+            }
         }
     }
 
@@ -973,7 +1073,7 @@ impl ActivityWatchRuntime {
             .watcher_lifecycle
             .lock()
             .map_err(|_| "No se pudo coordinar el mantenimiento".to_string())?;
-        if self.shutdown_started.load(Ordering::Acquire) {
+        if self.cancellation.is_cancelled() {
             return Err("El runtime de captura ya se cerró".into());
         }
         // The vendored datastore keeps an immediate transaction open between
@@ -1011,15 +1111,16 @@ impl ActivityWatchRuntime {
     }
 
     pub fn shutdown(&self) -> Result<(), String> {
+        let request_result = self.request_shutdown();
         if self.shutdown_started.swap(true, Ordering::AcqRel) {
-            return Ok(());
+            return request_result;
         }
         let _lifecycle = self
             .watcher_lifecycle
             .lock()
             .map_err(|_| "No se pudo coordinar el cierre del capturador".to_string())?;
         let mut errors = Vec::new();
-        if let Err(error) = self.stop_watchers_unlocked() {
+        if let Err(error) = request_result {
             errors.push(error);
         }
         self.shutdown_server();
@@ -1044,6 +1145,80 @@ impl ActivityWatchRuntime {
         } else {
             Err(errors.join("; "))
         }
+    }
+
+    pub fn request_shutdown(&self) -> Result<(), String> {
+        self.cancellation.cancel();
+        self.capture_generation.fetch_add(1, Ordering::AcqRel);
+        self.stop_watchers_unlocked()
+    }
+
+    pub(crate) fn cancel_pending_capture(&self) -> Result<(), String> {
+        self.capture_suspended.store(true, Ordering::Release);
+        self.capture_generation.fetch_add(1, Ordering::AcqRel);
+        self.stop_watchers_unlocked()
+    }
+
+    pub(crate) fn resume_pending_capture(&self) {
+        self.capture_suspended.store(false, Ordering::Release);
+    }
+
+    pub(crate) fn shutdown_requested(&self) -> bool {
+        self.cancellation.is_cancelled()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_test_activity(&self, marker: &str) -> Result<(), String> {
+        let datastore = self.datastore()?;
+        let bucket_id = "enso-test-private-delete";
+        safe_datastore(|| {
+            datastore.create_bucket(&aw_models::Bucket {
+                bid: None,
+                id: bucket_id.into(),
+                _type: "currentwindow".into(),
+                client: "enso-test".into(),
+                hostname: "enso-test".into(),
+                created: None,
+                data: serde_json::Map::new(),
+                metadata: aw_models::BucketMetadata::default(),
+                events: None,
+                last_updated: None,
+            })
+        })?;
+        let mut data = serde_json::Map::new();
+        data.insert("title".into(), serde_json::Value::String(marker.into()));
+        let events = [Event::new(Utc::now(), Duration::seconds(1), data)];
+        safe_datastore(|| datastore.insert_events(bucket_id, &events))?;
+        safe_datastore(|| datastore.force_commit())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_activity_is_empty(&self) -> Result<bool, String> {
+        let datastore = self.datastore()?;
+        Ok(safe_datastore(|| datastore.get_buckets())?.is_empty())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_profile_root(&self) -> PathBuf {
+        self.profile.root.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_database_path(&self) -> PathBuf {
+        self.database_path.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_watchers_are_stopped(&self) -> bool {
+        self.window_watcher
+            .lock()
+            .map(|slot| slot.is_none())
+            .unwrap_or(false)
+            && self
+                .afk_watcher
+                .lock()
+                .map(|slot| slot.is_none())
+                .unwrap_or(false)
     }
 
     fn shutdown_server(&self) {
@@ -1895,6 +2070,31 @@ mod tests {
             runtime.watcher_statuses(),
             ("stopped".into(), "stopped".into())
         );
+    }
+
+    #[test]
+    fn shutdown_interrupts_heartbeat_wait_and_releases_runtime_promptly() {
+        let temp = TempDir::new().unwrap();
+        let resources = compiled_watcher_resources(temp.path(), "disconnected");
+        let runtime =
+            Arc::new(ActivityWatchRuntime::start(&temp.path().join("data"), resources).unwrap());
+        let port = wait_until_ready(&runtime);
+        let starter_runtime = Arc::clone(&runtime);
+        let starter = std::thread::spawn(move || starter_runtime.start_watchers(false));
+        std::thread::sleep(StdDuration::from_millis(150));
+
+        let shutdown_started = Instant::now();
+        runtime.shutdown().unwrap();
+        let elapsed = shutdown_started.elapsed();
+        let start_error = starter.join().unwrap().unwrap_err();
+
+        assert!(start_error.contains("cancelada"));
+        assert!(elapsed < StdDuration::from_secs(2), "elapsed: {elapsed:?}");
+        assert!(runtime.test_watchers_are_stopped());
+        assert_eq!(runtime.port_if_ready(), None);
+        TcpListener::bind((Ipv4Addr::LOCALHOST, port)).unwrap();
+        assert!(!sqlite_sidecar_path(&runtime.database_path, "-wal").exists());
+        assert!(!sqlite_sidecar_path(&runtime.database_path, "-shm").exists());
     }
 
     #[test]
