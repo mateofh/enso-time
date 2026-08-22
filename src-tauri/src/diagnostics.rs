@@ -1,6 +1,6 @@
 use crate::models::{
-    automation_candidate_id, AutomationCandidateV1, CheckInV1, DiagnosticV1, MetricValue,
-    SettingsV1, TimelineBlockV1, WorkflowIntakeV1,
+    automation_candidate_id, canonicalize_candidate_label, AutomationCandidateV1, CheckInV1,
+    DiagnosticV1, MetricValue, SettingsV1, TimelineBlockV1, WorkflowIntakeV1,
 };
 use chrono::Utc;
 use std::collections::HashMap;
@@ -129,12 +129,21 @@ fn score_candidates(checkins: &[CheckInV1], days_observed: f64) -> Vec<Automatio
         else {
             continue;
         };
-        groups.entry(label.to_owned()).or_default().push(item);
+        groups
+            .entry(canonicalize_candidate_label(label))
+            .or_default()
+            .push(item);
     }
     let mut candidates: Vec<_> = groups
         .into_iter()
         .filter(|(_, items)| items.len() >= 2)
         .map(|(key, items)| {
+            let activity_label = items
+                .iter()
+                .filter_map(|item| item.activity_label.as_deref().map(str::trim))
+                .min()
+                .unwrap_or(&key)
+                .to_owned();
             let weekly_frequency = round(items.len() as f64 / days_observed.max(1.0) * 5.0, 1);
             let observed_hours: f64 = items
                 .iter()
@@ -157,7 +166,7 @@ fn score_candidates(checkins: &[CheckInV1], days_observed: f64) -> Vec<Automatio
             let risk_score = if clear_ratio > 0.6 { 6 } else { 14 };
             AutomationCandidateV1 {
                 id: automation_candidate_id(&key),
-                activity_label: key,
+                activity_label,
                 estimated_weekly_hours,
                 weekly_frequency,
                 impact_score,
@@ -298,6 +307,28 @@ mod tests {
         let candidates = score_candidates(&[answered("1"), answered("2")], 7.0);
         assert_eq!(candidates.len(), 1);
         assert!(candidates[0].priority_score > 0);
+    }
+
+    #[test]
+    fn ascii_case_variants_share_one_candidate_and_stable_display_label() {
+        let mut checkins = vec![
+            answered_with_label("1", "preparar reporte"),
+            answered_with_label("2", "Preparar reporte"),
+        ];
+        for _ in 0..2 {
+            let candidates = score_candidates(&checkins, 7.0);
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(candidates[0].activity_label, "Preparar reporte");
+            assert_eq!(
+                candidates[0].id,
+                automation_candidate_id("preparar reporte")
+            );
+            assert_eq!(
+                candidates[0].id,
+                automation_candidate_id("Preparar reporte")
+            );
+            checkins.reverse();
+        }
     }
 
     #[test]
