@@ -8,7 +8,8 @@ use crate::storage::LocalStore;
 use chrono::{Datelike, Duration, Timelike, Utc};
 use chrono_tz::Tz;
 use std::path::PathBuf;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::thread::JoinHandle;
 use tauri::{AppHandle, State};
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
@@ -19,9 +20,101 @@ use uuid::Uuid;
 
 pub struct AppState {
     pub scheduler: SchedulerHandle,
+    pub capture_gate: Arc<CaptureGate>,
     pub store: Arc<LocalStore>,
     pub activity: Arc<ActivityWatchRuntime>,
     pub app_data_dir: PathBuf,
+}
+
+pub struct CaptureGate {
+    access: RwLock<()>,
+    generation: AtomicU64,
+    cancelling: AtomicBool,
+}
+
+pub(crate) struct CaptureOperation<'a> {
+    gate: &'a CaptureGate,
+    generation: u64,
+    _access: RwLockReadGuard<'a, ()>,
+}
+
+struct CaptureExclusive<'a> {
+    gate: &'a CaptureGate,
+    activity: &'a ActivityWatchRuntime,
+    _access: RwLockWriteGuard<'a, ()>,
+}
+
+impl CaptureGate {
+    pub fn new() -> Self {
+        Self {
+            access: RwLock::new(()),
+            generation: AtomicU64::new(0),
+            cancelling: AtomicBool::new(false),
+        }
+    }
+
+    pub(crate) fn operation(&self) -> Result<CaptureOperation<'_>, String> {
+        if self.cancelling.load(Ordering::Acquire) {
+            return Err("La captura está cancelándose para una operación exclusiva".into());
+        }
+        let access = self
+            .access
+            .read()
+            .map_err(|_| "No se pudo coordinar la captura".to_string())?;
+        if self.cancelling.load(Ordering::Acquire) {
+            return Err("La captura está cancelándose para una operación exclusiva".into());
+        }
+        Ok(CaptureOperation {
+            gate: self,
+            generation: self.generation.load(Ordering::Acquire),
+            _access: access,
+        })
+    }
+
+    fn cancel_and_wait<'a>(
+        &'a self,
+        activity: &'a ActivityWatchRuntime,
+    ) -> Result<CaptureExclusive<'a>, String> {
+        self.cancelling
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| "Ya hay una operación exclusiva cancelando la captura".to_string())?;
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        let _ = activity.cancel_pending_capture();
+        let access = match self.access.write() {
+            Ok(access) => access,
+            Err(_) => {
+                activity.resume_pending_capture();
+                self.cancelling.store(false, Ordering::Release);
+                return Err("No se pudo obtener acceso exclusivo a la captura".into());
+            }
+        };
+        Ok(CaptureExclusive {
+            gate: self,
+            activity,
+            _access: access,
+        })
+    }
+}
+
+impl CaptureOperation<'_> {
+    pub(crate) fn ensure_current(&self) -> Result<(), String> {
+        if self.gate.cancelling.load(Ordering::Acquire)
+            || self.gate.generation.load(Ordering::Acquire) != self.generation
+        {
+            Err("La operación de captura fue cancelada".into())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Drop for CaptureExclusive<'_> {
+    fn drop(&mut self) {
+        // Resume while the write lock is still held, then open the gate. This
+        // prevents a scheduler reader from slipping through between both steps.
+        self.activity.resume_pending_capture();
+        self.gate.cancelling.store(false, Ordering::Release);
+    }
 }
 
 pub struct SchedulerHandle {
@@ -71,6 +164,7 @@ pub fn save_settings(
     state: State<'_, AppState>,
     settings: SettingsV1,
 ) -> Result<SettingsV1, String> {
+    let operation = state.capture_gate.operation()?;
     let previous = state.store.settings()?;
     settings.validate()?;
     configure_autostart(&app, settings.onboarding_completed && settings.autostart)?;
@@ -78,12 +172,14 @@ pub fn save_settings(
     if previous.onboarding_completed && !settings.onboarding_completed {
         state.activity.stop_watchers()?;
     } else if !previous.onboarding_completed && settings.onboarding_completed {
+        operation.ensure_current()?;
         state
             .activity
             .start_watchers(settings.capture_window_titles)?;
     } else if previous.capture_window_titles != settings.capture_window_titles
         && is_running(&state.store)?
     {
+        operation.ensure_current()?;
         if let Err(error) = state
             .activity
             .restart_window_watcher(settings.capture_window_titles)
@@ -208,6 +304,7 @@ pub fn generate_diagnostic(state: State<'_, AppState>, days: u16) -> Result<Diag
 
 #[tauri::command]
 pub fn pause_tracking(state: State<'_, AppState>, minutes: u16) -> Result<TrackingStatus, String> {
+    let operation = state.capture_gate.operation()?;
     if !(5..=1440).contains(&minutes) {
         return Err("La pausa debe durar entre 5 minutos y 24 horas".into());
     }
@@ -216,19 +313,23 @@ pub fn pause_tracking(state: State<'_, AppState>, minutes: u16) -> Result<Tracki
     state
         .store
         .set_paused_until(Some(&paused_until.to_rfc3339()))?;
+    drop(operation);
     status(&state)
 }
 
 #[tauri::command]
 pub fn resume_tracking(state: State<'_, AppState>) -> Result<TrackingStatus, String> {
+    let operation = state.capture_gate.operation()?;
     let settings = state.store.settings()?;
     if !settings.onboarding_completed {
         return Err("Completa la configuración inicial antes de iniciar el seguimiento".into());
     }
+    operation.ensure_current()?;
     state
         .activity
         .start_watchers(settings.capture_window_titles)?;
     state.store.set_paused_until(None)?;
+    drop(operation);
     status(&state)
 }
 
@@ -280,29 +381,32 @@ pub fn delete_all_data(state: State<'_, AppState>, confirmation: String) -> Resu
     if confirmation != "DELETE_ENSO_TIME_DATA" {
         return Err("La confirmación de borrado no coincide".into());
     }
-    state.activity.stop_watchers()?;
-    if let Err(error) = state.activity.delete_queued_activity() {
-        let settings = state.store.settings()?;
-        let _ = state
-            .activity
-            .start_watchers(settings.capture_window_titles);
+    delete_all_data_inner(&state.store, &state.activity, &state.capture_gate)
+}
+
+fn delete_all_data_inner(
+    store: &LocalStore,
+    activity: &ActivityWatchRuntime,
+    capture_gate: &CaptureGate,
+) -> Result<(), String> {
+    let exclusive = capture_gate.cancel_and_wait(activity)?;
+    let previous_settings = store.settings().ok();
+    let delete_result = (|| {
+        activity.stop_watchers()?;
+        activity.delete_queued_activity()?;
+        activity.delete_all_activity().map_err(|error| {
+            format!("No se pudo completar el borrado seguro del almacén de actividad: {error}")
+        })?;
+        store.delete_all()
+    })();
+
+    drop(exclusive);
+
+    if let Err(error) = delete_result {
+        if let Some(settings) = previous_settings.filter(|settings| settings.onboarding_completed) {
+            let _ = activity.start_watchers(settings.capture_window_titles);
+        }
         return Err(error);
-    }
-    if let Err(error) = state.activity.delete_all_activity() {
-        let settings = state.store.settings()?;
-        let _ = state
-            .activity
-            .start_watchers(settings.capture_window_titles);
-        return Err(format!(
-            "No se pudo completar el borrado seguro del almacén de actividad: {error}"
-        ));
-    }
-    state.store.delete_all()?;
-    let settings = state.store.settings()?;
-    if settings.onboarding_completed {
-        state
-            .activity
-            .start_watchers(settings.capture_window_titles)?;
     }
     Ok(())
 }
@@ -350,9 +454,10 @@ pub fn start_scheduler(
     app: AppHandle,
     store: Arc<LocalStore>,
     activity: Arc<ActivityWatchRuntime>,
+    capture_gate: Arc<CaptureGate>,
 ) -> Result<SchedulerHandle, String> {
     spawn_scheduler(
-        move || scheduler_tick(&app, &store, &activity),
+        move || scheduler_tick(&app, &store, &activity, &capture_gate),
         std::time::Duration::from_secs(30),
     )
 }
@@ -386,7 +491,9 @@ fn scheduler_tick(
     app: &AppHandle,
     store: &LocalStore,
     activity: &ActivityWatchRuntime,
+    capture_gate: &CaptureGate,
 ) -> Result<(), String> {
+    let operation = capture_gate.operation()?;
     let settings = store.settings()?;
     let today = Utc::now().date_naive().to_string();
     if store.get_value("last_retention_prune")?.as_deref() != Some(&today) {
@@ -399,6 +506,9 @@ fn scheduler_tick(
     }
     let (window_status, afk_status) = activity.watcher_statuses();
     if window_status != "running" || afk_status != "running" {
+        if operation.ensure_current().is_err() || activity.shutdown_requested() {
+            return Ok(());
+        }
         activity.start_watchers(settings.capture_window_titles)?;
     }
     if !inside_work_schedule(&settings, Utc::now()) {
@@ -422,6 +532,9 @@ fn scheduler_tick(
         created_at: iso_now(),
         answered_at: None,
     };
+    if operation.ensure_current().is_err() || activity.shutdown_requested() {
+        return Ok(());
+    }
     if store.create_checkin(&checkin)? {
         let _ = app
             .notification()
@@ -434,15 +547,18 @@ fn scheduler_tick(
 }
 
 fn status(state: &AppState) -> Result<TrackingStatus, String> {
+    let operation = state.capture_gate.operation()?;
     let should_run = is_running(&state.store)?;
     let paused_until = state.store.paused_until()?;
     if should_run {
         let settings = state.store.settings()?;
         let (window, afk) = state.activity.watcher_statuses();
         if window == "stopped" || afk == "stopped" {
-            let _ = state
-                .activity
-                .start_watchers(settings.capture_window_titles);
+            if operation.ensure_current().is_ok() && !state.activity.shutdown_requested() {
+                let _ = state
+                    .activity
+                    .start_watchers(settings.capture_window_titles);
+            }
         }
     }
     let (window_watcher, afk_watcher) = state.activity.watcher_statuses();
@@ -569,6 +685,7 @@ fn csv_escape(value: &str) -> String {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tempfile::TempDir;
 
     #[test]
     fn external_allowlist_does_not_accept_lookalike_hosts() {
@@ -619,5 +736,96 @@ mod tests {
         let stopped_at = ticks.load(Ordering::Acquire);
         std::thread::sleep(std::time::Duration::from_millis(25));
         assert_eq!(ticks.load(Ordering::Acquire), stopped_at);
+    }
+
+    #[test]
+    fn confirmed_delete_cancels_inflight_tick_before_any_late_write_or_restart() {
+        let temp = TempDir::new().unwrap();
+        let store_path = temp.path().join("enso-time.sqlite");
+        let store = Arc::new(LocalStore::open(&store_path).unwrap());
+        let mut settings = SettingsV1::default();
+        settings.onboarding_completed = true;
+        store.save_settings(&settings).unwrap();
+        let private_checkin = CheckInV1 {
+            id: "private-checkin".into(),
+            interval_start: "2026-08-21T12:00:00Z".into(),
+            interval_end: "2026-08-21T12:15:00Z".into(),
+            reason: "unknown".into(),
+            status: "pending".into(),
+            activity_label: Some("private-checkin-marker".into()),
+            category: None,
+            project: None,
+            repetitive: None,
+            rules_clear: None,
+            created_at: "2026-08-21T12:15:00Z".into(),
+            answered_at: None,
+        };
+        store.create_checkin(&private_checkin).unwrap();
+
+        let activity = Arc::new(
+            ActivityWatchRuntime::start(
+                &temp.path().join("activity"),
+                temp.path().join("empty-resources"),
+            )
+            .unwrap(),
+        );
+        activity
+            .seed_test_activity("private-activity-marker")
+            .unwrap();
+        let profile = activity.test_profile_root();
+        let queue = profile.join("data/activitywatch/aw-client/queued");
+        let logs = profile.join("home/Library/Logs/activitywatch");
+        let diagnostic = profile.join("diagnostics/private.stderr.log");
+        std::fs::create_dir_all(&queue).unwrap();
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(queue.join("private.queue"), "private-queue-marker").unwrap();
+        std::fs::write(logs.join("private.log"), "private-log-marker").unwrap();
+        std::fs::write(&diagnostic, "private-diagnostic-marker").unwrap();
+
+        let capture_gate = Arc::new(CaptureGate::new());
+        let tick_gate = Arc::clone(&capture_gate);
+        let tick_store = Arc::clone(&store);
+        let tick_activity = Arc::clone(&activity);
+        let late_writes = Arc::new(AtomicUsize::new(0));
+        let late_restarts = Arc::new(AtomicUsize::new(0));
+        let tick_late_writes = Arc::clone(&late_writes);
+        let tick_late_restarts = Arc::clone(&late_restarts);
+        let (started_sender, started_receiver) = mpsc::channel();
+        let tick = std::thread::spawn(move || {
+            let operation = tick_gate.operation().unwrap();
+            started_sender.send(()).unwrap();
+            while operation.ensure_current().is_ok() {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            if operation.ensure_current().is_ok() {
+                tick_late_restarts.fetch_add(1, Ordering::Release);
+                let _ = tick_activity.start_watchers(false);
+                tick_late_writes.fetch_add(1, Ordering::Release);
+                let _ = tick_store.create_checkin(&private_checkin);
+            }
+        });
+        started_receiver.recv().unwrap();
+
+        delete_all_data_inner(&store, &activity, &capture_gate).unwrap();
+        tick.join().unwrap();
+
+        assert_eq!(late_writes.load(Ordering::Acquire), 0);
+        assert_eq!(late_restarts.load(Ordering::Acquire), 0);
+        assert!(store.checkins().unwrap().is_empty());
+        assert!(activity.test_activity_is_empty().unwrap());
+        assert!(activity.test_watchers_are_stopped());
+        assert!(!queue.exists());
+        assert!(!logs.exists());
+        assert!(!diagnostic.exists());
+        for (path, marker) in [
+            (store_path, b"private-checkin-marker".as_slice()),
+            (
+                activity.test_database_path(),
+                b"private-activity-marker".as_slice(),
+            ),
+        ] {
+            let bytes = std::fs::read(path).unwrap();
+            assert!(!bytes.windows(marker.len()).any(|window| window == marker));
+        }
     }
 }

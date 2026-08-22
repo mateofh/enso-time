@@ -47,6 +47,7 @@ pub fn run() {
                 &app_data_dir.join("activitywatch"),
                 resource_dir,
             )?);
+            let capture_gate = Arc::new(commands::CaptureGate::new());
             let settings = store.settings()?;
             if settings.onboarding_completed && settings.autostart {
                 use tauri_plugin_autostart::ManagerExt;
@@ -62,15 +63,20 @@ pub fn run() {
                 .is_some_and(|until| until > chrono::Utc::now());
             if settings.onboarding_completed && !pause_is_active {
                 let watcher_activity = Arc::clone(&activity);
+                let watcher_gate = Arc::clone(&capture_gate);
                 std::thread::Builder::new()
                     .name("enso-watcher-bootstrap".into())
                     .spawn(move || {
                         for _ in 0..20 {
                             if watcher_activity.port_if_ready().is_some() {
-                                if let Err(error) =
-                                    watcher_activity.start_watchers(settings.capture_window_titles)
-                                {
-                                    eprintln!("Ensō Time watchers: {error}");
+                                if let Ok(operation) = watcher_gate.operation() {
+                                    if operation.ensure_current().is_ok() {
+                                        if let Err(error) = watcher_activity
+                                            .start_watchers(settings.capture_window_titles)
+                                        {
+                                            eprintln!("Ensō Time watchers: {error}");
+                                        }
+                                    }
                                 }
                                 return;
                             }
@@ -83,12 +89,14 @@ pub fn run() {
                 app.handle().clone(),
                 Arc::clone(&store),
                 Arc::clone(&activity),
+                Arc::clone(&capture_gate),
             )?;
             let state = AppState {
                 store,
                 activity,
                 app_data_dir,
                 scheduler,
+                capture_gate,
             };
             app.manage(state);
             install_tray(app)?;
@@ -116,6 +124,9 @@ pub fn run() {
     app.run(|app, event| {
         if let RunEvent::ExitRequested { .. } | RunEvent::Exit = event {
             if let Some(state) = app.try_state::<AppState>() {
+                if let Err(error) = state.activity.request_shutdown() {
+                    eprintln!("Ensō Time capture cancellation: {error}");
+                }
                 if let Err(error) = state.scheduler.shutdown() {
                     eprintln!("Ensō Time scheduler shutdown: {error}");
                 }
@@ -152,15 +163,20 @@ fn install_tray(app: &mut tauri::App) -> tauri::Result<()> {
             "show" => show_main_window(app),
             "pause" => {
                 if let Some(state) = app.try_state::<AppState>() {
-                    let _ = state.activity.stop_watchers();
-                    let until = chrono::Utc::now() + chrono::Duration::minutes(30);
-                    let _ = state.store.set_paused_until(Some(&until.to_rfc3339()));
+                    if let Ok(_operation) = state.capture_gate.operation() {
+                        let _ = state.activity.stop_watchers();
+                        let until = chrono::Utc::now() + chrono::Duration::minutes(30);
+                        let _ = state.store.set_paused_until(Some(&until.to_rfc3339()));
+                    }
                 }
             }
             "resume" => {
                 if let Some(state) = app.try_state::<AppState>() {
-                    if let Ok(settings) = state.store.settings() {
+                    if let (Ok(operation), Ok(settings)) =
+                        (state.capture_gate.operation(), state.store.settings())
+                    {
                         if settings.onboarding_completed
+                            && operation.ensure_current().is_ok()
                             && state
                                 .activity
                                 .start_watchers(settings.capture_window_titles)
