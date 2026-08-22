@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { AlertCircle, ArrowLeft, Check, Plus, RefreshCw, X } from "lucide-react";
 import { bridge } from "../lib/bridge";
 import { messages } from "../lib/i18n";
+import { MAX_WORKFLOW_MINUTES } from "../lib/workflowIntakes";
 import type { AutomationCandidateV1, Locale, WorkflowIntakeV1 } from "../lib/types";
 
 type LoadState = "loading" | "ready" | "error";
@@ -38,7 +39,7 @@ function normalizeIntake(intake: WorkflowIntakeV1, candidate: AutomationCandidat
     inputs: intake.inputs.trim(),
     desiredOutput: intake.desiredOutput.trim(),
     frequency: intake.frequency.trim(),
-    minutesPerRun: Math.max(1, Number(intake.minutesPerRun)),
+    minutesPerRun: Number(intake.minutesPerRun),
     painPoints: intake.painPoints.trim(),
     updatedAt: new Date().toISOString(),
   };
@@ -135,7 +136,7 @@ export function WorkflowIntakeView({ candidate, locale, onBack, onSaved }: {
           <div className="workflow-fields">
             <label>{copy.trigger}<textarea required rows={3} value={draft.trigger} onChange={(event) => set("trigger", event.target.value)} placeholder={copy.triggerPlaceholder} /></label>
             <label>{copy.frequency}<input required value={draft.frequency} onChange={(event) => set("frequency", event.target.value)} placeholder={copy.frequencyPlaceholder} /></label>
-            <label>{copy.minutesPerRun}<input required type="number" min={1} inputMode="numeric" value={draft.minutesPerRun} onChange={(event) => set("minutesPerRun", Number(event.target.value))} /></label>
+            <label>{copy.minutesPerRun}<input required type="number" min={1} max={MAX_WORKFLOW_MINUTES} inputMode="numeric" value={draft.minutesPerRun} onChange={(event) => set("minutesPerRun", Number(event.target.value))} /></label>
           </div>
         </section>
 

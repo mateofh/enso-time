@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildPrompt, createDiagnostic, scoreCandidate } from "./diagnostics";
+import { buildPrompt, candidateId, createDiagnostic, scoreCandidate } from "./diagnostics";
 import type { CheckInV1, TimelineBlockV1 } from "./types";
 
 const checkIns: CheckInV1[] = [1, 2, 3].map((day) => ({
@@ -40,5 +40,24 @@ describe("automation diagnosis", () => {
     const diagnostic = createDiagnostic(blocks, checkIns, 3);
     expect(diagnostic.preliminary).toBe(true);
     expect(diagnostic.metrics.find((metric) => metric.label === "Tiempo activo")?.value).toBe(5400);
+  });
+
+  it("matches the shared FNV-1a candidate id for Unicode and emoji", () => {
+    expect(candidateId("  Café semanal  ")).toBe("candidate-0e357a784791391c");
+    expect(candidateId("🤖 Reporte 📊")).toBe("candidate-98d85f5650810211");
+  });
+
+  it("breaks equal-priority ties by candidate id", () => {
+    const tied = ["Zulu", "Árbol"].flatMap((activityLabel, group) => [1, 2].map((day) => ({
+      ...checkIns[0]!,
+      id: `tie-${group}-${day}`,
+      activityLabel,
+      intervalStart: `2026-08-0${day}T10:00:00Z`,
+      intervalEnd: `2026-08-0${day}T10:15:00Z`,
+    })));
+    const candidates = scoreCandidate(tied, 2);
+    expect(candidates).toHaveLength(2);
+    expect(candidates[0]!.priorityScore).toBe(candidates[1]!.priorityScore);
+    expect(candidates.map((candidate) => candidate.id)).toEqual([...candidates.map((candidate) => candidate.id)].sort());
   });
 });

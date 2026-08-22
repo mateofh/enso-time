@@ -1,6 +1,8 @@
 import type { AutomationCandidateV1, CheckInV1, DiagnosticV1, TimelineBlockV1 } from "./types";
 
 const WEEK_DAYS = 5;
+const FNV_OFFSET = BigInt("0xcbf29ce484222325");
+const FNV_PRIME = BigInt("0x100000001b3");
 
 function round(value: number, digits = 1): number {
   const factor = 10 ** digits;
@@ -11,7 +13,7 @@ export function scoreCandidate(checkIns: CheckInV1[], daysObserved: number): Aut
   const groups = new Map<string, CheckInV1[]>();
   for (const checkIn of checkIns) {
     if (checkIn.status !== "answered" || !checkIn.activityLabel || !checkIn.repetitive) continue;
-    const key = checkIn.activityLabel.trim().toLocaleLowerCase();
+    const key = checkIn.activityLabel.trim().toLowerCase();
     groups.set(key, [...(groups.get(key) ?? []), checkIn]);
   }
 
@@ -25,7 +27,7 @@ export function scoreCandidate(checkIns: CheckInV1[], daysObserved: number): Aut
       const feasibilityScore = Math.round(18 + clearRatio * 17);
       const riskScore = clearRatio > 0.6 ? 6 : 14;
       return {
-        id: `candidate-${key.replace(/[^a-z0-9]+/g, "-")}`,
+        id: candidateId(key),
         activityLabel: values[0]?.activityLabel ?? key,
         estimatedWeeklyHours,
         weeklyFrequency,
@@ -40,7 +42,15 @@ export function scoreCandidate(checkIns: CheckInV1[], daysObserved: number): Aut
         ],
       };
     })
-    .sort((a, b) => b.priorityScore - a.priorityScore);
+    .sort((a, b) => b.priorityScore - a.priorityScore || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
+export function candidateId(label: string): string {
+  let hash = FNV_OFFSET;
+  for (const byte of new TextEncoder().encode(label.trim())) {
+    hash = BigInt.asUintN(64, (hash ^ BigInt(byte)) * FNV_PRIME);
+  }
+  return `candidate-${hash.toString(16).padStart(16, "0")}`;
 }
 
 export function buildPrompt(candidate: AutomationCandidateV1 | undefined, role: string, goals: string[], daysObserved: number): string {
@@ -48,7 +58,7 @@ export function buildPrompt(candidate: AutomationCandidateV1 | undefined, role: 
     return `Actúa como consultor de automatización. Todavía no hay suficiente evidencia para elegir una tarea. Ayúdame a diseñar un estudio de trabajo de ${daysObserved} días para identificar procesos repetitivos, medibles y de bajo riesgo. Mi rol es: ${role || "profesional independiente"}. Mis objetivos son: ${goals.join(", ") || "recuperar tiempo para trabajo de mayor valor"}.`;
   }
 
-  return `Actúa como arquitecto de automatización pragmático. Quiero decidir qué automatizar primero basándome en evidencia de mi trabajo, no en tendencias.\n\nCONTEXTO\n- Rol: ${role || "profesional independiente"}\n- Objetivos: ${goals.join(", ") || "recuperar tiempo para trabajo de mayor valor"}\n- Días observados: ${daysObserved}\n\nCANDIDATO PRINCIPAL\n- Actividad: ${candidate.activityLabel}\n- Frecuencia estimada: ${candidate.weeklyFrequency} veces por semana\n- Tiempo estimado: ${candidate.estimatedWeeklyHours} horas por semana\n- Impacto: ${candidate.impactScore}/40\n- Facilidad: ${candidate.feasibilityScore}/35\n- Riesgo: ${candidate.riskScore}/25\n- Evidencia: ${candidate.evidence.join("; ")}\n\nENTREGABLE\n1. Diagnostica si realmente conviene automatizar esta actividad primero.\n2. Separa pasos deterministas de pasos que requieren criterio humano.\n3. Propón un MVP que pueda validar en menos de una semana.\n4. Recomienda herramientas concretas y una arquitectura simple.\n5. Define riesgos, controles y una métrica de éxito en horas ahorradas.\n6. Si no es el mejor primer candidato, explica qué información falta antes de descartarlo.\n\nNo inventes datos. Señala cada supuesto y prioriza una automatización reversible.`;
+  return `Actúa como arquitecto de automatización pragmático. Quiero decidir qué automatizar primero basándome en evidencia de mi trabajo, no en tendencias.\n\nCONTEXTO\n- Rol: ${role.trim() || "profesional independiente"}\n- Objetivos: ${goals.join(", ") || "recuperar tiempo para trabajo de mayor valor"}\n- Días observados: ${daysObserved}\n\nCANDIDATO PRINCIPAL\n- Actividad: ${candidate.activityLabel}\n- Frecuencia estimada: ${candidate.weeklyFrequency} veces por semana\n- Tiempo estimado: ${candidate.estimatedWeeklyHours} horas por semana\n- Impacto: ${candidate.impactScore}/40\n- Facilidad: ${candidate.feasibilityScore}/35\n- Riesgo: ${candidate.riskScore}/25\n- Evidencia observada: ${candidate.evidence.join("; ")}\n\nENTREGABLE\n1. Diagnostica si realmente conviene automatizar esta actividad primero.\n2. Separa pasos deterministas de pasos que requieren criterio humano.\n3. Propón un MVP que pueda validar en menos de una semana.\n4. Evalúa las herramientas declaradas y recomienda una arquitectura simple sólo si la evidencia la sustenta.\n5. Define riesgos, controles y una métrica de éxito en horas ahorradas.\n6. Si no es el mejor primer candidato, explica qué información falta antes de descartarlo.\n\nNo inventes datos ni trates el intake autodeclarado como evidencia observada. Señala cada supuesto. No generes código, credenciales ni configuración ejecutable, y no construyas ni despliegues ningún flujo; entrega sólo el diagnóstico y el diseño reversible.`;
 }
 
 export function createDiagnostic(
@@ -92,4 +102,3 @@ export function createDiagnostic(
     generatedAt: new Date().toISOString(),
   };
 }
-
