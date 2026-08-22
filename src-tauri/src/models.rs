@@ -1,6 +1,18 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub const CATEGORIES: [&str; 9] = [
+    "focus",
+    "communication",
+    "meetings",
+    "admin",
+    "learning",
+    "creation",
+    "personal",
+    "break",
+    "unknown",
+];
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkSchedule {
@@ -62,12 +74,81 @@ impl Default for SettingsV1 {
     }
 }
 
+impl SettingsV1 {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != 1 {
+            return Err("La versión de configuración no es compatible".into());
+        }
+        if !matches!(self.cadence_minutes, 15 | 30 | 60) {
+            return Err("La cadencia debe ser 15, 30 o 60 minutos".into());
+        }
+        if !matches!(self.locale.as_str(), "es-419" | "en") {
+            return Err("El idioma seleccionado no es compatible".into());
+        }
+        if !matches!(self.theme.as_str(), "ink" | "paper" | "system") {
+            return Err("El tema seleccionado no es compatible".into());
+        }
+        if self.timezone.parse::<chrono_tz::Tz>().is_err() {
+            return Err("La zona horaria no es válida".into());
+        }
+        if self.role.chars().count() > 200
+            || self.goals.len() > 10
+            || self.goals.iter().any(|goal| goal.chars().count() > 500)
+        {
+            return Err("El perfil o los objetivos exceden el tamaño permitido".into());
+        }
+        if self.work_schedule.days.iter().any(|day| *day > 6) {
+            return Err("El horario contiene un día inválido".into());
+        }
+        validate_clock(&self.work_schedule.start)?;
+        validate_clock(&self.work_schedule.end)?;
+        if let Some(days) = self.retention_days {
+            if !matches!(days, 30 | 90 | 365) {
+                return Err("La retención debe ser 30, 90, 365 días o ilimitada".into());
+            }
+        }
+        if self.app_rules.len() > 500 {
+            return Err("Hay demasiadas reglas de aplicación".into());
+        }
+        for rule in &self.app_rules {
+            if rule.id.chars().count() > 128
+                || rule.pattern.trim().is_empty()
+                || rule.pattern.chars().count() > 256
+                || rule
+                    .activity_label
+                    .as_ref()
+                    .is_some_and(|label| label.chars().count() > 200)
+                || !is_category(&rule.category)
+            {
+                return Err("Hay una regla de aplicación inválida".into());
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_clock(value: &str) -> Result<(), String> {
+    let Some((hour, minute)) = value.split_once(':') else {
+        return Err("El horario debe usar el formato HH:MM".into());
+    };
+    let hour = hour.parse::<u8>().map_err(|_| "Hora inválida")?;
+    let minute = minute.parse::<u8>().map_err(|_| "Minuto inválido")?;
+    if hour > 23 || minute > 59 {
+        return Err("El horario debe usar el formato HH:MM".into());
+    }
+    Ok(())
+}
+
+pub fn is_category(value: &str) -> bool {
+    CATEGORIES.contains(&value)
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrackingStatus {
     pub running: bool,
     pub paused_until: Option<String>,
-    pub server_port: u16,
+    pub server_port: Option<u16>,
     pub window_watcher: String,
     pub afk_watcher: String,
     pub last_event_at: Option<String>,
@@ -175,6 +256,16 @@ pub struct UpdateInfo {
     pub current_version: String,
     pub latest_version: Option<String>,
     pub release_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportEnvelope {
+    pub schema_version: u8,
+    pub exported_at: String,
+    pub settings: SettingsV1,
+    pub check_ins: Vec<CheckInV1>,
+    pub timeline: Vec<TimelineBlockV1>,
 }
 
 pub fn iso_now() -> String {
