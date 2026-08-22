@@ -22,6 +22,16 @@
       "expected": { "completeness": 100, "status": "draft" }
     },
     {
+      "name": "three recorded check-ins with two declared repetitions",
+      "checkIns": [
+        { "id": "evidence-01", "intervalStart": "2026-08-01T15:00:00.000Z", "intervalEnd": "2026-08-01T15:15:00.000Z", "status": "answered", "activityLabel": "Actualizar reporte semanal", "repetitive": true, "rulesClear": true },
+        { "id": "evidence-02", "intervalStart": "2026-08-02T15:00:00.000Z", "intervalEnd": "2026-08-02T15:15:00.000Z", "status": "answered", "activityLabel": "Actualizar reporte semanal", "repetitive": false, "rulesClear": true },
+        { "id": "evidence-03", "intervalStart": "2026-08-03T15:00:00.000Z", "intervalEnd": "2026-08-03T15:15:00.000Z", "status": "answered", "activityLabel": "Actualizar reporte semanal", "repetitive": true, "rulesClear": false }
+      ],
+      "inputs": { "observedCount": 3, "observedDays": 3, "declaredRepeatedDays": 2, "repeatedObservations": 2, "observedWeeklyFrequency": 7, "rulesRatio": 0.5 },
+      "expected": { "status": "ready", "observedDays": 3, "declaredRepeatedDays": 2, "repeatedObservations": 2, "observedWeeklyFrequency": 7, "confidence": 52 }
+    },
+    {
       "name": "verification can exceed manual residual without negative savings",
       "inputs": { "runsPerWeek": 1, "minutesPerRun": 10, "totalSteps": 1, "automatableSteps": 1, "humanSteps": 0, "verificationMode": "every-run", "verificationMinutesPerRun": 20 },
       "expected": { "weeklyBaselineMinutes": 10, "weeklyResidualMinutes": 20, "weeklySavingsMinutes": 0 }
