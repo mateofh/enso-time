@@ -379,9 +379,17 @@ fn assess_stored_blueprint(
     let intake = store
         .workflow_intake_for_candidate(&draft.candidate_id)?
         .ok_or_else(|| "El intake fuente ya no existe".to_string())?;
-    let (total, repeated, observed_days) =
-        store.blueprint_observation_counts(&draft.candidate_id)?;
-    assess_blueprint(draft, &intake, total, repeated, observed_days, locale)
+    let observed = store.blueprint_observation_counts(&draft.candidate_id)?;
+    assess_blueprint(
+        draft,
+        &intake,
+        observed.total,
+        observed.repeated,
+        observed.observed_days,
+        observed.rules_quality,
+        observed.observed_weekly_frequency,
+        locale,
+    )
 }
 
 fn get_automation_blueprint_inner(
@@ -398,8 +406,18 @@ fn get_automation_blueprint_inner(
     let draft = store
         .automation_blueprint_draft(candidate_id)?
         .unwrap_or_else(|| ephemeral_draft(&intake));
-    let (total, repeated, observed_days) = store.blueprint_observation_counts(candidate_id)?;
-    assess_blueprint(draft, &intake, total, repeated, observed_days, locale).map(Some)
+    let observed = store.blueprint_observation_counts(candidate_id)?;
+    assess_blueprint(
+        draft,
+        &intake,
+        observed.total,
+        observed.repeated,
+        observed.observed_days,
+        observed.rules_quality,
+        observed.observed_weekly_frequency,
+        locale,
+    )
+    .map(Some)
 }
 
 #[tauri::command]

@@ -107,6 +107,9 @@ pub struct BlueprintEvidenceV1 {
     pub observed: Vec<String>,
     pub declared: Vec<String>,
     pub repeated_observations: u32,
+    pub observed_days: f64,
+    pub rules_quality: f64,
+    pub observed_weekly_frequency: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -131,7 +134,7 @@ pub struct ScoreV1 {
     pub components: Vec<ScoreComponentV1>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BlueprintEstimatesV1 {
     pub weekly_baseline_minutes: u32,
@@ -140,7 +143,7 @@ pub struct BlueprintEstimatesV1 {
     pub effort: u8,
     pub operational_risk: u8,
     pub confidence: u8,
-    pub components: BTreeMap<String, u8>,
+    pub components: BTreeMap<String, f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -357,7 +360,9 @@ pub fn assess_blueprint(
     intake: &WorkflowIntakeV1,
     total_observations: u32,
     repeated_observations: u32,
-    observed_days: u16,
+    observed_days: f64,
+    rules_quality: f64,
+    observed_weekly_frequency: f64,
     locale: &str,
 ) -> Result<AutomationBlueprintV1, String> {
     if !matches!(locale, "es-419" | "en") {
@@ -369,7 +374,6 @@ pub fn assess_blueprint(
         score: completeness_score.score,
         missing: missing_fields(&draft, intake),
     };
-    let estimates = estimates(&draft, intake, repeated_observations);
     let stale = draft.source_intake_updated_at != intake.updated_at;
     let has_automatable = draft
         .step_boundaries
@@ -422,7 +426,11 @@ pub fn assess_blueprint(
             "Intake del workflow declarado por ti".into()
         }],
         repeated_observations,
+        observed_days,
+        rules_quality,
+        observed_weekly_frequency,
     };
+    let estimates = estimates(&draft, intake, &evidence);
     let assumptions = assumptions(&draft, locale);
     let rendered_markdown = render(
         &draft,
@@ -557,7 +565,7 @@ fn missing_fields(draft: &AutomationBlueprintDraftV1, intake: &WorkflowIntakeV1)
 pub fn estimates(
     draft: &AutomationBlueprintDraftV1,
     intake: &WorkflowIntakeV1,
-    repeated_observations: u32,
+    evidence: &BlueprintEvidenceV1,
 ) -> BlueprintEstimatesV1 {
     let total = draft.step_boundaries.len() as f64;
     let automatable = draft
@@ -575,83 +583,104 @@ pub fn estimates(
         let savings = (baseline - residual).max(0.0).round() as u32;
         (baseline.round() as u32, residual.round() as u32, savings)
     };
-    let complexity = (24 + draft.step_boundaries.len().saturating_mul(5)).min(100) as u8;
-    let effort = (u16::from(complexity)
-        + if draft.side_effect_level == SideEffectLevelV1::Irreversible {
-            20
-        } else {
-            0
-        })
-    .min(100) as u8;
-    let risk = operational_risk(draft);
-    let confidence = confidence(draft, repeated_observations);
+    let human_share = human / total.max(1.0);
+    let tool_complexity = (6 * intake.tools.len().min(6)) as f64;
+    let step_complexity = (3 * draft.step_boundaries.len().min(10)) as f64;
+    let effort_sensitivity = match draft.data_sensitivity {
+        DataSensitivityV1::Unassessed => 8.0,
+        DataSensitivityV1::Low => 0.0,
+        DataSensitivityV1::Moderate => 4.0,
+        DataSensitivityV1::High => 8.0,
+    };
+    let risk_sensitivity = match draft.data_sensitivity {
+        DataSensitivityV1::Unassessed => 20.0,
+        DataSensitivityV1::Low => 0.0,
+        DataSensitivityV1::Moderate => 10.0,
+        DataSensitivityV1::High => 20.0,
+    };
+    let effort_effect = match draft.side_effect_level {
+        SideEffectLevelV1::Unassessed => 12.0,
+        SideEffectLevelV1::None => 0.0,
+        SideEffectLevelV1::Reversible => 6.0,
+        SideEffectLevelV1::Irreversible => 12.0,
+    };
+    let risk_effect = match draft.side_effect_level {
+        SideEffectLevelV1::Unassessed => 28.0,
+        SideEffectLevelV1::None => 0.0,
+        SideEffectLevelV1::Reversible => 12.0,
+        SideEffectLevelV1::Irreversible => 28.0,
+    };
+    let verification = match draft.verification_mode {
+        VerificationModeV1::Unassessed | VerificationModeV1::None => 18.0,
+        VerificationModeV1::Sample => 8.0,
+        VerificationModeV1::EveryRun => 0.0,
+    };
+    let recovery_absent = if draft.recovery_plan.is_some() {
+        0.0
+    } else {
+        16.0
+    };
+    let effort = bounded(
+        10.0 + tool_complexity
+            + step_complexity
+            + 15.0 * human_share
+            + effort_sensitivity
+            + effort_effect,
+    );
+    let operational_risk = bounded(
+        18.0 * human_share + risk_sensitivity + risk_effect + verification + recovery_absent,
+    );
+    let completeness = f64::from(completeness(draft, intake).score);
+    let observation_component = (6.0 * f64::from(evidence.repeated_observations)).min(30.0);
+    let duration_component = (20.0 * evidence.observed_days.min(14.0) / 14.0).round();
+    let quality_component = (20.0 * evidence.rules_quality.clamp(0.0, 1.0)).round();
+    let runs = f64::from(draft.runs_per_week.unwrap_or(0));
+    let frequency_agreement =
+        (1.0 - (evidence.observed_weekly_frequency - runs).abs() / runs.max(1.0)).max(0.0);
+    let frequency_component = (10.0 * frequency_agreement).round();
+    let completeness_component = (20.0 * completeness / 100.0).round();
+    let confidence = bounded(
+        observation_component
+            + duration_component
+            + quality_component
+            + frequency_component
+            + completeness_component,
+    );
     let mut components = BTreeMap::new();
-    components.insert("complexity".into(), complexity);
-    for component in &risk.components {
-        components.insert(component.key.into(), component.points);
-    }
+    components.insert("toolComplexity".into(), tool_complexity);
+    components.insert("stepComplexity".into(), step_complexity);
+    components.insert("humanShare".into(), human_share);
+    components.insert("effortSensitivity".into(), effort_sensitivity);
+    components.insert("effortEffect".into(), effort_effect);
+    components.insert("riskSensitivity".into(), risk_sensitivity);
+    components.insert("riskEffect".into(), risk_effect);
+    components.insert("verification".into(), verification);
+    components.insert("recoveryAbsent".into(), recovery_absent);
     components.insert(
         "observations".into(),
-        repeated_observations.min(u32::from(u8::MAX)) as u8,
+        f64::from(evidence.repeated_observations),
     );
+    components.insert("observedDays".into(), evidence.observed_days);
+    components.insert("rulesQuality".into(), evidence.rules_quality);
+    components.insert(
+        "observedWeeklyFrequency".into(),
+        evidence.observed_weekly_frequency,
+    );
+    components.insert("frequencyAgreement".into(), frequency_agreement);
+    components.insert("completeness".into(), completeness);
     BlueprintEstimatesV1 {
         weekly_baseline_minutes: values.0,
         weekly_residual_minutes: values.1,
         weekly_savings_minutes: values.2,
         effort,
-        operational_risk: risk.score,
-        confidence: confidence.score,
+        operational_risk,
+        confidence,
         components,
     }
 }
 
-pub fn operational_risk(draft: &AutomationBlueprintDraftV1) -> ScoreV1 {
-    let sensitivity = match draft.data_sensitivity {
-        DataSensitivityV1::Unassessed => 25,
-        DataSensitivityV1::Low => 5,
-        DataSensitivityV1::Moderate => 15,
-        DataSensitivityV1::High => 30,
-    };
-    let side_effects = match draft.side_effect_level {
-        SideEffectLevelV1::Unassessed => 25,
-        SideEffectLevelV1::None => 0,
-        SideEffectLevelV1::Reversible => 8,
-        SideEffectLevelV1::Irreversible => 35,
-    };
-    let verification = match draft.verification_mode {
-        VerificationModeV1::Unassessed => 20,
-        VerificationModeV1::None => 0,
-        VerificationModeV1::Sample => 7,
-        VerificationModeV1::EveryRun => 4,
-    };
-    let recovery = if draft.recovery_plan.is_some() { 0 } else { 20 };
-    score(vec![
-        component("sensitivity", sensitivity, 30),
-        component("sideEffects", side_effects, 35),
-        component("verification", verification, 20),
-        component("recovery", recovery, 20),
-    ])
-}
-
-pub fn confidence(draft: &AutomationBlueprintDraftV1, repeated_observations: u32) -> ScoreV1 {
-    let observations = (f64::from(repeated_observations) * 4.5).min(18.0).round() as u8;
-    let boundaries = assessed(
-        !draft.step_boundaries.is_empty()
-            && draft
-                .step_boundaries
-                .iter()
-                .all(|step| step.disposition != StepDispositionV1::Unassessed),
-        20,
-    );
-    let verification = assessed(draft.verification_mode != VerificationModeV1::Unassessed, 5);
-    let recovery = assessed(draft.recovery_plan.is_some(), 15);
-    score(vec![
-        component("base", 31, 31),
-        component("observations", observations, 18),
-        component("boundaries", boundaries, 20),
-        component("verificationPlan", verification, 5),
-        component("recoveryPlan", recovery, 15),
-    ])
+fn bounded(value: f64) -> u8 {
+    value.round().clamp(0.0, 100.0) as u8
 }
 
 fn component(key: &'static str, points: u8, maximum: u8) -> ScoreComponentV1 {
@@ -848,6 +877,22 @@ mod tests {
         draft
     }
 
+    fn evidence(
+        repeated_observations: u32,
+        observed_days: f64,
+        rules_quality: f64,
+        observed_weekly_frequency: f64,
+    ) -> BlueprintEvidenceV1 {
+        BlueprintEvidenceV1 {
+            observed: vec![],
+            declared: vec![],
+            repeated_observations,
+            observed_days,
+            rules_quality,
+            observed_weekly_frequency,
+        }
+    }
+
     #[test]
     fn wire_contract_is_camel_case_and_rejects_unknown_versions_and_enums() {
         let value = serde_json::to_value(ready_draft()).unwrap();
@@ -865,7 +910,8 @@ mod tests {
         input["draft"]["dataSensitivity"] = "secret".into();
         assert!(serde_json::from_value::<SaveAutomationBlueprintInputV1>(input).is_err());
 
-        let blueprint = assess_blueprint(ready_draft(), &intake(), 4, 4, 14, "en").unwrap();
+        let blueprint =
+            assess_blueprint(ready_draft(), &intake(), 4, 4, 14.0, 0.75, 5.0, "en").unwrap();
         let output = serde_json::to_value(blueprint).unwrap();
         let keys = |value: &serde_json::Value| {
             value
@@ -910,10 +956,17 @@ mod tests {
         );
         assert_eq!(
             keys(&output["evidence"]),
-            ["declared", "observed", "repeatedObservations"]
-                .into_iter()
-                .map(str::to_string)
-                .collect()
+            [
+                "declared",
+                "observed",
+                "observedDays",
+                "observedWeeklyFrequency",
+                "repeatedObservations",
+                "rulesQuality",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect()
         );
         assert_eq!(
             keys(&output["estimates"]),
@@ -937,13 +990,13 @@ mod tests {
         let intake = intake();
         let draft = ready_draft();
         assert_eq!(completeness(&draft, &intake).score, 100);
-        let values = estimates(&draft, &intake, 4);
+        let values = estimates(&draft, &intake, &evidence(4, 14.0, 0.75, 5.0));
         assert_eq!(values.weekly_baseline_minutes, 300);
         assert_eq!(values.weekly_residual_minutes, 100);
         assert_eq!(values.weekly_savings_minutes, 200);
         assert_eq!(values.effort, 44);
-        assert_eq!(operational_risk(&draft).score, 17);
-        assert_eq!(confidence(&draft, 4).score, 89);
+        assert_eq!(values.operational_risk, 17);
+        assert_eq!(values.confidence, 89);
 
         let mut proportional = ephemeral_draft(&intake);
         proportional.runs_per_week = Some(2);
@@ -959,11 +1012,11 @@ mod tests {
         two_step_intake.steps.truncate(2);
         proportional.step_boundaries.truncate(2);
         assert_eq!(completeness(&proportional, &two_step_intake).score, 90);
-        let proportional_values = estimates(&proportional, &two_step_intake, 2);
+        let proportional_values =
+            estimates(&proportional, &two_step_intake, &evidence(2, 7.0, 0.5, 2.0));
         assert_eq!(proportional_values.effort, 34);
         assert_eq!(proportional_values.operational_risk, 19);
         assert_eq!(proportional_values.confidence, 60);
-        assert_eq!(operational_risk(&proportional).score, 19);
     }
 
     #[test]
@@ -972,15 +1025,23 @@ mod tests {
         let mut draft = ready_draft();
         draft.runs_per_week = Some(1_000);
         draft.verification_minutes_per_run = Some(1_440);
+        let values = estimates(
+            &draft,
+            &intake,
+            &evidence(u32::MAX, f64::MAX, 20.0, f64::MAX),
+        );
         for value in [
             completeness(&draft, &intake).score,
-            estimates(&draft, &intake, u32::MAX).effort,
-            operational_risk(&draft).score,
-            confidence(&draft, u32::MAX).score,
+            values.effort,
+            values.operational_risk,
+            values.confidence,
         ] {
             assert!(value <= 100);
         }
-        assert_eq!(estimates(&draft, &intake, 4).weekly_savings_minutes, 0);
+        assert_eq!(
+            estimates(&draft, &intake, &evidence(4, 14.0, 1.0, 5.0)).weekly_savings_minutes,
+            0
+        );
     }
 
     #[test]
@@ -988,13 +1049,13 @@ mod tests {
         let intake = intake();
         let draft = ready_draft();
         assert_eq!(
-            assess_blueprint(draft.clone(), &intake, 4, 3, 14, "en")
+            assess_blueprint(draft.clone(), &intake, 4, 3, 14.0, 0.75, 1.5, "en")
                 .unwrap()
                 .status,
             BlueprintStatusV1::Ready
         );
         assert_eq!(
-            assess_blueprint(draft.clone(), &intake, 1, 1, 7, "en")
+            assess_blueprint(draft.clone(), &intake, 1, 1, 7.0, 1.0, 1.0, "en")
                 .unwrap()
                 .status,
             BlueprintStatusV1::Draft
@@ -1002,7 +1063,7 @@ mod tests {
         let mut changed = intake.clone();
         changed.updated_at = "2025-01-03T00:00:00Z".into();
         assert_eq!(
-            assess_blueprint(draft, &changed, 4, 3, 14, "en")
+            assess_blueprint(draft, &changed, 4, 3, 14.0, 0.75, 1.5, "en")
                 .unwrap()
                 .status,
             BlueprintStatusV1::Stale

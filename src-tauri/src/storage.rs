@@ -22,6 +22,15 @@ pub enum BlueprintStoreResult {
     Deleted,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct BlueprintObservationSummary {
+    pub total: u32,
+    pub repeated: u32,
+    pub observed_days: f64,
+    pub rules_quality: f64,
+    pub observed_weekly_frequency: f64,
+}
+
 impl LocalStore {
     pub fn open(path: &Path) -> Result<Self, String> {
         if let Some(parent) = path.parent() {
@@ -580,38 +589,68 @@ impl LocalStore {
     pub fn blueprint_observation_counts(
         &self,
         candidate_id: &str,
-    ) -> Result<(u32, u32, u16), String> {
-        let observed_days = self
-            .get_value("study_started_at")?
-            .and_then(|value| parse_utc(&value).ok())
-            .map(|started| {
-                ((chrono::Utc::now() - started).num_seconds().max(0) / 86_400 + 1).min(14) as u16
-            })
-            .unwrap_or(0);
+    ) -> Result<BlueprintObservationSummary, String> {
         let connection = self.connection()?;
         let mut statement = connection
             .prepare(
-                "SELECT activity_label, repetitive FROM checkins
+                "SELECT activity_label, repetitive, rules_clear, interval_start FROM checkins
                  WHERE status = 'answered' AND activity_label IS NOT NULL",
             )
             .map_err(|error| error.to_string())?;
         let rows = statement
             .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
             })
             .map_err(|error| error.to_string())?;
         let mut total = 0_u32;
         let mut repeated = 0_u32;
+        let mut rules_clear = 0_u32;
+        let mut first_repeated_at = None;
+        let mut last_repeated_at = None;
         for row in rows {
-            let (label, is_repetitive) = row.map_err(|error| error.to_string())?;
+            let (label, is_repetitive, has_clear_rules, interval_start) =
+                row.map_err(|error| error.to_string())?;
             if automation_candidate_id(&label) == candidate_id {
                 total = total.saturating_add(1);
                 if is_repetitive.is_some_and(|value| value != 0) {
                     repeated = repeated.saturating_add(1);
+                    if has_clear_rules.is_some_and(|value| value != 0) {
+                        rules_clear = rules_clear.saturating_add(1);
+                    }
+                    let observed_at = parse_utc(&interval_start)?;
+                    first_repeated_at = Some(
+                        first_repeated_at
+                            .map_or(observed_at, |current| std::cmp::min(current, observed_at)),
+                    );
+                    last_repeated_at = Some(
+                        last_repeated_at
+                            .map_or(observed_at, |current| std::cmp::max(current, observed_at)),
+                    );
                 }
             }
         }
-        Ok((total, repeated, observed_days))
+        let observed_days = match (first_repeated_at, last_repeated_at) {
+            (Some(first), Some(last)) => ((last - first).num_seconds() as f64 / 86_400.0).max(1.0),
+            _ => 0.0,
+        };
+        let rules_quality = if repeated == 0 {
+            0.0
+        } else {
+            f64::from(rules_clear) / f64::from(repeated)
+        };
+        let observed_weekly_frequency = f64::from(repeated) * 7.0 / observed_days.max(1.0);
+        Ok(BlueprintObservationSummary {
+            total,
+            repeated,
+            observed_days,
+            rules_quality,
+            observed_weekly_frequency,
+        })
     }
 
     pub fn delete_all(&self) -> Result<(), String> {
@@ -1044,6 +1083,49 @@ mod tests {
         };
         assert_eq!(current.revision, 2);
         assert_eq!(current.runs_per_week, Some(2));
+    }
+
+    #[test]
+    fn blueprint_evidence_aggregates_days_rule_quality_and_weekly_frequency() {
+        let store = store();
+        let candidate_id = automation_candidate_id("Reporte blueprint");
+        for (position, start, clear) in [
+            (1, "2025-01-01T10:00:00Z", true),
+            (2, "2025-01-08T10:00:00Z", false),
+        ] {
+            let start_at = parse_utc(start).unwrap();
+            let checkin = CheckInV1 {
+                id: format!("blueprint-evidence-{position}"),
+                interval_start: start.into(),
+                interval_end: (start_at + chrono::Duration::minutes(15)).to_rfc3339(),
+                reason: "ambiguous".into(),
+                status: "pending".into(),
+                activity_label: None,
+                category: None,
+                project: None,
+                repetitive: None,
+                rules_clear: None,
+                created_at: start.into(),
+                answered_at: None,
+            };
+            store.create_checkin(&checkin).unwrap();
+            store
+                .answer_checkin(&CheckInAnswer {
+                    id: checkin.id,
+                    activity_label: "Reporte blueprint".into(),
+                    category: "admin".into(),
+                    project: None,
+                    repetitive: true,
+                    rules_clear: clear,
+                })
+                .unwrap();
+        }
+        let evidence = store.blueprint_observation_counts(&candidate_id).unwrap();
+        assert_eq!(evidence.total, 2);
+        assert_eq!(evidence.repeated, 2);
+        assert_eq!(evidence.observed_days, 7.0);
+        assert_eq!(evidence.rules_quality, 0.5);
+        assert_eq!(evidence.observed_weekly_frequency, 2.0);
     }
 
     #[test]
