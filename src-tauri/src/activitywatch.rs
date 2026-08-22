@@ -1492,6 +1492,8 @@ fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
 }
 
 fn set_private_directory_permissions(path: &Path) -> Result<(), String> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1508,6 +1510,8 @@ fn set_private_directory_permissions(path: &Path) -> Result<(), String> {
 }
 
 fn set_private_file_permissions(path: &Path) -> Result<(), String> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
