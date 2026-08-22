@@ -38,7 +38,7 @@ interface SeedOverrides {
   onboardingCompleted?: boolean;
   locale?: "es-419" | "en";
   captureWindowTitles?: boolean;
-  captureIssue?: CaptureIssue;
+  captureIssue?: CaptureIssue | null;
   checkIns?: unknown[];
 }
 
@@ -120,6 +120,14 @@ test("surfaces every degraded capture state without exposing an engine dashboard
     await expect(page.getByRole("button", { name: "Volver a comprobar" })).toBeEnabled();
     await expect(page.locator("body")).not.toContainText("ActivityWatch");
   }
+
+  await page.evaluate((key) => {
+    const state = JSON.parse(localStorage.getItem(key)!);
+    localStorage.setItem(key, JSON.stringify({ ...state, captureIssue: null }));
+  }, STORAGE_KEY);
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Ensō Time no está registrando todo." })).toHaveCount(0);
+  await expect(page.locator(".content .status-pill")).toHaveText("Registrando");
 });
 
 test("pauses and resumes tracking through the web bridge", async ({ page, browserErrors: _browserErrors }) => {

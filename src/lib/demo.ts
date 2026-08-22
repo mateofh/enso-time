@@ -50,7 +50,7 @@ export const demoStatus: TrackingStatus = {
   dataStaysLocal: true,
 };
 
-export function demoTrackingStatus(captureIssue?: CaptureIssue): TrackingStatus {
+export function demoTrackingStatus(captureIssue?: CaptureIssue | null): TrackingStatus {
   return { ...demoStatus, captureIssue };
 }
 
