@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 
 const vectors = JSON.parse(readFileSync(new URL("../fixtures/automation-blueprint-vectors.json", import.meta.url), "utf8")) as {
   schemaVersion: number;
-  vectors: Array<{ name: string; expected: Record<string, number | string> }>;
+  vectors: Array<{ name: string; expected: Record<string, number | string>; checkIns?: Array<Record<string, unknown>> }>;
   edgeCases: { oversizeDraftBytes: number };
 };
 
@@ -68,6 +68,8 @@ function checkIns(count: number) {
   });
 }
 
+type CheckInSeed = ReturnType<typeof checkIns>[number];
+
 /**
  * A narrow desktop backend double. It supplies the app bootstrap commands so
  * setting __TAURI_INTERNALS__ cannot accidentally fall back to preview state,
@@ -76,6 +78,7 @@ function checkIns(count: number) {
 async function seedDesktop(page: Page, options: {
   locale?: "es-419" | "en";
   observations?: number;
+  checkIns?: CheckInSeed[];
   intakes?: typeof intake[];
   draft?: DraftSeed;
   getMode?: GetMode;
@@ -104,16 +107,24 @@ async function seedDesktop(page: Page, options: {
       frequency: selectedIntake.frequency,
       painPoints: selectedIntake.painPoints,
     };
-    const matchingCheckIns = scenario.checkIns.filter((item: { status: string; repetitive: boolean; activityLabel: string }) =>
-      item.status === "answered" && item.repetitive && item.activityLabel === selectedIntake?.candidateLabel,
+    const matchingCheckIns = scenario.checkIns.filter((item: { status: string; activityLabel: string }) =>
+      item.status === "answered" && item.activityLabel === selectedIntake?.candidateLabel,
     );
+    const repeatedCheckIns = matchingCheckIns.filter((item: { repetitive: boolean }) => item.repetitive);
+    const observedDays = new Set(matchingCheckIns.map((item: { intervalStart: string }) => item.intervalStart.slice(0, 10))).size;
+    const declaredRepeatedDays = new Set(repeatedCheckIns.map((item: { intervalStart: string }) => item.intervalStart.slice(0, 10))).size;
+    const rulesQuality = repeatedCheckIns.length ? repeatedCheckIns.filter((item: { rulesClear: boolean }) => item.rulesClear).length / repeatedCheckIns.length : 0;
     const evidence = {
-      observed: matchingCheckIns.length ? [`${matchingCheckIns.length} check-in(s) repetido(s) entre ${matchingCheckIns.length} observación(es) coincidentes durante ${new Set(matchingCheckIns.map((item: { intervalStart: string }) => item.intervalStart.slice(0, 10))).size} día(s)`] : [],
-      declared: ["Intake del workflow declarado por ti"],
-      repeatedObservations: matchingCheckIns.length,
-      observedDays: new Set(matchingCheckIns.map((item: { intervalStart: string }) => item.intervalStart.slice(0, 10))).size,
-      rulesQuality: matchingCheckIns.length ? matchingCheckIns.filter((item: { rulesClear: boolean }) => item.rulesClear).length / matchingCheckIns.length : 0,
-      observedWeeklyFrequency: matchingCheckIns.length * 7 / Math.max(1, new Set(matchingCheckIns.map((item: { intervalStart: string }) => item.intervalStart.slice(0, 10))).size),
+      observed: matchingCheckIns.map((item: { intervalStart: string; intervalEnd: string }) => `Intervalo de check-in registrado: ${item.intervalStart}–${item.intervalEnd}`),
+      declared: [
+        "Intake del workflow declarado por ti",
+        ...(repeatedCheckIns.length ? [`Frecuencia de repetición confirmada por ti: ${repeatedCheckIns.length} confirmación(es) en ${declaredRepeatedDays} día(s) UTC declarados`] : []),
+      ],
+      repeatedObservations: repeatedCheckIns.length,
+      observedDays,
+      declaredRepeatedDays,
+      rulesQuality,
+      observedWeeklyFrequency: declaredRepeatedDays ? repeatedCheckIns.length * 7 / declaredRepeatedDays : 0,
     };
     const emptyDraft = () => ({
       schemaVersion: 1,
@@ -163,7 +174,11 @@ async function seedDesktop(page: Page, options: {
         evidence,
         status,
         completeness: { score: complete ? 100 : 35, missing: complete ? [] : ["runsPerWeek", "stepBoundaries", "recoveryPlan"] },
-        estimates: { weeklyBaselineMinutes: 225, weeklyResidualMinutes: 118, weeklySavingsMinutes: 107, effort: 34, operationalRisk: 17, confidence: 60, components: { observations: evidence.repeatedObservations } },
+        estimates: (() => {
+          const frequencyAgreement = Math.max(0, 1 - Math.abs(evidence.observedWeeklyFrequency - (draft.runsPerWeek ?? 0)) / Math.max(1, draft.runsPerWeek ?? 0));
+          const confidence = Math.round(Math.min(30, 6 * evidence.repeatedObservations) + Math.round(20 * Math.min(evidence.observedDays, 14) / 14) + Math.round(20 * evidence.rulesQuality) + Math.round(10 * frequencyAgreement) + Math.round(20 * (complete ? 1 : 0.35)));
+          return { weeklyBaselineMinutes: 225, weeklyResidualMinutes: 118, weeklySavingsMinutes: 107, effort: 34, operationalRisk: 17, confidence, components: { observations: evidence.repeatedObservations, observedDays: evidence.observedDays, declaredRepeatedDays: evidence.declaredRepeatedDays, rulesQuality: evidence.rulesQuality, observedWeeklyFrequency: evidence.observedWeeklyFrequency, frequencyAgreement } };
+        })(),
         renderedMarkdown: `# Automation blueprint\n\nStatus: ${status}`,
         ...(conflict ? { conflict } : {}),
       };
@@ -180,6 +195,7 @@ async function seedDesktop(page: Page, options: {
       state,
       setGetMode(mode: GetMode) { state.getMode = mode; },
       calls(command: string) { return state.calls.filter((call) => call.command === command); },
+      blueprint() { return buildBlueprint(currentDraft!); },
     };
     (window as Window & { __blueprintE2E?: typeof testApi }).__blueprintE2E = testApi;
     (window as Window & { __TAURI_INTERNALS__?: { invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown> } }).__TAURI_INTERNALS__ = {
@@ -222,7 +238,7 @@ async function seedDesktop(page: Page, options: {
     currentRevision: options.currentRevision ?? 4,
     draft: options.draft ?? {},
     intakes: options.intakes ?? [intake],
-    checkIns: checkIns(options.observations ?? 2),
+    checkIns: options.checkIns ?? checkIns(options.observations ?? 2),
     settings: { schemaVersion: 1, onboardingCompleted: true, locale, theme: "ink", timezone: "America/Bogota", cadenceMinutes: 15, autostart: true, captureWindowTitles: true, retentionDays: 90, updateChecksEnabled: false, goals: ["Recuperar tiempo"], role: "Operaciones", workSchedule: { start: "08:30", end: "18:00", days: [1, 2, 3, 4, 5] }, appRules: [] },
   });
   await page.goto("/");
@@ -251,6 +267,10 @@ async function completeDraft(page: Page) {
 
 function invokeCalls(page: Page, command: string) {
   return page.evaluate((name) => window.__blueprintE2E?.calls(name), command);
+}
+
+function currentBlueprint(page: Page) {
+  return page.evaluate(() => window.__blueprintE2E?.blueprint());
 }
 
 test.describe("Automation Blueprint v0.2 contract", () => {
@@ -299,8 +319,37 @@ test.describe("Automation Blueprint v0.2 contract", () => {
     await expect(page.getByTestId("blueprint-status")).toContainText(/respaldado.*confirmadas|backed.*confirmed/i);
     await expect(evidence).toContainText(/intervalos.*registrados|recorded intervals/i);
     await expect(evidence).toContainText(/confirmado por ti|confirmed by you/i);
-    await expect(panel).toContainText(/intervalos\/check-ins registrados son de solo lectura|recorded intervals\/check-ins are read-only/i);
-    await expect(panel).toContainText(/actividad, repetición y reglas son confirmaciones declaradas por ti|activity, repetition, and rules are confirmations you declared/i);
+    await expect(panel).toContainText(/intervalos\/check-ins registrados son hechos de solo lectura|recorded intervals\/check-ins are read-only facts/i);
+    await expect(panel).toContainText(/etiqueta, repetición, reglas y frecuencia son confirmaciones declaradas por ti|activity label, repetition, rules, and frequency are confirmations you declared/i);
+  });
+
+  test("production evidence vector derives recorded and declared days independently", async ({ page }) => {
+    const vector = vectors.vectors.find((item) => item.name === "three recorded check-ins with two declared repetitions");
+    expect(vector?.checkIns).toHaveLength(3);
+    await seedDesktop(page, { draft: { complete: true }, checkIns: vector!.checkIns! as unknown as CheckInSeed[] });
+    await openBlueprint(page);
+
+    const blueprint = await currentBlueprint(page);
+    expect(blueprint).toMatchObject({
+      status: vector!.expected.status,
+      evidence: {
+        observedDays: vector!.expected.observedDays,
+        declaredRepeatedDays: vector!.expected.declaredRepeatedDays,
+        repeatedObservations: vector!.expected.repeatedObservations,
+        observedWeeklyFrequency: vector!.expected.observedWeeklyFrequency,
+      },
+      estimates: { confidence: vector!.expected.confidence },
+    });
+
+    const columns = page.getByTestId("blueprint-source-map").locator(".evidence-columns > div");
+    const recorded = columns.nth(0);
+    const declared = columns.nth(1);
+    await expect(page.getByTestId("blueprint-evidence-count")).toHaveText("2");
+    await expect(recorded).toContainText(/intervalo de check-in registrado/i);
+    await expect(recorded).not.toContainText(/confirmad|repetici[oó]n|reglas/i);
+    await expect(declared).toContainText(/frecuencia de repetición confirmada por ti: 2 confirmación\(es\) en 2 día\(s\) UTC declarados/i);
+    await expect(declared).not.toContainText(/intervalo de check-in registrado/i);
+    await expect(page.locator(".blueprint-estimates")).toContainText(/52\/100.*confianza/i);
   });
 
   test("mobile and keyboard users can complete boundaries with visible focus", async ({ page }) => {
@@ -425,5 +474,6 @@ test("golden vectors are available to the browser suite", async () => {
   expect(vectors.schemaVersion).toBe(1);
   expect(vectors.vectors.find((vector) => vector.name === "complete four-step workflow")?.expected).toMatchObject({ completeness: 100, weeklySavingsMinutes: 200, draftId: `blueprint-${candidateId}` });
   expect(vectors.vectors.find((vector) => vector.name === "single observation keeps a complete blueprint as draft")?.expected).toMatchObject({ completeness: 100, status: "draft" });
+  expect(vectors.vectors.find((vector) => vector.name === "three recorded check-ins with two declared repetitions")?.expected).toMatchObject({ observedDays: 3, declaredRepeatedDays: 2, repeatedObservations: 2, observedWeeklyFrequency: 7, confidence: 52 });
   expect(vectors.edgeCases.oversizeDraftBytes).toBe(40001);
 });
