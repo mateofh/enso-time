@@ -7,9 +7,11 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Existing tag to build and publish
+        description: One-time immutable tag allowed for the manual beta.2 backfill
         required: true
-        type: string
+        type: choice
+        options:
+          - v0.1.0-beta.2
 
 permissions:
   contents: read
@@ -19,8 +21,116 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  resolve:
+    name: Resolve immutable release source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+      source_commit: ${{ steps.resolve.outputs.source_commit }}
+      workflow_commit: ${{ steps.resolve.outputs.workflow_commit }}
+      workflow_ref: ${{ steps.resolve.outputs.workflow_ref }}
+
+    steps:
+      - name: Check out the workflow commit
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 1
+
+      - name: Resolve and authorize the release source
+        id: resolve
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_TAG: ${{ inputs.release_tag }}
+          TRIGGER_REF: ${{ github.ref }}
+          TRIGGER_SHA: ${{ github.sha }}
+          WORKFLOW_COMMIT: ${{ github.workflow_sha }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          BACKFILL_TAG: v0.1.0-beta.2
+          BACKFILL_SOURCE_COMMIT: fceb6c7929e0cf469de9af482c0fb21da34062d9
+        run: |
+          set -euo pipefail
+
+          case "$EVENT_NAME" in
+            push)
+              [[ "$TRIGGER_REF" == refs/tags/* ]] || {
+                echo "A release push must be triggered by a tag." >&2
+                exit 1
+              }
+              release_tag="${TRIGGER_REF#refs/tags/}"
+              ;;
+            workflow_dispatch)
+              [[ "$TRIGGER_REF" == "refs/heads/main" ]] || {
+                echo "Manual backfill must run from refs/heads/main." >&2
+                exit 1
+              }
+              [[ "$REQUESTED_TAG" == "$BACKFILL_TAG" ]] || {
+                echo "Manual dispatch is restricted to $BACKFILL_TAG." >&2
+                exit 1
+              }
+              release_tag="$BACKFILL_TAG"
+              ;;
+            *)
+              echo "Unsupported release event: $EVENT_NAME" >&2
+              exit 1
+              ;;
+          esac
+
+          [[ "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$ ]] || {
+            echo "Release tag does not match the supported beta format: $release_tag" >&2
+            exit 1
+          }
+          [[ "$WORKFLOW_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "Workflow commit is not a full Git SHA." >&2
+            exit 1
+          }
+
+          git fetch --force --no-tags origin \
+            "refs/tags/${release_tag}:refs/enso-release/source-tag"
+          source_commit="$(git rev-parse 'refs/enso-release/source-tag^{commit}')"
+          [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "Resolved source is not a full Git SHA." >&2
+            exit 1
+          }
+
+          if [[ "$EVENT_NAME" == "push" ]]; then
+            [[ "$source_commit" == "$TRIGGER_SHA" ]] || {
+              echo "The pushed tag no longer resolves to the triggering commit." >&2
+              exit 1
+            }
+          else
+            [[ "$source_commit" == "$BACKFILL_SOURCE_COMMIT" ]] || {
+              echo "The immutable beta.2 tag no longer resolves to its approved commit." >&2
+              exit 1
+            }
+          fi
+
+          {
+            echo "release_tag=$release_tag"
+            echo "source_commit=$source_commit"
+            echo "workflow_commit=$WORKFLOW_COMMIT"
+            echo "workflow_ref=$WORKFLOW_REF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check out the immutable source commit
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+          ref: ${{ steps.resolve.outputs.source_commit }}
+          fetch-depth: 1
+
+      - name: Verify immutable source checkout
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ steps.resolve.outputs.source_commit }}
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+
   build:
     name: Build ${{ matrix.label }}
+    needs: resolve
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -38,28 +148,27 @@ jobs:
             aw_target: macos-x86_64
             bundles: dmg
           - label: Windows x64
-            os: windows-2025
+            os: windows-2022
             rust_target: x86_64-pc-windows-msvc
             aw_target: windows-x86_64
             bundles: msi,nsis
     env:
-      RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+      RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
+      SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
       AW_TARGET: ${{ matrix.aw_target }}
       RUST_TARGET: ${{ matrix.rust_target }}
 
     steps:
-      - name: Check out tagged source
+      - name: Check out immutable release source
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
-          ref: refs/tags/${{ inputs.release_tag || github.ref_name }}
+          ref: ${{ needs.resolve.outputs.source_commit }}
+          fetch-depth: 1
 
-      - name: Verify the checked-out tag commit
+      - name: Verify immutable source checkout
         shell: bash
-        run: |
-          tag_ref="refs/tags/${RELEASE_TAG}"
-          git show-ref --verify --quiet "$tag_ref"
-          test "$(git rev-parse HEAD)" = "$(git rev-parse "${tag_ref}^{commit}")"
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
 
       - name: Set up Node.js
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
@@ -113,20 +222,21 @@ jobs:
       - name: Run Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked --target ${{ matrix.rust_target }} -- --test-threads=1
 
-      - name: Enable the Windows VBSCRIPT feature required by WiX
+      - name: Smoke-test Windows Script Host required by WiX
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $feature = Get-WindowsOptionalFeature -Online -FeatureName VBSCRIPT
-          if ($feature.State -ne "Enabled") {
-            $result = Enable-WindowsOptionalFeature -Online -FeatureName VBSCRIPT -All -NoRestart
-            if ($result.RestartNeeded) {
-              throw "VBSCRIPT requires a runner restart before WiX can build the MSI."
+          $ErrorActionPreference = "Stop"
+          $cscript = Get-Command cscript.exe -CommandType Application -ErrorAction Stop
+          $probe = Join-Path $env:RUNNER_TEMP "enso-wix-vbscript-smoke.vbs"
+          try {
+            [System.IO.File]::WriteAllText($probe, "WScript.Quit 0", [System.Text.Encoding]::ASCII)
+            & $cscript.Source //B //NoLogo $probe
+            if ($LASTEXITCODE -ne 0) {
+              throw "cscript.exe could not execute VBScript; WiX MSI validation is unavailable."
             }
-          }
-          $enabled = Get-WindowsOptionalFeature -Online -FeatureName VBSCRIPT
-          if ($enabled.State -ne "Enabled") {
-            throw "VBSCRIPT is not enabled; refusing to run WiX with incomplete prerequisites."
+          } finally {
+            Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
           }
 
       - name: Configure release packaging
@@ -248,7 +358,7 @@ jobs:
 
   release:
     name: Publish GitHub prerelease
-    needs: build
+    needs: [resolve, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -256,9 +366,23 @@ jobs:
       contents: write
       id-token: write
     env:
-      RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+      RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
+      SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
+      WORKFLOW_COMMIT: ${{ needs.resolve.outputs.workflow_commit }}
+      WORKFLOW_REF: ${{ needs.resolve.outputs.workflow_ref }}
 
     steps:
+      - name: Check out immutable release source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+          ref: ${{ needs.resolve.outputs.source_commit }}
+          fetch-depth: 1
+
+      - name: Verify immutable source checkout
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+
       - name: Download installers
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
@@ -278,18 +402,95 @@ jobs:
           test "$(wc -l < SHA256SUMS)" -eq 4
           test -s SHA256SUMS
 
+      - name: Generate release/source binding predicate
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          assets="$(jq -Rn '[
+            inputs
+            | capture("^(?<sha256>[0-9a-f]{64})  (?<name>.+)$")
+            | {name, sha256}
+          ]' < SHA256SUMS)"
+          jq -n \
+            --arg releaseTag "$RELEASE_TAG" \
+            --arg sourceCommit "$SOURCE_COMMIT" \
+            --arg workflowCommit "$WORKFLOW_COMMIT" \
+            --arg workflowRef "$WORKFLOW_REF" \
+            --arg eventName "$EVENT_NAME" \
+            --arg repository "$REPOSITORY" \
+            --arg runAttempt "$RUN_ATTEMPT" \
+            --arg runId "$RUN_ID" \
+            --argjson assets "$assets" \
+            '{
+              schemaVersion: 1,
+              releaseTag: $releaseTag,
+              sourceCommit: $sourceCommit,
+              workflow: {
+                commit: $workflowCommit,
+                ref: $workflowRef
+              },
+              invocation: {
+                event: $eventName,
+                repository: $repository,
+                runAttempt: $runAttempt,
+                runId: $runId
+              },
+              assets: $assets
+            }' > RELEASE_PROVENANCE.json
+          jq -e \
+            --arg releaseTag "$RELEASE_TAG" \
+            --arg sourceCommit "$SOURCE_COMMIT" \
+            --arg workflowCommit "$WORKFLOW_COMMIT" \
+            --arg workflowRef "$WORKFLOW_REF" \
+            '.schemaVersion == 1
+             and .releaseTag == $releaseTag
+             and .sourceCommit == $sourceCommit
+             and .workflow.commit == $workflowCommit
+             and .workflow.ref == $workflowRef
+             and (.assets | length == 4)
+             and all(.assets[]; (.name | test("^[A-Za-z0-9._-]+$"))
+               and (.sha256 | test("^[0-9a-f]{64}$")))' \
+            RELEASE_PROVENANCE.json > /dev/null
+
       - name: Generate GitHub build provenance
-        id: provenance
+        id: build_provenance
         uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
         with:
           subject-checksums: SHA256SUMS
 
-      - name: Stage the Sigstore attestation bundle
+      - name: Generate signed release/source binding
+        id: release_binding
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-checksums: SHA256SUMS
+          predicate-type: https://github.com/mateofh/enso-time/attestations/release/v1
+          predicate-path: RELEASE_PROVENANCE.json
+
+      - name: Stage provenance records
         shell: bash
         run: |
-          test -s "${{ steps.provenance.outputs.bundle-path }}"
-          cp "${{ steps.provenance.outputs.bundle-path }}" \
+          test -s "${{ steps.build_provenance.outputs.bundle-path }}"
+          test -s "${{ steps.release_binding.outputs.bundle-path }}"
+          cp "${{ steps.build_provenance.outputs.bundle-path }}" \
             "enso-time-${RELEASE_TAG#v}-provenance.sigstore.json"
+          cp "${{ steps.release_binding.outputs.bundle-path }}" \
+            "enso-time-${RELEASE_TAG#v}-release-binding.sigstore.json"
+          cp RELEASE_PROVENANCE.json \
+            "enso-time-${RELEASE_TAG#v}-release-provenance.json"
+
+      - name: Verify tag still points to the immutable source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --force --no-tags origin \
+            "refs/tags/${RELEASE_TAG}:refs/enso-release/publish-tag"
+          current_commit="$(git rev-parse 'refs/enso-release/publish-tag^{commit}')"
+          test "$current_commit" = "$SOURCE_COMMIT"
 
       - name: Publish installers and checksums
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
@@ -305,10 +506,16 @@ jobs:
 
             These builds do not use paid signing or notarization certificates. The macOS app is ad-hoc signed for DMG packaging and is not notarized. Windows MSI and NSIS installers are unsigned. Verify downloads against SHA256SUMS.
 
-            GitHub build provenance is available through the attestations API and the attached Sigstore bundle. Verify an installer with `gh attestation verify INSTALLER --repo ${{ github.repository }} --signer-workflow ${{ github.repository }}/.github/workflows/release.yml`. Provenance does not replace Apple Developer ID/notarization or Windows Authenticode and does not suppress Gatekeeper or SmartScreen warnings.
+            GitHub SLSA provenance is available through the attestations API and the attached standard Sigstore bundle. It identifies the release workflow invocation that collected and signed the installer hashes; it does not independently identify each matrix build job. Verify an installer with `gh attestation verify INSTALLER --repo ${{ github.repository }} --signer-workflow ${{ github.repository }}/.github/workflows/release.yml`.
+
+            A second signed custom attestation binds each installer digest to the release tag, immutable source commit, and workflow commit/ref recorded in the attached release provenance JSON. Verify it with `gh attestation verify INSTALLER --repo ${{ github.repository }} --signer-workflow ${{ github.repository }}/.github/workflows/release.yml --predicate-type https://github.com/mateofh/enso-time/attestations/release/v1 --format json`. For a manual backfill, the standard attestation identifies the hardened workflow invocation; inspect the custom predicate to confirm the separately checked-out source commit.
+
+            Attestations prove the signer workflow and artifact integrity, not that the signed predicate is independently truthful or that the software is secure. Provenance does not replace Apple Developer ID/notarization or Windows Authenticode and does not suppress Gatekeeper or SmartScreen warnings.
           files: |
             release-assets/**/*.dmg
             release-assets/**/*.msi
             release-assets/**/*.exe
             SHA256SUMS
             enso-time-*-provenance.sigstore.json
+            enso-time-*-release-binding.sigstore.json
+            enso-time-*-release-provenance.json
