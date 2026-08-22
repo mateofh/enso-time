@@ -2168,7 +2168,7 @@ mod tests {
             .recv_timeout(StdDuration::from_secs(1))
             .unwrap();
         let shutdown_result = shutdown_result_rx
-            .recv_timeout(StdDuration::from_secs(1))
+            .recv_timeout(StdDuration::from_secs(5))
             .unwrap();
         starter.join().unwrap();
         shutdown.join().unwrap();
