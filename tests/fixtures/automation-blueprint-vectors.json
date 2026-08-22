@@ -8,8 +8,8 @@
     },
     {
       "name": "complete four-step workflow",
-      "inputs": { "trigger": "Weekly sales close arrives", "inputs": "Sales CSV and targets table", "desiredOutput": "Validated report", "toolsCount": 2, "totalSteps": 4, "humanDecisions": "Exclude disputed accounts", "runsPerWeek": 5, "observedWeeklyFrequency": 5, "minutesPerRun": 60, "classifiedBoundaries": 4, "automatableSteps": 3, "humanSteps": 1, "dataSensitivity": "low", "sideEffectLevel": "reversible", "verificationMode": "every-run", "verificationMinutesPerRun": 5, "recoveryPlan": "Review the CSV and repeat validation", "observedCount": 4, "observedDays": 14, "rulesRatio": 0.75, "sourceCurrent": true },
-      "expected": { "completeness": 100, "status": "ready", "weeklyBaselineMinutes": 300, "weeklyResidualMinutes": 100, "weeklySavingsMinutes": 200, "effort": 44, "operationalRisk": 17, "confidence": 89 }
+      "inputs": { "candidateId": "candidate-d9a1c758c688afa3", "trigger": "Weekly sales close arrives", "inputs": "Sales CSV and targets table", "desiredOutput": "Validated report", "toolsCount": 2, "totalSteps": 4, "humanDecisions": "Exclude disputed accounts", "runsPerWeek": 5, "observedWeeklyFrequency": 5, "minutesPerRun": 60, "classifiedBoundaries": 4, "automatableSteps": 3, "humanSteps": 1, "dataSensitivity": "low", "sideEffectLevel": "reversible", "verificationMode": "every-run", "verificationMinutesPerRun": 5, "recoveryPlan": "Review the CSV and repeat validation", "observedCount": 4, "observedDays": 14, "rulesRatio": 0.75, "sourceCurrent": true },
+      "expected": { "draftId": "blueprint-candidate-d9a1c758c688afa3", "completeness": 100, "status": "ready", "weeklyBaselineMinutes": 300, "weeklyResidualMinutes": 100, "weeklySavingsMinutes": 200, "effort": 44, "operationalRisk": 17, "confidence": 89 }
     },
     {
       "name": "one classified step is proportional",
