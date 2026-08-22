@@ -1,6 +1,6 @@
 [package]
 name = "enso-time"
-version = "0.1.0-beta.2"
+version = "0.2.0-beta.1"
 description = "Private, local-first time diagnosis by Ensō"
 authors = ["Ensō"]
 license = "PolyForm-Noncommercial-1.0.0"

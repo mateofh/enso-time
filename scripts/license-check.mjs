@@ -13,7 +13,7 @@ const errors = [];
 const warnings = [];
 
 const expected = {
-  version: "0.1.0-beta.2",
+  version: "0.2.0-beta.1",
   licenseId: "PolyForm-Noncommercial-1.0.0",
   polyformSha256: "c72b8a4b508c2363a360d29530e17767dd0e44c513b253e6ac5ab720876cd426",
   mplSha256: "1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5",
