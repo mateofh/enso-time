@@ -42,18 +42,18 @@ pub fn run() {
             })?;
             let development_resources =
                 std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources");
-            let resource_dir = if packaged_resources.join("activitywatch").exists() {
-                packaged_resources
-            } else {
-                development_resources
-            };
+            let resource_dir = resolve_resource_dir(packaged_resources, development_resources);
             let config_dir = app.path().config_dir().map_err(|error| {
                 format!("No se pudo resolver el directorio de configuración: {error}")
+            })?;
+            let local_data_dir = app.path().local_data_dir().map_err(|error| {
+                format!("No se pudo resolver el directorio local del capturador: {error}")
             })?;
             let activity = Arc::new(ActivityWatchRuntime::start(
                 &app_data_dir.join("activitywatch"),
                 resource_dir,
                 &config_dir,
+                &local_data_dir,
             )?);
             let state = AppState {
                 store: Arc::clone(&store),
@@ -72,7 +72,11 @@ pub fn run() {
             }
             // The server starts in a dedicated thread; watchers retry briefly while
             // Rocket binds its loopback socket.
-            if settings.onboarding_completed {
+            let pause_is_active = store
+                .paused_until()?
+                .and_then(|value| models::parse_utc(&value).ok())
+                .is_some_and(|until| until > chrono::Utc::now());
+            if settings.onboarding_completed && !pause_is_active {
                 let watcher_activity = Arc::clone(&activity);
                 std::thread::Builder::new()
                     .name("enso-watcher-bootstrap".into())
@@ -120,6 +124,18 @@ pub fn run() {
             }
         }
     });
+}
+
+fn resolve_resource_dir(
+    packaged: std::path::PathBuf,
+    development: std::path::PathBuf,
+) -> std::path::PathBuf {
+    // Tauri preserves the configured `resources/` prefix in production bundles.
+    // Older layouts placed its contents directly at the resource root, so accept both.
+    [packaged.join("resources"), packaged, development.clone()]
+        .into_iter()
+        .find(|candidate| candidate.join("activitywatch").exists())
+        .unwrap_or(development)
 }
 
 fn install_tray(app: &mut tauri::App) -> tauri::Result<()> {

@@ -18,6 +18,8 @@ interface UiCopy {
     rolePlaceholder: string;
     goalLabel: string;
     goalPlaceholder: string;
+    titlesConsent: string;
+    titlesConsentHint: string;
     back: string;
     continue: string;
     finish: string;
@@ -181,7 +183,7 @@ const copy: Record<Locale, UiCopy> = {
         { label: "Una pregunta breve", title: "Completa únicamente los intervalos ambiguos.", copy: "Cada 15 minutos revisamos si la actividad quedó clara. Si lo está, no interrumpimos. Si no, puedes responder después." },
         { label: "Automatiza con evidencia", title: "Convierte patrones repetidos en una decisión.", copy: "Después de 7, 14 o 28 días recibirás un diagnóstico y un prompt listo para analizar tu primera automatización." },
       ],
-      roleLabel: "¿Cuál es tu rol?", rolePlaceholder: "Ej. Operador de negocio digital", goalLabel: "¿Qué tiempo quieres recuperar?", goalPlaceholder: "Ej. Reducir reportes manuales", back: "Atrás", continue: "Continuar", finish: "Comenzar estudio",
+      roleLabel: "¿Cuál es tu rol?", rolePlaceholder: "Ej. Operador de negocio digital", goalLabel: "¿Qué tiempo quieres recuperar?", goalPlaceholder: "Ej. Reducir reportes manuales", titlesConsent: "Guardar títulos de ventana", titlesConsentHint: "Opcional. Mejora el contexto, pero puede incluir nombres de documentos, pestañas o clientes. Todo permanece local.", back: "Atrás", continue: "Continuar", finish: "Comenzar estudio",
     },
     today: {
       dateLabel: "Resumen de hoy", title: "Así se ve tu día.", observed: (duration) => `${duration} observados · la información sigue en este equipo.`, pause: "Pausar 30 min", resume: "Reanudar", missingTitle: "Falta contexto en un intervalo", missingCopy: (start, end) => `${start}–${end} · responder toma menos de 20 segundos`, timeline: "Línea de tiempo", timelineHint: "Registro continuo", emptyTimeline: "Aún no hay actividad registrada hoy.", distribution: "En qué se fue", distributionHint: "Distribución", privateTitle: "Privado por diseño", privateCopy: "Aplicaciones y títulos de ventana permanecen locales.",
@@ -210,7 +212,7 @@ const copy: Record<Locale, UiCopy> = {
         { label: "One short question", title: "Fill in only the ambiguous intervals.", copy: "Every 15 minutes, we check whether the activity is clear. If it is, we stay quiet. If not, you can answer later." },
         { label: "Automate with evidence", title: "Turn repeated patterns into a decision.", copy: "After 7, 14, or 28 days, you'll get a diagnosis and a ready-to-use prompt for your first automation." },
       ],
-      roleLabel: "What is your role?", rolePlaceholder: "E.g. Digital operations lead", goalLabel: "What time do you want to recover?", goalPlaceholder: "E.g. Reduce manual reporting", back: "Back", continue: "Continue", finish: "Start study",
+      roleLabel: "What is your role?", rolePlaceholder: "E.g. Digital operations lead", goalLabel: "What time do you want to recover?", goalPlaceholder: "E.g. Reduce manual reporting", titlesConsent: "Save window titles", titlesConsentHint: "Optional. This improves context, but may include document, tab, or client names. Everything stays local.", back: "Back", continue: "Continue", finish: "Start study",
     },
     today: {
       dateLabel: "Today's summary", title: "This is how your day looks.", observed: (duration) => `${duration} observed · the information stays on this device.`, pause: "Pause for 30 min", resume: "Resume", missingTitle: "One interval needs context", missingCopy: (start, end) => `${start}–${end} · answering takes less than 20 seconds`, timeline: "Timeline", timelineHint: "Continuous record", emptyTimeline: "No activity has been recorded today yet.", distribution: "Where it went", distributionHint: "Distribution", privateTitle: "Private by design", privateCopy: "App names and window titles remain local.",

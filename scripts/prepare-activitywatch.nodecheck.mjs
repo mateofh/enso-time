@@ -37,10 +37,16 @@ test("parsea dry-run sin cambiar el target explícito", () => {
 });
 
 test("los artefactos fijados tienen checksums SHA-256 completos", () => {
+  const publishedChecksums = {
+    "macos-arm64": "e70639b63df662e1c72b4277e073bd80f7b94c516f12a8d01404f4aa526e8731",
+    "macos-x86_64": "eb9bf65f2a0e28489b4f89eb64159a15b82f8f07d6eb6cd3efe0dd3565e61b36",
+    "windows-x86_64": "45ce0ccc9e12ff60358878d3b8bef06da86957e53fc564ea2316cf2f190eb659",
+  };
   for (const [target, artifact] of Object.entries(TARGETS)) {
     assert.match(target, /^(macos-(arm64|x86_64)|windows-x86_64)$/);
     assert.match(artifact.sha256, /^[a-f0-9]{64}$/);
     assert.match(artifact.archive, new RegExp(ACTIVITYWATCH_VERSION.replaceAll(".", "\\.")));
+    assert.equal(artifact.sha256, publishedChecksums[target]);
   }
 });
 

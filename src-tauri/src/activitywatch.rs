@@ -2,11 +2,11 @@ use crate::models::{AppRule, CheckInV1, SettingsV1, TimelineBlockV1};
 use aw_datastore::Datastore;
 use aw_models::Event;
 use chrono::{DateTime, Duration, Utc};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, TcpListener};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 use uuid::Uuid;
@@ -17,10 +17,12 @@ const PORT_END: u16 = 5699;
 pub struct ActivityWatchRuntime {
     datastore: Datastore,
     port: AtomicU16,
+    server_ready: Arc<AtomicBool>,
     server_failed: Arc<Mutex<Option<String>>>,
     window_watcher: Mutex<Option<Child>>,
     afk_watcher: Mutex<Option<Child>>,
     resource_dir: PathBuf,
+    profile_data_dir: PathBuf,
 }
 
 impl ActivityWatchRuntime {
@@ -28,6 +30,7 @@ impl ActivityWatchRuntime {
         data_dir: &Path,
         resource_dir: PathBuf,
         profile_config_base: &Path,
+        profile_data_base: &Path,
     ) -> Result<Self, String> {
         std::fs::create_dir_all(data_dir)
             .map_err(|error| format!("No se pudo crear el almacén de actividad: {error}"))?;
@@ -53,13 +56,16 @@ impl ActivityWatchRuntime {
         write_watcher_server_config(profile_config_base, port, &api_key)?;
         let datastore = Datastore::new(database, false);
         let server_datastore = datastore.clone();
+        let server_ready = Arc::new(AtomicBool::new(false));
         let runtime = Self {
             datastore,
             port: AtomicU16::new(port),
+            server_ready: Arc::clone(&server_ready),
             server_failed: Arc::new(Mutex::new(None)),
             window_watcher: Mutex::new(None),
             afk_watcher: Mutex::new(None),
             resource_dir,
+            profile_data_dir: profile_data_base.join("activitywatch-enso-time"),
         };
         let failed = runtime.server_failed.clone();
         // Rocket owns its async runtime. It is isolated from Tauri so a local capture
@@ -67,7 +73,7 @@ impl ActivityWatchRuntime {
         std::thread::Builder::new()
             .name("enso-aw-server".into())
             .spawn(move || {
-                let result = run_server(server_datastore, port, api_key);
+                let result = run_server(server_datastore, port, api_key, server_ready);
                 if let Err(error) = result {
                     if let Ok(mut slot) = failed.lock() {
                         *slot = Some(error);
@@ -82,11 +88,9 @@ impl ActivityWatchRuntime {
         if self.server_error().is_some() {
             return None;
         }
-        let port = self.port.load(Ordering::Relaxed);
-        let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
-        TcpStream::connect_timeout(&address, StdDuration::from_millis(60))
-            .ok()
-            .map(|_| port)
+        self.server_ready
+            .load(Ordering::Acquire)
+            .then(|| self.port.load(Ordering::Relaxed))
     }
 
     pub fn server_error(&self) -> Option<String> {
@@ -97,23 +101,29 @@ impl ActivityWatchRuntime {
     }
 
     pub fn start_watchers(&self, capture_titles: bool) -> Result<(), String> {
-        let port = self.port.load(Ordering::Relaxed);
-        if self.server_error().is_some() {
-            return Err(self
-                .server_error()
-                .unwrap_or_else(|| "El servicio local falló".into()));
-        }
+        let port = self.ready_port()?;
         self.start_watcher(WatcherKind::Window, port, capture_titles)?;
-        self.start_watcher(WatcherKind::Afk, port, capture_titles)
+        if let Err(error) = self.start_watcher(WatcherKind::Afk, port, capture_titles) {
+            let _ = terminate_slot(&self.window_watcher);
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub fn restart_window_watcher(&self, capture_titles: bool) -> Result<(), String> {
+        // Never stop a healthy watcher until Rocket has confirmed that the private
+        // loopback endpoint is ours. This also closes the bind/start TOCTOU window.
+        let port = self.ready_port()?;
         terminate_slot(&self.window_watcher)?;
-        self.start_watcher(
-            WatcherKind::Window,
-            self.port.load(Ordering::Relaxed),
-            capture_titles,
-        )
+        self.start_watcher(WatcherKind::Window, port, capture_titles)
+    }
+
+    fn ready_port(&self) -> Result<u16, String> {
+        self.port_if_ready().ok_or_else(|| {
+            self.server_error().unwrap_or_else(|| {
+                "El servicio local todavía no está listo; se reintentará automáticamente".into()
+            })
+        })
     }
 
     pub fn stop_watchers(&self) -> Result<(), String> {
@@ -307,6 +317,15 @@ impl ActivityWatchRuntime {
         safe_datastore(|| self.datastore.force_commit())
     }
 
+    pub fn delete_queued_activity(&self) -> Result<(), String> {
+        let queue = self.profile_data_dir.join("aw-client").join("queued");
+        if queue.exists() {
+            std::fs::remove_dir_all(&queue)
+                .map_err(|error| format!("No se pudo borrar la cola privada: {error}"))?;
+        }
+        Ok(())
+    }
+
     pub fn prune_activity(&self, retention_days: Option<u16>) -> Result<usize, String> {
         let Some(days) = retention_days else {
             return Ok(0);
@@ -421,7 +440,12 @@ impl WatcherKind {
     }
 }
 
-fn run_server(datastore: Datastore, port: u16, api_key: String) -> Result<(), String> {
+fn run_server(
+    datastore: Datastore,
+    port: u16,
+    api_key: String,
+    ready: Arc<AtomicBool>,
+) -> Result<(), String> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -439,7 +463,14 @@ fn run_server(datastore: Datastore, port: u16, api_key: String) -> Result<(), St
             asset_resolver: aw_server::endpoints::AssetResolver::new(None),
             device_id: "enso-time-local".into(),
         };
+        let ready_fairing = rocket::fairing::AdHoc::on_liftoff("Ensō server ready", move |_| {
+            let ready = Arc::clone(&ready);
+            Box::pin(async move {
+                ready.store(true, Ordering::Release);
+            })
+        });
         aw_server::endpoints::build_rocket(state, config)
+            .attach(ready_fairing)
             .launch()
             .await
             .map(|_| ())

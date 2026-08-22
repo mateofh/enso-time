@@ -73,6 +73,7 @@ function Onboarding({ initial, onComplete }: { initial: SettingsV1; onComplete: 
   const [role, setRole] = useState(initial.role);
   const [goal, setGoal] = useState(initial.goals[0] ?? "");
   const [locale, setLocale] = useState(initial.locale);
+  const [captureTitles, setCaptureTitles] = useState(initial.captureWindowTitles);
   const [saving, setSaving] = useState(false);
   const copy = messages(locale).onboarding;
   const icons = [LockKeyhole, HelpCircle, Bot];
@@ -85,6 +86,7 @@ function Onboarding({ initial, onComplete }: { initial: SettingsV1; onComplete: 
       await onComplete({
         ...initial,
         locale,
+        captureWindowTitles: captureTitles,
         onboardingCompleted: true,
         role: role.trim(),
         goals: goal.trim() ? [goal.trim()] : initial.goals,
@@ -116,6 +118,7 @@ function Onboarding({ initial, onComplete }: { initial: SettingsV1; onComplete: 
           <div className="onboarding-fields">
             <label>{copy.roleLabel}<input value={role} onChange={(event) => setRole(event.target.value)} placeholder={copy.rolePlaceholder} autoComplete="organization-title" /></label>
             <label>{copy.goalLabel}<input value={goal} onChange={(event) => setGoal(event.target.value)} placeholder={copy.goalPlaceholder} /></label>
+            <label className="toggle-row onboarding-consent"><span><strong>{copy.titlesConsent}</strong><small>{copy.titlesConsentHint}</small></span><input type="checkbox" role="switch" checked={captureTitles} onChange={(event) => setCaptureTitles(event.target.checked)} /></label>
           </div>
         )}
         <div className="onboarding-actions">
@@ -418,7 +421,7 @@ export default function App() {
       <a className="skip-link" href="#main-content">{copy.nav.today}</a>
       <aside className="sidebar">
         <BrandMark />
-        <nav aria-label="Principal">{items.map(({ id, label, icon: Icon }) => <button type="button" key={id} className={view === id ? "active" : ""} aria-current={view === id ? "page" : undefined} title={label} onClick={() => setView(id)}><Icon size={18} aria-hidden="true" /><span>{label}</span>{id === "checkins" && status.pendingCheckIns > 0 && <b aria-label={`${status.pendingCheckIns}`}>{status.pendingCheckIns}</b>}</button>)}</nav>
+        <nav aria-label="Principal">{items.map(({ id, label, icon: Icon }) => <button type="button" key={id} className={view === id ? "active" : ""} aria-current={view === id ? "page" : undefined} aria-label={label} title={label} onClick={() => setView(id)}><Icon size={18} aria-hidden="true" /><span>{label}</span>{id === "checkins" && status.pendingCheckIns > 0 && <b aria-label={`${status.pendingCheckIns}`}>{status.pendingCheckIns}</b>}</button>)}</nav>
         <div className="sidebar-footer"><StatusPill status={status} locale={settings.locale} /><p><LockKeyhole size={13} aria-hidden="true" />{copy.common.local}</p><small>Ensō Time v0.1 beta</small></div>
       </aside>
       <main className="content" id="main-content" tabIndex={-1}>

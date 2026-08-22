@@ -59,7 +59,7 @@ impl Default for SettingsV1 {
             timezone: "America/Bogota".into(),
             cadence_minutes: 15,
             autostart: true,
-            capture_window_titles: true,
+            capture_window_titles: false,
             retention_days: Some(90),
             update_checks_enabled: false,
             goals: vec!["Recuperar tiempo para trabajo de mayor valor".into()],

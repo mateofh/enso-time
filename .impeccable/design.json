@@ -1,0 +1,88 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-21T20:15:00-05:00",
+  "title": "Design System: Ensō Time",
+  "extensions": {
+    "colorMeta": {
+      "enso-ink": { "role": "neutral", "displayName": "Ensō Ink", "canonical": "#191919", "tonalRamp": ["#191919", "#2D2D2D", "#494949", "#686868", "#898989", "#ABABAB", "#CECECE", "#F1F1F1"] },
+      "rice-paper": { "role": "neutral", "displayName": "Rice Paper", "canonical": "#EDEDED", "tonalRamp": ["#1B1B1A", "#383836", "#575754", "#777773", "#999994", "#BBBAB5", "#DDDCD7", "#FAF9F5"] },
+      "signal-blue": { "role": "primary", "displayName": "Signal Blue", "canonical": "#1F8BFF", "tonalRamp": ["#051C35", "#073866", "#0B5597", "#1072C8", "#1F8BFF", "#5AA9FF", "#96C8FF", "#D6E9FF"] },
+      "working-cyan": { "role": "secondary", "displayName": "Working Cyan", "canonical": "#5CD5E8", "tonalRamp": ["#0D292D", "#15515A", "#217A86", "#35A3B4", "#5CD5E8", "#8CE1ED", "#BAECF3", "#E8F8FA"] },
+      "evidence-yellow": { "role": "tertiary", "displayName": "Evidence Yellow", "canonical": "#F8E578", "tonalRamp": ["#302B0D", "#60561B", "#908229", "#C0AE3D", "#F8E578", "#FAEC98", "#FCF3BD", "#FEFBE8"] },
+      "action-orange": { "role": "tertiary", "displayName": "Action Orange", "canonical": "#FF5B2E", "tonalRamp": ["#351006", "#6A1F0C", "#9F3014", "#D54320", "#FF5B2E", "#FF896D", "#FFB6A5", "#FFE4DB"] },
+      "rest-sage": { "role": "secondary", "displayName": "Rest Sage", "canonical": "#8BBFB8", "tonalRamp": ["#172724", "#2D4C48", "#46716C", "#639790", "#8BBFB8", "#ADD1CC", "#CDE3E0", "#EDF6F4"] }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Display", "purpose": "Page statements and onboarding." },
+      "title": { "displayName": "Title", "purpose": "Evidence section headings." },
+      "body": { "displayName": "Body", "purpose": "Operational and multilingual interface copy." },
+      "label": { "displayName": "Label", "purpose": "Short uppercase context markers." }
+    },
+    "shadows": [
+      { "name": "transient-lift", "value": "0 18px 48px rgba(0,0,0,0.22)", "purpose": "Toasts and exceptional transient overlays only." }
+    ],
+    "motion": [
+      { "name": "state-fast", "value": "160ms ease", "purpose": "Hover, toggle, and navigation state feedback." },
+      { "name": "progress", "value": "400ms ease", "purpose": "Progress-ring changes; disabled for reduced motion." }
+    ],
+    "breakpoints": [
+      { "name": "compact-rail", "value": "880px" },
+      { "name": "mobile-nav", "value": "620px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The single strongest action in the current task.",
+      "html": "<button class=\"ds-btn-primary\">Guardar contexto</button>",
+      "css": ".ds-btn-primary{height:40px;padding:0 15px;border:1px solid #1F8BFF;border-radius:7px;background:#1F8BFF;color:#fff;font:600 13px Inter,system-ui,sans-serif;cursor:pointer}.ds-btn-primary:hover{filter:brightness(1.08)}.ds-btn-primary:focus-visible{outline:2px solid #1F8BFF;outline-offset:3px}"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "A reversible supporting action.",
+      "html": "<button class=\"ds-btn-secondary\">Pausar 30 min</button>",
+      "css": ".ds-btn-secondary{height:40px;padding:0 15px;border:1px solid #3A3A3A;border-radius:7px;background:#242424;color:#EDEDED;font:600 13px Inter,system-ui,sans-serif;cursor:pointer}.ds-btn-secondary:hover{border-color:#505050;background:#2D2D2D}.ds-btn-secondary:focus-visible{outline:2px solid #1F8BFF;outline-offset:3px}"
+    },
+    {
+      "name": "Text Field",
+      "kind": "input",
+      "refersTo": "field",
+      "description": "Compact context input with explicit focus.",
+      "html": "<input class=\"ds-field\" placeholder=\"Ej. Actualizar el reporte semanal\">",
+      "css": ".ds-field{width:100%;height:43px;padding:0 12px;border:1px solid #3A3A3A;border-radius:6px;background:#242424;color:#EDEDED;font:400 14px Inter,system-ui,sans-serif}.ds-field:hover{border-color:#505050}.ds-field:focus-visible{outline:2px solid #1F8BFF;outline-offset:3px}.ds-field::placeholder{color:#777773}"
+    },
+    {
+      "name": "Active Navigation Item",
+      "kind": "nav",
+      "refersTo": "navigation-active",
+      "description": "Tonal active state without a decorative stripe.",
+      "html": "<button class=\"ds-nav-active\">Hoy</button>",
+      "css": ".ds-nav-active{height:42px;padding:0 11px;border:0;border-radius:7px;background:#2D2D2D;color:#EDEDED;font:400 14px Inter,system-ui,sans-serif;text-align:left}.ds-nav-active:hover{background:#353535}.ds-nav-active:focus-visible{outline:2px solid #1F8BFF;outline-offset:3px}"
+    },
+    {
+      "name": "Local Privacy Note",
+      "kind": "custom",
+      "refersTo": "privacy-note",
+      "description": "A quiet proof of the local-only boundary.",
+      "html": "<div class=\"ds-privacy\"><strong>Privado por diseño</strong><span>Aplicaciones y títulos permanecen locales.</span></div>",
+      "css": ".ds-privacy{padding-top:20px;border-top:1px solid #3A3A3A;color:#AAA9A6;font:400 11px/1.45 Inter,system-ui,sans-serif;display:grid;gap:4px}.ds-privacy strong{color:#EDEDED;font-size:12px}.ds-privacy:focus-within{outline:2px solid #1F8BFF;outline-offset:3px}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Quiet Instrument",
+    "overview": "Ensō Time should feel like a precise instrument left open beside the work: observant, legible, and calm enough to disappear until a decision is needed. The composition is flat and editorial, with measured dividers and a single blue signal instead of decorative effects. Ink and rice-paper themes are equal expressions of the same system.",
+    "keyCharacteristics": ["Quietly technical, with generous page margins and compact controls.", "Evidence-first hierarchy built from timelines, rules, and thin dividers.", "Restrained color where every accent has semantic meaning.", "Rounded enough to be usable, never soft or toy-like."],
+    "rules": [
+      { "name": "The One Signal Rule", "body": "Signal Blue should occupy less than roughly ten percent of a screen; its rarity communicates action and live state.", "section": "colors" },
+      { "name": "The Semantic Accent Rule", "body": "Cyan, yellow, orange, and sage identify categories or state. They do not decorate containers.", "section": "colors" },
+      { "name": "The Statement, Then Evidence Rule", "body": "A Jost statement names the conclusion; compact Inter content immediately shows the evidence behind it.", "section": "typography" },
+      { "name": "The Flat-at-Rest Rule", "body": "Permanent content uses borders and tonal surfaces. A shadow must represent temporary elevation or interaction.", "section": "elevation" }
+    ],
+    "dos": ["Do use #1F8BFF for one primary action or live signal at a time.", "Do preserve one-pixel dividers, 6–9px radii, and compact 40–43px controls.", "Do pair every recommendation with visible local evidence.", "Do keep both Ink and Rice Paper themes WCAG 2.2 AA and preserve meaning without color."],
+    "donts": ["Don't build generic AI productivity dashboards filled with gradients, glowing cards, and inflated scores.", "Don't imitate surveillance software that hides what it records or makes users feel watched.", "Don't use gamified habit trackers with streak anxiety, guilt, trophies, or celebratory noise.", "Don't turn screens into dense enterprise analytics that require configuration before they become useful.", "Don't reproduce ActivityWatch's full technical dashboard as the primary user experience.", "Don't use colored side stripes, glassmorphism, gradient text, giant pill controls, or grids of identical rounded cards."]
+  }
+}

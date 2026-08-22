@@ -27,7 +27,7 @@ const RELEASE_BASE = `https://github.com/ActivityWatch/activitywatch/releases/do
 export const TARGETS = Object.freeze({
   "macos-arm64": {
     archive: `activitywatch-${ACTIVITYWATCH_VERSION}-macos-arm64.zip`,
-    sha256: "70a7ba7e307abe3352b912411f09600075f427b5b5d139a238c051f813e96264",
+    sha256: "e70639b63df662e1c72b4277e073bd80f7b94c516f12a8d01404f4aa526e8731",
     executableSuffix: "",
   },
   "macos-x86_64": {

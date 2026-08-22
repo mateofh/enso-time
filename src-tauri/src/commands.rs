@@ -201,8 +201,10 @@ pub fn export_data(state: State<'_, AppState>, format: String) -> Result<String,
     }
     let settings = state.store.settings()?;
     let now = Utc::now();
-    let range_days = settings.retention_days.unwrap_or(365).min(365);
-    let start = now - Duration::days(i64::from(range_days));
+    let start = settings
+        .retention_days
+        .map(|days| now - Duration::days(i64::from(days)))
+        .unwrap_or(chrono::DateTime::<Utc>::UNIX_EPOCH);
     let checkins = state
         .store
         .checkins_between(&start.to_rfc3339(), &now.to_rfc3339())?;
@@ -241,6 +243,13 @@ pub fn delete_all_data(state: State<'_, AppState>, confirmation: String) -> Resu
         return Err("La confirmación de borrado no coincide".into());
     }
     state.activity.stop_watchers()?;
+    if let Err(error) = state.activity.delete_queued_activity() {
+        let settings = state.store.settings()?;
+        let _ = state
+            .activity
+            .start_watchers(settings.capture_window_titles);
+        return Err(error);
+    }
     if let Err(error) = state.activity.delete_all_activity() {
         let settings = state.store.settings()?;
         let _ = state
@@ -320,18 +329,22 @@ fn scheduler_tick(
     store: &LocalStore,
     activity: &ActivityWatchRuntime,
 ) -> Result<(), String> {
-    if !is_running(store)? {
-        return Ok(());
-    }
     let settings = store.settings()?;
-    if !inside_work_schedule(&settings, Utc::now()) {
-        return Ok(());
-    }
     let today = Utc::now().date_naive().to_string();
     if store.get_value("last_retention_prune")?.as_deref() != Some(&today) {
         store.prune_checkins(settings.retention_days)?;
         activity.prune_activity(settings.retention_days)?;
         store.set_value("last_retention_prune", &today)?;
+    }
+    if !is_running(store)? {
+        return Ok(());
+    }
+    let (window_status, afk_status) = activity.watcher_statuses();
+    if window_status != "running" || afk_status != "running" {
+        activity.start_watchers(settings.capture_window_titles)?;
+    }
+    if !inside_work_schedule(&settings, Utc::now()) {
+        return Ok(());
     }
     let (start, end) = completed_interval(Utc::now(), settings.cadence_minutes);
     let Some(reason) = activity.interval_reason(start, end, &settings)? else {
@@ -481,10 +494,15 @@ fn timeline_csv(blocks: &[TimelineBlockV1]) -> String {
 }
 
 fn csv_escape(value: &str) -> String {
-    if value.contains([',', '"', '\n', '\r']) {
-        format!("\"{}\"", value.replace('"', "\"\""))
+    let safe_value = if value.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+        format!("'{value}")
     } else {
         value.to_string()
+    };
+    if safe_value.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", safe_value.replace('"', "\"\""))
+    } else {
+        safe_value
     }
 }
 
@@ -501,5 +519,14 @@ mod tests {
     #[test]
     fn csv_quotes_sensitive_fields() {
         assert_eq!(csv_escape("Focus, \"deep\""), "\"Focus, \"\"deep\"\"\"");
+    }
+
+    #[test]
+    fn csv_neutralizes_spreadsheet_formulas() {
+        assert_eq!(
+            csv_escape("=HYPERLINK(\"https://evil.test\")"),
+            "\"'=HYPERLINK(\"\"https://evil.test\"\")\""
+        );
+        assert_eq!(csv_escape("+1+1"), "'+1+1");
     }
 }
