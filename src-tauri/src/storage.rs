@@ -23,7 +23,8 @@ impl LocalStore {
         }
         connection
             .execute_batch(
-                "PRAGMA journal_mode=WAL;
+                "PRAGMA secure_delete=ON;
+                 PRAGMA journal_mode=WAL;
                  PRAGMA foreign_keys=ON;
                  CREATE TABLE IF NOT EXISTS app_state (
                    key TEXT PRIMARY KEY,
@@ -263,7 +264,15 @@ impl LocalStore {
         }
         self.save_settings(&SettingsV1::default())?;
         self.set_value("study_started_at", &iso_now())?;
-        self.set_value("selected_days", "7")
+        self.set_value("selected_days", "7")?;
+        self.connection()?
+            .execute_batch(
+                "PRAGMA wal_checkpoint(TRUNCATE);
+                 VACUUM;
+                 PRAGMA wal_checkpoint(TRUNCATE);
+                 PRAGMA journal_mode=DELETE;",
+            )
+            .map_err(|error| format!("Los datos se borraron, pero la compactación falló: {error}"))
     }
 }
 
@@ -285,6 +294,27 @@ mod tests {
         let mut settings = store.settings().unwrap();
         settings.cadence_minutes = 12;
         assert!(store.save_settings(&settings).is_err());
+    }
+
+    #[test]
+    fn secure_delete_is_enabled_for_local_records() {
+        let store = store();
+        let enabled: i64 = store
+            .connection()
+            .unwrap()
+            .query_row("PRAGMA secure_delete", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(enabled, 1);
+    }
+
+    #[test]
+    fn delete_all_compacts_and_removes_local_wal_sidecars() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("enso-time.sqlite");
+        let store = LocalStore::open(&path).unwrap();
+        store.delete_all().unwrap();
+        assert!(!path.with_file_name("enso-time.sqlite-wal").exists());
+        assert!(!path.with_file_name("enso-time.sqlite-shm").exists());
     }
 
     #[test]
