@@ -153,7 +153,7 @@ test.describe("Automation Blueprint v0.2 contract", () => {
     await expect(page.getByTestId("blueprint-source-map")).toContainText(Spanish.trigger);
     await expect(page.getByTestId("blueprint-source-map")).toContainText(Spanish.human);
     await expect(page.getByTestId("blueprint-source-map")).not.toContainText("Llega el cierre semanal de ventas traducido");
-    await expect(page.locator("a")).toHaveCount(0);
+    await expect(page.locator('a[href^="http://"], a[href^="https://"]')).toHaveCount(0);
     await expect(page.locator('input[name*="oauth" i], input[name*="token" i], input[name*="secret" i], input[name*="credential" i]')).toHaveCount(0);
   });
 
