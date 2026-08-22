@@ -17,6 +17,11 @@
       "expected": { "completeness": 90, "status": "draft", "weeklyBaselineMinutes": 60, "weeklyResidualMinutes": 30, "weeklySavingsMinutes": 30, "effort": 34, "operationalRisk": 19, "confidence": 60 }
     },
     {
+      "name": "single observation keeps a complete blueprint as draft",
+      "inputs": { "trigger": "Weekly sales close arrives", "inputs": "Sales CSV and targets table", "desiredOutput": "Validated report", "toolsCount": 2, "totalSteps": 2, "humanDecisions": "Exclude disputed accounts", "runsPerWeek": 5, "minutesPerRun": 45, "classifiedBoundaries": 2, "automatableSteps": 1, "dataSensitivity": "low", "sideEffectLevel": "reversible", "verificationMode": "every-run", "verificationMinutesPerRun": 5, "recoveryPlan": "Review the CSV and repeat validation", "observedCount": 1, "sourceCurrent": true },
+      "expected": { "completeness": 100, "status": "draft" }
+    },
+    {
       "name": "verification can exceed manual residual without negative savings",
       "inputs": { "runsPerWeek": 1, "minutesPerRun": 10, "totalSteps": 1, "automatableSteps": 1, "humanSteps": 0, "verificationMode": "every-run", "verificationMinutesPerRun": 20 },
       "expected": { "weeklyBaselineMinutes": 10, "weeklyResidualMinutes": 20, "weeklySavingsMinutes": 0 }
