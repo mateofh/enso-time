@@ -162,10 +162,15 @@ export const bridge = {
     const base = emptyBlueprintDraft(intake);
     const draft: AutomationBlueprintDraftV1 = raw ? { ...base, ...raw, candidateId, workflowIntakeId: raw.workflowIntakeId ?? intake.id, sourceIntakeUpdatedAt: raw.sourceIntakeUpdatedAt ?? intake.updatedAt, revision: raw.revision ?? 0, stepBoundaries: raw.stepBoundaries ?? base.stepBoundaries } : base;
     const matchingCheckIns = state.checkIns.filter((item) => item.status === "answered" && item.repetitive && item.activityLabel === intake.candidateLabel);
+    const observedDays = new Set(matchingCheckIns.map((item) => item.intervalStart.slice(0, 10))).size;
+    const rulesQuality = matchingCheckIns.length ? matchingCheckIns.filter((item) => item.rulesClear).length / matchingCheckIns.length : 0;
     const evidence = {
       observed: matchingCheckIns.map((item) => item.answeredAt ? `Check-in ${item.answeredAt}` : "Answered check-in"),
       declared: ["Workflow intake supplied by you"],
       repeatedObservations: matchingCheckIns.length,
+      observedDays,
+      rulesQuality,
+      observedWeeklyFrequency: observedDays ? matchingCheckIns.length * 7 / observedDays : 0,
     };
     return { ...buildPreviewBlueprint(intake, draft, evidence), conflict: state.automationBlueprintConflict ?? undefined };
   },
@@ -244,7 +249,7 @@ export const bridge = {
   },
 
   async checkForUpdate(): Promise<UpdateInfo> {
-    return isTauri() ? invoke("check_for_update") : { available: false, currentVersion: "0.1.0-beta.2" };
+    return isTauri() ? invoke("check_for_update") : { available: false, currentVersion: "0.2.0-beta.1" };
   },
 
   async openExternal(url: string): Promise<void> {
