@@ -14,6 +14,7 @@ import {
   Gauge,
   HelpCircle,
   Languages,
+  ListChecks,
   LockKeyhole,
   Pause,
   Play,
@@ -31,19 +32,32 @@ import { categoryLabel, formatDuration, formatTime, messages } from "./lib/i18n"
 import type {
   AutomationCandidateV1,
   CategoryId,
+  ClassificationRuleV1,
   CheckInAnswer,
   CheckInV1,
   CaptureIssue,
   DiagnosticV1,
   Locale,
+  RuleImpactV1,
+  ReviewGroupV1,
+  ReviewOperationV1,
+  SessionClassificationInputV1,
+  SessionClassificationResultV1,
   SettingsV1,
   StudyProgress,
   TimelineBlockV1,
   TrackingStatus,
   WorkflowIntakeV1,
+  AiConfigurationStatusV1,
+  ConnectorClientV1,
+  ConnectorPairingV1,
+  EvaluationPayloadPreviewV1,
+  EvaluationReportV1,
+  OpenRouterModelV1,
+  ScreenOcrStatusV1,
 } from "./lib/types";
 
-type View = "today" | "checkins" | "study" | "automate" | "workflow" | "blueprint" | "settings";
+type View = "today" | "review" | "checkins" | "study" | "automate" | "workflow" | "blueprint" | "settings";
 type Notice = { kind: "success" | "error"; message: string };
 
 const EMPTY_STATUS: TrackingStatus = {
@@ -52,6 +66,8 @@ const EMPTY_STATUS: TrackingStatus = {
   afkWatcher: "stopped",
   pendingCheckIns: 0,
   dataStaysLocal: true,
+  processingMode: "local-only",
+  experimentalIntelligence: false,
 };
 
 function BrandMark({ compact = false }: { compact?: boolean }) {
@@ -74,13 +90,19 @@ function StatusPill({ status, locale }: { status: TrackingStatus; locale: Locale
   );
 }
 
-function CaptureIssueBanner({ issue, locale, onRetry }: { issue: CaptureIssue; locale: Locale; onRetry: () => Promise<void> }) {
+function CaptureIssueBanner({ issue, locale, onRetry, onRequestAccessibility }: { issue: CaptureIssue; locale: Locale; onRetry: () => Promise<void>; onRequestAccessibility: () => Promise<void> }) {
   const copy = messages(locale).captureIssue;
   const [checking, setChecking] = useState(false);
+  const [opening, setOpening] = useState(false);
 
   async function retry() {
     setChecking(true);
     try { await onRetry(); } finally { setChecking(false); }
+  }
+
+  async function requestAccessibility() {
+    setOpening(true);
+    try { await onRequestAccessibility(); } finally { setOpening(false); }
   }
 
   return (
@@ -91,9 +113,12 @@ function CaptureIssueBanner({ issue, locale, onRetry }: { issue: CaptureIssue; l
         <h2 id="capture-issue-title">{copy.title}</h2>
         <span>{copy.details[issue]}</span>
       </div>
-      <button type="button" className="secondary-button" disabled={checking} onClick={() => void retry()}>
-        <RefreshCw size={15} className={checking ? "is-spinning" : ""} aria-hidden="true" />{copy.retry}
-      </button>
+      <div className="capture-issue-actions">
+        {issue === "accessibility-permission-required" && <button type="button" className="secondary-button" disabled={opening || checking} onClick={() => void requestAccessibility()}><SettingsIcon size={15} aria-hidden="true" />{copy.accessibilityAction}</button>}
+        <button type="button" className="secondary-button" disabled={checking || opening} onClick={() => void retry()}>
+          <RefreshCw size={15} className={checking ? "is-spinning" : ""} aria-hidden="true" />{copy.retry}
+        </button>
+      </div>
     </section>
   );
 }
@@ -167,9 +192,76 @@ function Onboarding({ initial, onComplete }: { initial: SettingsV1; onComplete: 
   );
 }
 
-function Timeline({ blocks, locale }: { blocks: TimelineBlockV1[]; locale: Locale }) {
+const RULE_CATEGORIES = CATEGORY_ORDER.filter((category) => !["unknown", "break"].includes(category));
+const SESSION_CATEGORIES = CATEGORY_ORDER.filter((category) => category !== "unknown");
+
+function Timeline({ blocks, locale, onClassify, onClear, onSaveRule, onPreviewRule }: {
+  blocks: TimelineBlockV1[];
+  locale: Locale;
+  onClassify: (input: SessionClassificationInputV1) => Promise<SessionClassificationResultV1>;
+  onClear: (blockId: string) => Promise<void>;
+  onSaveRule: (rule: ClassificationRuleV1) => Promise<void>;
+  onPreviewRule: (rule: ClassificationRuleV1) => Promise<RuleImpactV1>;
+}) {
   const copy = messages(locale).today;
+  const classificationCopy = messages(locale).classification;
+  const [editing, setEditing] = useState<string>();
+  const [category, setCategory] = useState<CategoryId>("admin");
+  const [activityLabel, setActivityLabel] = useState("");
+  const [suggestion, setSuggestion] = useState<SessionClassificationResultV1["suggestion"]>();
+  const [ruleDraft, setRuleDraft] = useState<ClassificationRuleV1>();
+  const [impact, setImpact] = useState<RuleImpactV1>();
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string>();
   if (blocks.length === 0) return <p className="inline-empty">{copy.emptyTimeline}</p>;
+
+  function openEditor(block: TimelineBlockV1) {
+    setEditing(block.id);
+    setCategory(block.category === "unknown" || block.category === "break" ? "admin" : block.category);
+    setActivityLabel(block.activityLabel ?? "");
+    setSuggestion(undefined);
+    setRuleDraft(undefined);
+    setImpact(undefined);
+    setError(undefined);
+  }
+
+  async function saveSession(event: FormEvent) {
+    event.preventDefault();
+    if (!editing) return;
+    setSaving(true); setError(undefined);
+    try {
+      const result = await onClassify({ blockId: editing, category, activityLabel: activityLabel.trim() || undefined });
+      setSuggestion(result.suggestion);
+      setRuleDraft(result.suggestion?.rule);
+      setImpact(result.suggestion?.impact);
+      if (!result.suggestion) setEditing(undefined);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : messages(locale).common.unexpectedError);
+    } finally { setSaving(false); }
+  }
+
+  async function refreshImpact() {
+    if (!ruleDraft) return;
+    try { setImpact(await onPreviewRule(ruleDraft)); } catch { /* Save will surface validation errors. */ }
+  }
+
+  async function createRule() {
+    if (!ruleDraft) return;
+    setSaving(true); setError(undefined);
+    try {
+      await onSaveRule(ruleDraft);
+      setEditing(undefined); setSuggestion(undefined); setRuleDraft(undefined);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : messages(locale).common.unexpectedError);
+    } finally { setSaving(false); }
+  }
+
+  async function restoreSession(blockId: string) {
+    setSaving(true); setError(undefined);
+    try { await onClear(blockId); setEditing(undefined); }
+    catch (caught) { setError(caught instanceof Error ? caught.message : messages(locale).common.unexpectedError); }
+    finally { setSaving(false); }
+  }
 
   return (
     <div className="timeline" aria-label={copy.timeline}>
@@ -179,16 +271,133 @@ function Timeline({ blocks, locale }: { blocks: TimelineBlockV1[]; locale: Local
           <span className="timeline-rail" style={{ "--category-color": categoryColor(block.category) } as CSSProperties} aria-hidden="true" />
           <div className="timeline-copy">
             <div><strong>{block.app}</strong><span>{formatDuration(block.durationSeconds, locale)}</span></div>
-            <p title={block.title}>{block.title || categoryLabel(locale, block.category)}</p>
+            <p title={block.title}>{block.activityLabel || block.title || categoryLabel(locale, block.category)}</p>
           </div>
-          <span className="category-tag"><i style={{ background: categoryColor(block.category) }} aria-hidden="true" />{categoryLabel(locale, block.category)}</span>
+          {block.correctable !== false ? <button type="button" className="category-tag category-button" aria-label={`${classificationCopy.edit}: ${categoryLabel(locale, block.category)}`} onClick={() => openEditor(block)}><i style={{ background: categoryColor(block.category) }} aria-hidden="true" />{categoryLabel(locale, block.category)}</button> : <span className="category-tag"><i style={{ background: categoryColor(block.category) }} aria-hidden="true" />{categoryLabel(locale, block.category)}</span>}
+          {editing === block.id && (
+            <form className="classification-editor" onSubmit={(event) => void saveSession(event)}>
+              {!suggestion ? <>
+                <div><strong>{classificationCopy.editorTitle}</strong><small>{block.app}{block.title ? ` · ${block.title}` : ""}</small></div>
+                <div className="classification-fields">
+                  <label>{classificationCopy.category}<select value={category} onChange={(event) => setCategory(event.target.value as CategoryId)}>{SESSION_CATEGORIES.map((item) => <option key={item} value={item}>{categoryLabel(locale, item)}</option>)}</select></label>
+                  <label>{classificationCopy.activityLabel}<input value={activityLabel} maxLength={200} onChange={(event) => setActivityLabel(event.target.value)} placeholder={classificationCopy.activityPlaceholder} /></label>
+                </div>
+                {error && <p className="form-error" role="alert">{error}</p>}
+                <div className="button-row"><button type="submit" className="primary-button" disabled={saving}><Check size={16} />{classificationCopy.saveSession}</button>{block.classificationSource === "override" && <button type="button" className="text-button" disabled={saving} onClick={() => void restoreSession(block.id)}><RefreshCw size={15} />{classificationCopy.restore}</button>}<button type="button" className="text-button" onClick={() => setEditing(undefined)}>{classificationCopy.cancel}</button></div>
+              </> : ruleDraft && <>
+                <div><strong>{classificationCopy.suggestionTitle}</strong><small>{classificationCopy.suggestionCopy}</small></div>
+                <div className="classification-fields">
+                  <label>{classificationCopy.scope}<select value={ruleDraft.scope} onChange={(event) => setRuleDraft({ ...ruleDraft, scope: event.target.value as "app" | "app-title", titlePattern: event.target.value === "app" ? undefined : ruleDraft.titlePattern ?? block.title ?? "" })}><option value="app">{classificationCopy.appScope}</option><option value="app-title">{classificationCopy.titleScope}</option></select></label>
+                  {ruleDraft.scope === "app-title" && <label>{classificationCopy.pattern}<input value={ruleDraft.titlePattern ?? ""} maxLength={256} onChange={(event) => setRuleDraft({ ...ruleDraft, titlePattern: event.target.value })} onBlur={() => void refreshImpact()} /></label>}
+                </div>
+                {ruleDraft.scope === "app" && /chrome|safari|firefox|edge|arc|brave|orion/i.test(block.app) && <p className="review-warning"><AlertCircle size={15} aria-hidden="true" />{messages(locale).review.fallbackWarning}</p>}
+                {impact && <p className="rule-impact">{classificationCopy.impact(impact.sessions, formatDuration(impact.durationSeconds, locale))}</p>}
+                {error && <p className="form-error" role="alert">{error}</p>}
+                <div className="button-row"><button type="button" className="primary-button" disabled={saving || (ruleDraft.scope === "app-title" && !ruleDraft.titlePattern?.trim())} onClick={() => void createRule()}><Check size={16} />{classificationCopy.createRule}</button><button type="button" className="text-button" onClick={() => setEditing(undefined)}>{classificationCopy.skipRule}</button></div>
+              </>}
+            </form>
+          )}
         </article>
       ))}
     </div>
   );
 }
 
-function TodayView({ settings, status, blocks, checkIns, onNavigate, onPause, onResume }: {
+function reviewRange(value: "1" | "7" | "30" | "all", retentionDays: SettingsV1["retentionDays"]) {
+  const to = new Date();
+  const from = new Date(to);
+  if (value === "1") from.setHours(0, 0, 0, 0);
+  else from.setDate(from.getDate() - (value === "all" ? (retentionDays ?? 366) : Number(value)));
+  return { from: from.toISOString(), to: to.toISOString() };
+}
+
+function ReviewGroupCard({ group, locale, range, onApplied }: {
+  group: ReviewGroupV1;
+  locale: Locale;
+  range: { from: string; to: string };
+  onApplied: (operation: ReviewOperationV1) => void;
+}) {
+  const copy = messages(locale).review;
+  const [category, setCategory] = useState<CategoryId>("admin");
+  const [activityLabel, setActivityLabel] = useState("");
+  const [mode, setMode] = useState<"sessions" | "rule">("sessions");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  const categories = mode === "rule" ? RULE_CATEGORIES : SESSION_CATEGORIES;
+
+  async function apply() {
+    if (mode === "rule" && group.browserFallback && !window.confirm(copy.fallbackWarning)) return;
+    setBusy(true); setError(undefined);
+    try {
+      const operation = await bridge.applyReviewGroup({
+        ...range, app: group.app, titlePattern: group.titlePattern, category,
+        activityLabel: activityLabel.trim() || undefined, mode,
+      });
+      onApplied(operation);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : messages(locale).common.unexpectedError);
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <article className="review-card">
+      <div className="review-card-heading">
+        <div><h2>{group.app}</h2><p>{group.titlePattern || group.sampleTitle || copy.noTitle}</p></div>
+        <strong>{formatDuration(group.durationSeconds, locale)}</strong>
+      </div>
+      <div className="review-meta"><span>{copy.sessions(group.sessions)}</span><span>{copy.period(formatTime(group.firstSeen, locale), formatTime(group.lastSeen, locale))}</span></div>
+      {group.browserFallback && <p className="review-warning"><AlertCircle size={15} aria-hidden="true" />{copy.fallbackWarning.replace(" ¿Quieres continuar?", "").replace(" Continue?", "")}</p>}
+      <div className="review-fields">
+        <label>{copy.category}<select value={category} onChange={(event) => setCategory(event.target.value as CategoryId)}>{categories.map((item) => <option key={item} value={item}>{categoryLabel(locale, item)}</option>)}</select></label>
+        <label>{copy.activity}<input value={activityLabel} maxLength={200} placeholder={copy.activityPlaceholder} onChange={(event) => setActivityLabel(event.target.value)} /></label>
+        <label>{copy.apply}<select value={mode} onChange={(event) => { const next = event.target.value as "sessions" | "rule"; setMode(next); if (next === "rule" && category === "break") setCategory("admin"); }}><option value="sessions">{copy.sessionsOnly}</option><option value="rule">{copy.createRule}</option></select></label>
+      </div>
+      {error && <p className="form-error" role="alert">{error}</p>}
+      <div className="button-row"><button type="button" className="primary-button" disabled={busy} onClick={() => void apply()}><Check size={15} />{copy.apply}</button></div>
+    </article>
+  );
+}
+
+function ReviewView({ settings, onChanged }: { settings: SettingsV1; onChanged: () => Promise<void> }) {
+  const copy = messages(settings.locale).review;
+  const [period, setPeriod] = useState<"1" | "7" | "30" | "all">("7");
+  const [groups, setGroups] = useState<ReviewGroupV1[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string>();
+  const [lastOperation, setLastOperation] = useState<ReviewOperationV1>();
+  const range = useMemo(() => reviewRange(period, settings.retentionDays), [period, settings.retentionDays]);
+
+  async function refresh() {
+    setLoading(true); setError(undefined);
+    try { setGroups(await bridge.listReviewGroups(range.from, range.to)); }
+    catch (caught) { setError(caught instanceof Error ? caught.message : messages(settings.locale).common.unexpectedError); }
+    finally { setLoading(false); }
+  }
+
+  useEffect(() => { void refresh(); }, [range.from, range.to]);
+
+  async function applied(operation: ReviewOperationV1) {
+    setLastOperation(operation);
+    await Promise.all([refresh(), onChanged()]);
+  }
+
+  async function undo() {
+    if (!lastOperation) return;
+    await bridge.undoReviewOperation({ blockIds: lastOperation.blockIds, ruleId: lastOperation.ruleId });
+    setLastOperation(undefined);
+    await Promise.all([refresh(), onChanged()]);
+  }
+
+  return (
+    <>
+      <header className="page-header"><div><p className="page-context">{copy.context}</p><h1>{copy.title}</h1><p className="page-intro">{copy.intro}</p></div><label className="review-range">{copy.range}<select value={period} onChange={(event) => setPeriod(event.target.value as typeof period)}>{Object.entries(copy.ranges).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label></header>
+      {lastOperation && <div className="review-success" role="status"><span>{copy.applied(lastOperation.affectedSessions)}</span><button type="button" className="text-button" onClick={() => void undo()}><RefreshCw size={14} />{copy.undo}</button></div>}
+      {loading ? <p className="inline-empty">{copy.loading}</p> : error ? <p className="form-error" role="alert">{error}</p> : groups.length === 0 ? <p className="inline-empty">{copy.empty}</p> : <div className="review-grid">{groups.map((group) => <ReviewGroupCard key={group.id} group={group} locale={settings.locale} range={range} onApplied={(operation) => void applied(operation)} />)}</div>}
+    </>
+  );
+}
+
+function TodayView({ settings, status, blocks, checkIns, onNavigate, onPause, onResume, onClassify, onClear, onSaveRule, onPreviewRule }: {
   settings: SettingsV1;
   status: TrackingStatus;
   blocks: TimelineBlockV1[];
@@ -196,6 +405,10 @@ function TodayView({ settings, status, blocks, checkIns, onNavigate, onPause, on
   onNavigate: (view: View) => void;
   onPause: () => Promise<void>;
   onResume: () => Promise<void>;
+  onClassify: (input: SessionClassificationInputV1) => Promise<SessionClassificationResultV1>;
+  onClear: (blockId: string) => Promise<void>;
+  onSaveRule: (rule: ClassificationRuleV1) => Promise<void>;
+  onPreviewRule: (rule: ClassificationRuleV1) => Promise<RuleImpactV1>;
 }) {
   const locale = settings.locale;
   const copy = messages(locale).today;
@@ -228,7 +441,7 @@ function TodayView({ settings, status, blocks, checkIns, onNavigate, onPause, on
       <div className="today-layout">
         <section className="section-block" aria-labelledby="timeline-title">
           <div className="section-heading"><div><p className="section-note">{copy.timelineHint}</p><h2 id="timeline-title">{copy.timeline}</h2></div><StatusPill status={status} locale={locale} /></div>
-          <Timeline blocks={blocks} locale={locale} />
+          <Timeline blocks={blocks} locale={locale} onClassify={onClassify} onClear={onClear} onSaveRule={onSaveRule} onPreviewRule={onPreviewRule} />
         </section>
         <aside className="day-summary" aria-labelledby="distribution-title">
           <p className="section-note">{copy.distributionHint}</p>
@@ -319,7 +532,60 @@ function StudyView({ progress, locale, onDays }: { progress: StudyProgress; loca
   );
 }
 
-function AutomateView({ diagnostic, locale, busy, onGenerate, onCopy, onOpen, onMapWorkflow, onOpenBlueprint, blueprintCandidate }: { diagnostic: DiagnosticV1; locale: Locale; busy: boolean; onGenerate: () => Promise<void>; onCopy: () => Promise<void>; onOpen: (url: string) => Promise<void>; onMapWorkflow: (candidate: AutomationCandidateV1) => void; onOpenBlueprint: (candidate: AutomationCandidateV1) => void; blueprintCandidate: AutomationCandidateV1 | null }) {
+function AiEvaluationSection({ days, locale, enabled }: { days: 7 | 14 | 28; locale: Locale; enabled: boolean }) {
+  const [status, setStatus] = useState<AiConfigurationStatusV1>();
+  const [preview, setPreview] = useState<EvaluationPayloadPreviewV1>();
+  const [reports, setReports] = useState<EvaluationReportV1[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<{ error?: boolean; text: string }>();
+  const latest = reports[0];
+  const text = locale === "en" ? {
+    eyebrow: "Independent AI review", title: "Analyst + evaluator", intro: "The analyst proposes opportunities and a second model rejects anything unsupported by your evidence.",
+    configure: "Configure OpenRouter, two different models, and a budget in Settings.", preview: "Preview payload", authorize: "Authorize this policy", run: "Run evaluation", sources: "Sources", cost: "maximum estimated cost", rejected: "rejected by the evaluator", noApproved: "The evaluator did not approve any suggestion yet.", useful: "Useful", notUseful: "Not useful", context: "Needs context", feedbackSaved: "Feedback saved locally.",
+  } : {
+    eyebrow: "Revisión independiente con IA", title: "Analista + evaluador", intro: "El analista propone oportunidades y un segundo modelo rechaza todo lo que no esté sustentado por tu evidencia.",
+    configure: "Configura OpenRouter, dos modelos distintos y un presupuesto en Configuración.", preview: "Revisar payload", authorize: "Autorizar esta política", run: "Ejecutar evaluación", sources: "Fuentes", cost: "costo máximo estimado", rejected: "rechazadas por el evaluador", noApproved: "El evaluador todavía no aprobó ninguna sugerencia.", useful: "Útil", notUseful: "No útil", context: "Falta contexto", feedbackSaved: "Feedback guardado localmente.",
+  };
+
+  async function refresh() {
+    const [nextStatus, nextReports] = await Promise.all([bridge.getAiConfigurationStatus(), bridge.listAiReports()]);
+    setStatus(nextStatus); setReports(nextReports);
+  }
+  useEffect(() => { void refresh().catch((error) => setMessage({ error: true, text: error instanceof Error ? error.message : String(error) })); }, [enabled]);
+
+  async function guarded(run: () => Promise<void>) {
+    setBusy(true); setMessage(undefined);
+    try { await run(); } catch (error) { setMessage({ error: true, text: error instanceof Error ? error.message : String(error) }); } finally { setBusy(false); }
+  }
+  const feedback = (opportunityId: string, rating: "useful" | "not-useful" | "needs-context") => guarded(async () => {
+    if (!latest) return;
+    await bridge.saveAiFeedback({ runId: latest.id, opportunityId, rating });
+    setMessage({ text: text.feedbackSaved });
+  });
+
+  return (
+    <section className="ai-evaluation-section" aria-labelledby="ai-evaluation-title">
+      <div className="prompt-heading"><div><p className="section-note">{text.eyebrow}</p><h2 id="ai-evaluation-title">{text.title}</h2><p>{text.intro}</p></div><Bot size={28} aria-hidden="true" /></div>
+      {!enabled ? <p className="inline-empty">{text.configure}</p> : <>
+        <div className="ai-evaluation-actions">
+          <button type="button" className="secondary-button" disabled={busy} onClick={() => void guarded(async () => { setPreview(await bridge.previewAiEvaluation(days)); await refresh(); })}><Clipboard size={16} />{text.preview}</button>
+          <button type="button" className="primary-button" disabled={busy || !status?.ready} onClick={() => void guarded(async () => { const report = await bridge.runAiEvaluation(days); setReports([report, ...(await bridge.listAiReports()).filter((item) => item.id !== report.id)]); await refresh(); })}><Sparkles size={16} />{text.run}</button>
+        </div>
+        {preview && <div className="ai-payload-preview">
+          <p><strong>{text.sources}:</strong> {preview.sources.join(", ")} · {preview.estimatedInputTokens.toLocaleString(locale)} tokens · ${preview.estimatedMaxCostUsd.toFixed(4)} {text.cost}</p>
+          <details><summary>JSON</summary><pre>{JSON.stringify(preview.payload, null, 2)}</pre></details>
+          {!preview.consentCurrent && <button type="button" className="primary-button" disabled={busy} onClick={() => void guarded(async () => { await bridge.grantCloudConsent(preview.policyFingerprint); setPreview({ ...preview, consentCurrent: true }); await refresh(); })}><LockKeyhole size={15} />{text.authorize}</button>}
+        </div>}
+        {latest && <div className="ai-report"><div className="ai-report-meta"><time dateTime={latest.generatedAt}>{new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" }).format(new Date(latest.generatedAt))}</time><span>${latest.costUsd.toFixed(4)}</span><span>{latest.rejectedCount} {text.rejected}</span></div><p>{latest.summary}</p>
+          {latest.opportunities.length === 0 ? <p className="inline-empty">{text.noApproved}</p> : latest.opportunities.map((opportunity) => <article className="ai-opportunity" key={opportunity.id}><div><span className="source-badge">{opportunity.solutionLevel}</span><h3>{opportunity.title}</h3><p>{opportunity.problem}</p></div><dl><div><dt>Evidence</dt><dd>{opportunity.evidenceIds.join(", ")}</dd></div><div><dt>7 días</dt><dd>{opportunity.experiment}</dd></div><div><dt>Métrica</dt><dd>{opportunity.successMetric}</dd></div></dl><div className="score-line"><span><b>{opportunity.evaluator.faithfulness}/5</b> evidencia</span><span><b>{opportunity.evaluator.feasibility}/5</b> factibilidad</span><span><b>{opportunity.evaluator.safety}/5</b> seguridad</span></div><div className="button-row"><button type="button" className="text-button" disabled={busy} onClick={() => void feedback(opportunity.id, "useful")}>{text.useful}</button><button type="button" className="text-button" disabled={busy} onClick={() => void feedback(opportunity.id, "not-useful")}>{text.notUseful}</button><button type="button" className="text-button" disabled={busy} onClick={() => void feedback(opportunity.id, "needs-context")}>{text.context}</button></div></article>)}
+        </div>}
+      </>}
+      {message && <p className={message.error ? "form-error" : "form-success"} role={message.error ? "alert" : "status"}>{message.text}</p>}
+    </section>
+  );
+}
+
+function AutomateView({ diagnostic, locale, busy, aiAvailable, aiEnabled, days, onGenerate, onCopy, onOpen, onMapWorkflow, onOpenBlueprint, blueprintCandidate }: { diagnostic: DiagnosticV1; locale: Locale; busy: boolean; aiAvailable: boolean; aiEnabled: boolean; days: 7 | 14 | 28; onGenerate: () => Promise<void>; onCopy: () => Promise<void>; onOpen: (url: string) => Promise<void>; onMapWorkflow: (candidate: AutomationCandidateV1) => void; onOpenBlueprint: (candidate: AutomationCandidateV1) => void; blueprintCandidate: AutomationCandidateV1 | null }) {
   const copy = messages(locale).automate;
   const candidate = diagnostic.candidates[0];
   return (
@@ -334,6 +600,7 @@ function AutomateView({ diagnostic, locale, busy, onGenerate, onCopy, onOpen, on
         </section>
       ) : <section className="empty-state"><Target size={30} aria-hidden="true" /><h2>{copy.empty}</h2><p>{copy.emptyCopy}</p></section>}
       <section className="recommendations"><h2>{copy.recommendations}</h2><ol>{diagnostic.recommendations.map((recommendation, index) => <li key={recommendation}><span>{String(index + 1).padStart(2, "0")}</span><p>{recommendation}</p></li>)}</ol></section>
+      {aiAvailable && <AiEvaluationSection days={days} locale={locale} enabled={aiEnabled} />}
       <section className="prompt-section" aria-labelledby="prompt-title">
         <div className="prompt-heading"><div><p className="section-note">{copy.promptIntro}</p><h2 id="prompt-title">{copy.promptTitle}</h2></div><button type="button" className="primary-button" onClick={() => void onCopy()}><Clipboard size={16} aria-hidden="true" />{copy.copyPrompt}</button></div>
         <pre tabIndex={0}>{diagnostic.prompt}</pre>
@@ -344,7 +611,100 @@ function AutomateView({ diagnostic, locale, busy, onGenerate, onCopy, onOpen, on
   );
 }
 
-function SettingsView({ settings, status, onSave, onExport, onDelete }: { settings: SettingsV1; status: TrackingStatus; onSave: (value: SettingsV1) => Promise<void>; onExport: (format: "json" | "csv") => Promise<void>; onDelete: () => Promise<void> }) {
+function ClassificationRulesSettings({ rules, locale, onSave, onDelete }: { rules: ClassificationRuleV1[]; locale: Locale; onSave: (rule: ClassificationRuleV1) => Promise<void>; onDelete: (id: string) => Promise<void> }) {
+  const copy = messages(locale).classification;
+  const [drafts, setDrafts] = useState(rules);
+  const [busy, setBusy] = useState<string>();
+  useEffect(() => setDrafts(rules), [rules]);
+  const update = (id: string, change: Partial<ClassificationRuleV1>) => setDrafts((items) => items.map((item) => item.id === id ? { ...item, ...change } : item));
+  return (
+    <section className="settings-group classification-rules-settings">
+      <div className="settings-intro"><Target size={19} aria-hidden="true" /><div><h2>{copy.rulesTitle}</h2><p>{copy.rulesHint}</p></div></div>
+      <div className="settings-fields">
+        {drafts.length === 0 ? <p className="inline-empty">{copy.noRules}</p> : drafts.map((rule) => (
+          <div className="rule-settings-row" key={rule.id}>
+            <div className="rule-settings-heading"><strong>{rule.app}</strong><small>{rule.scope === "app" ? copy.appScope : rule.scope === "app-title" ? copy.titleScope : copy.legacyScope}</small></div>
+            <div className="two-columns">
+              {rule.scope === "app-title" && <label>{copy.pattern}<input value={rule.titlePattern ?? ""} maxLength={256} onChange={(event) => update(rule.id, { titlePattern: event.target.value })} /></label>}
+              <label>{copy.category}<select value={rule.category} onChange={(event) => update(rule.id, { category: event.target.value as CategoryId })}>{RULE_CATEGORIES.map((category) => <option key={category} value={category}>{categoryLabel(locale, category)}</option>)}</select></label>
+              <label>{copy.activityLabel}<input value={rule.activityLabel ?? ""} maxLength={200} onChange={(event) => update(rule.id, { activityLabel: event.target.value || undefined })} placeholder={copy.activityPlaceholder} /></label>
+            </div>
+            <div className="button-row"><button type="button" className="secondary-button" disabled={busy === rule.id || (rule.scope === "app-title" && !rule.titlePattern?.trim())} onClick={() => { setBusy(rule.id); void onSave(rule).catch(() => undefined).finally(() => setBusy(undefined)); }}><Check size={15} />{copy.saveRule}</button><button type="button" className="text-button danger-text" disabled={busy === rule.id} onClick={() => { setBusy(rule.id); void onDelete(rule.id).catch(() => undefined).finally(() => setBusy(undefined)); }}><Trash2 size={15} />{copy.deleteRule}</button></div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function IntelligenceSettings({ draft, saved, experimental, onChange }: { draft: SettingsV1; saved: SettingsV1; experimental: boolean; onChange: (value: SettingsV1) => void }) {
+  const [models, setModels] = useState<OpenRouterModelV1[]>([]);
+  const [aiStatus, setAiStatus] = useState<AiConfigurationStatusV1>();
+  const [clients, setClients] = useState<ConnectorClientV1[]>([]);
+  const [pairing, setPairing] = useState<ConnectorPairingV1>();
+  const [ocrStatus, setOcrStatus] = useState<ScreenOcrStatusV1>();
+  const [apiKey, setApiKey] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<{ error?: boolean; text: string }>();
+  const locale = draft.locale;
+  const t = locale === "en" ? {
+    title: "Deep context and AI", intro: "Every source is opt-in. Cloud use is separate from local capture.", local: "Capture locally", cloud: "Allow in approved cloud summaries", browser: "Active browser tab", editor: "VS Code / Cursor project", shell: "Terminal project", screenshots: "Local screen OCR", pair: "Pair", saveFirst: "Save this source before pairing.", interval: "OCR interval", sites: "Sites allowed for visible page text", excluded: "Apps excluded from screenshots", ai: "OpenRouter evaluation", key: "OpenRouter API key", saveKey: "Save securely", deleteKey: "Remove key", analyst: "Analyst model", evaluator: "Evaluator model", budget: "Monthly hard limit (USD)", weekly: "Run an automatic weekly evaluation", weeklyDay: "Day", weeklyHour: "Hour", enableAi: "Enable analyst + independent evaluator", privacy: "Requests require ZDR, deny data collection, strict JSON and no provider fallbacks.", connected: "Paired connectors", revoke: "Revoke", code: "Pairing code", requestScreen: "Allow screen recording", permissionReady: "Screen recording authorized", unsupportedOcr: "Native OCR is unavailable on this system", localTitle: "Local context connectors", localIntro: "Every source is opt-in and stays on this computer.",
+  } : {
+    title: "Contexto profundo e IA", intro: "Cada fuente es opcional. Autorizar nube es independiente de capturar localmente.", local: "Capturar localmente", cloud: "Permitir en resúmenes de nube aprobados", browser: "Pestaña activa del navegador", editor: "Proyecto de VS Code / Cursor", shell: "Proyecto de terminal", screenshots: "OCR local de pantalla", pair: "Emparejar", saveFirst: "Guarda esta fuente antes de emparejar.", interval: "Intervalo de OCR", sites: "Sitios autorizados para leer texto visible", excluded: "Apps excluidas de capturas", ai: "Evaluación con OpenRouter", key: "API key de OpenRouter", saveKey: "Guardar de forma segura", deleteKey: "Eliminar key", analyst: "Modelo analista", evaluator: "Modelo evaluador", budget: "Límite mensual estricto (USD)", weekly: "Ejecutar una evaluación semanal automática", weeklyDay: "Día", weeklyHour: "Hora", enableAi: "Activar analista + evaluador independiente", privacy: "Las solicitudes exigen ZDR, niegan recolección, usan JSON estricto y no permiten fallbacks de proveedor.", connected: "Conectores emparejados", revoke: "Revocar", code: "Código de emparejamiento", requestScreen: "Autorizar grabación de pantalla", permissionReady: "Grabación de pantalla autorizada", unsupportedOcr: "El OCR nativo no está disponible en este sistema", localTitle: "Conectores de contexto local", localIntro: "Cada fuente es opcional y se queda en esta computadora.",
+  };
+
+  async function refresh(includeModels = false) {
+    if (!experimental) {
+      setClients(await bridge.listConnectorClients());
+      return;
+    }
+    const [status, nextClients, nextOcrStatus] = await Promise.all([bridge.getAiConfigurationStatus(), bridge.listConnectorClients(), bridge.getScreenOcrStatus()]);
+    setAiStatus(status); setClients(nextClients); setOcrStatus(nextOcrStatus);
+    if (includeModels) setModels(await bridge.listOpenRouterModels());
+  }
+  useEffect(() => { void refresh(true).catch((error) => setMessage({ error: true, text: error instanceof Error ? error.message : String(error) })); }, []);
+
+  function updateSource(source: "browser" | "editor" | "shell" | "screenshots", change: Partial<SettingsV1["deepCapture"]["browser"]>) {
+    onChange({ ...draft, deepCapture: { ...draft.deepCapture, [source]: { ...draft.deepCapture[source], ...change } } });
+  }
+  async function guarded(run: () => Promise<void>) {
+    setBusy(true); setMessage(undefined);
+    try { await run(); } catch (error) { setMessage({ error: true, text: error instanceof Error ? error.message : String(error) }); } finally { setBusy(false); }
+  }
+  const localSources = [["browser", t.browser, "Chromium"], ["editor", t.editor, "VS Code / Cursor"], ["shell", t.shell, "Terminal"]] as const;
+  const sources = experimental ? [...localSources, ["screenshots", t.screenshots, "OCR"] as const] : localSources;
+  const weekdays = locale === "en" ? ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"] : ["Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"];
+  const modelOptions = (selected?: string) => <>{selected && !models.some((model) => model.id === selected) && <option value={selected}>{selected}</option>}{models.map((model) => <option key={model.id} value={model.id}>{model.name} · ${((model.promptPrice + model.completionPrice) * 1_000_000).toFixed(2)}/M token</option>)}</>;
+
+  return <section className="settings-group intelligence-settings">
+    <div className="settings-intro"><Bot size={19} aria-hidden="true" /><div><h2>{experimental ? t.title : t.localTitle}</h2><p>{experimental ? t.intro : t.localIntro}</p></div></div>
+    <div className="settings-fields">
+      <div className="source-policy-list">{sources.map(([source, label, name]) => {
+        const policy = draft.deepCapture[source];
+        const canPair = source !== "screenshots" && saved.deepCapture[source].enabled;
+        const ocrDetail = ocrStatus?.permission === "granted" ? ` · ${t.permissionReady}` : ocrStatus && !ocrStatus.supported ? ` · ${t.unsupportedOcr}` : "";
+        return <div className="source-policy" key={source}><div><strong>{label}</strong>{source === "screenshots" && <small>{t.interval}: {draft.deepCapture.screenshotIntervalMinutes} min · los píxeles nunca se guardan{ocrDetail}</small>}</div><label><input type="checkbox" checked={policy.enabled} disabled={source === "screenshots" && ocrStatus?.supported === false} onChange={(event) => updateSource(source, { enabled: event.target.checked })} />{t.local}</label>{experimental && <label><input type="checkbox" checked={policy.cloudAllowed} disabled={!policy.enabled} onChange={(event) => updateSource(source, { cloudAllowed: event.target.checked })} />{t.cloud}</label>}{source !== "screenshots" ? <button type="button" className="text-button" disabled={!canPair || busy} title={canPair ? undefined : t.saveFirst} onClick={() => void guarded(async () => { setPairing(await bridge.createConnectorPairing(source as "browser" | "editor" | "shell", name)); })}>{t.pair}</button> : ocrStatus?.supported && ocrStatus.permission !== "granted" ? <button type="button" className="text-button" disabled={busy} onClick={() => void guarded(async () => { setOcrStatus(await bridge.requestScreenOcrPermission()); })}>{t.requestScreen}</button> : <span />}</div>;
+      })}</div>
+      <div className="two-columns">{experimental && <label>{t.interval}<select value={draft.deepCapture.screenshotIntervalMinutes} onChange={(event) => onChange({ ...draft, deepCapture: { ...draft.deepCapture, screenshotIntervalMinutes: Number(event.target.value) as 5 | 15 | 30 | 60 } })}>{[5, 15, 30, 60].map((minutes) => <option key={minutes} value={minutes}>{minutes} min</option>)}</select></label>}<label>{t.sites}<textarea rows={3} value={draft.deepCapture.browserTextAllowlist.join("\n")} onChange={(event) => onChange({ ...draft, deepCapture: { ...draft.deepCapture, browserTextAllowlist: event.target.value.split(/\s+/).filter(Boolean) } })} placeholder="notion.so&#10;docs.google.com" /></label></div>
+      {experimental && <label>{t.excluded}<textarea rows={2} value={draft.deepCapture.excludedApps.join("\n")} onChange={(event) => onChange({ ...draft, deepCapture: { ...draft.deepCapture, excludedApps: event.target.value.split("\n").map((value) => value.trim()).filter(Boolean) } })} /></label>}
+      {pairing && <div className="pairing-code"><span>{t.code}</span><strong>{pairing.code}</strong><small>127.0.0.1:{pairing.serverPort ?? "—"} · {new Intl.DateTimeFormat(locale, { timeStyle: "short" }).format(new Date(pairing.expiresAt))}</small></div>}
+      {clients.length > 0 && <div><p className="field-group-title">{t.connected}</p>{clients.filter((client) => !client.revokedAt).map((client) => <div className="connector-row" key={client.id}><span><strong>{client.name}</strong><small>{client.kind} · {client.lastSeenAt ? formatTime(client.lastSeenAt, locale) : "—"}</small></span><button type="button" className="text-button danger-text" onClick={() => void guarded(async () => { await bridge.revokeConnectorClient(client.id); await refresh(); })}>{t.revoke}</button></div>)}</div>}
+      {experimental && <>
+      <hr />
+      <p className="field-group-title">{t.ai}</p><p className="field-group-help">{t.privacy}</p>
+      <div className="api-key-row"><label>{t.key}<input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={aiStatus?.hasApiKey ? "••••••••••••" : "sk-or-v1-…"} autoComplete="off" /></label><button type="button" className="secondary-button" disabled={busy || !apiKey.trim()} onClick={() => void guarded(async () => { await bridge.saveOpenRouterApiKey(apiKey); setApiKey(""); await refresh(); })}>{t.saveKey}</button>{aiStatus?.hasApiKey && <button type="button" className="text-button danger-text" onClick={() => void guarded(async () => { await bridge.deleteOpenRouterApiKey(); await refresh(); })}>{t.deleteKey}</button>}</div>
+      <div className="two-columns"><label>{t.analyst}<select value={draft.ai.analystModel ?? ""} onChange={(event) => onChange({ ...draft, ai: { ...draft.ai, analystModel: event.target.value || undefined } })}><option value="">—</option>{modelOptions(draft.ai.analystModel)}</select></label><label>{t.evaluator}<select value={draft.ai.evaluatorModel ?? ""} onChange={(event) => onChange({ ...draft, ai: { ...draft.ai, evaluatorModel: event.target.value || undefined } })}><option value="">—</option>{modelOptions(draft.ai.evaluatorModel)}</select></label></div>
+      <label>{t.budget}<input type="number" min="0.01" max="10000" step="0.01" value={draft.ai.monthlyBudgetUsd ?? ""} onChange={(event) => onChange({ ...draft, ai: { ...draft.ai, monthlyBudgetUsd: event.target.value ? Number(event.target.value) : undefined } })} /></label>
+      <label className="toggle-row"><span><strong>{t.enableAi}</strong><small>{aiStatus ? `$${aiStatus.spentThisMonthUsd.toFixed(4)} usado este mes` : ""}</small></span><input type="checkbox" role="switch" checked={draft.ai.enabled} onChange={(event) => onChange({ ...draft, ai: { ...draft.ai, enabled: event.target.checked } })} /></label>
+      <label className="toggle-row"><span><strong>{t.weekly}</strong></span><input type="checkbox" role="switch" checked={draft.ai.weeklyEnabled} disabled={!draft.ai.enabled} onChange={(event) => onChange({ ...draft, ai: { ...draft.ai, weeklyEnabled: event.target.checked } })} /></label>
+      {draft.ai.weeklyEnabled && <div className="two-columns"><label>{t.weeklyDay}<select value={draft.ai.weeklyDay} onChange={(event) => onChange({ ...draft, ai: { ...draft.ai, weeklyDay: Number(event.target.value) } })}>{weekdays.map((day, index) => <option key={day} value={index}>{day}</option>)}</select></label><label>{t.weeklyHour}<select value={draft.ai.weeklyHour} onChange={(event) => onChange({ ...draft, ai: { ...draft.ai, weeklyHour: Number(event.target.value) } })}>{Array.from({ length: 24 }, (_, hour) => <option key={hour} value={hour}>{String(hour).padStart(2, "0")}:00</option>)}</select></label></div>}
+      </>}
+      {message && <p className={message.error ? "form-error" : "form-success"} role={message.error ? "alert" : "status"}>{message.text}</p>}
+    </div>
+  </section>;
+}
+
+function SettingsView({ settings, status, classificationRules, onSave, onSaveRule, onDeleteRule, onExport, onDelete }: { settings: SettingsV1; status: TrackingStatus; classificationRules: ClassificationRuleV1[]; onSave: (value: SettingsV1) => Promise<void>; onSaveRule: (rule: ClassificationRuleV1) => Promise<void>; onDeleteRule: (id: string) => Promise<void>; onExport: (format: "json" | "csv") => Promise<void>; onDelete: () => Promise<void> }) {
   const [draft, setDraft] = useState(settings);
   const [saving, setSaving] = useState(false);
   const copy = messages(draft.locale).settings;
@@ -362,6 +722,8 @@ function SettingsView({ settings, status, onSave, onExport, onDelete }: { settin
       <header className="page-header"><div><p className="page-context">{messages(draft.locale).common.local}</p><h1>{copy.title}</h1><p className="page-intro">{copy.intro}</p></div><button type="button" className="primary-button" disabled={!dirty || saving} onClick={() => void save()}><Check size={16} aria-hidden="true" />{copy.save}</button></header>
       <section className="settings-group"><div className="settings-intro"><Clock3 size={19} aria-hidden="true" /><div><h2>{copy.tracking}</h2><p>{copy.trackingHint}</p></div></div><div className="settings-fields"><div className="two-columns"><label>{copy.cadence}<select value={draft.cadenceMinutes} onChange={(event) => set("cadenceMinutes", Number(event.target.value) as 15 | 30 | 60)}><option value={15}>{copy.cadenceOption(15)}</option><option value={30}>{copy.cadenceOption(30)}</option><option value={60}>{copy.cadenceOption(60)}</option></select></label><label>{copy.retention}<select value={draft.retentionDays ?? "forever"} onChange={(event) => set("retentionDays", event.target.value === "forever" ? null : Number(event.target.value) as 30 | 90 | 365)}><option value={30}>{copy.retention30}</option><option value={90}>{copy.retention90}</option><option value={365}>{copy.retention365}</option><option value="forever">{copy.retentionForever}</option></select></label></div><div><p className="field-group-title">{copy.schedule}</p><p className="field-group-help">{copy.scheduleHint}</p><div className="two-columns"><label>{copy.start}<input type="time" value={draft.workSchedule.start} onChange={(event) => set("workSchedule", { ...draft.workSchedule, start: event.target.value })} /></label><label>{copy.end}<input type="time" value={draft.workSchedule.end} onChange={(event) => set("workSchedule", { ...draft.workSchedule, end: event.target.value })} /></label></div></div><label className="toggle-row"><span><strong>{copy.autostart}</strong><small>{copy.autostartHint}</small></span><input type="checkbox" role="switch" checked={draft.autostart} onChange={(event) => set("autostart", event.target.checked)} /></label><label className="toggle-row"><span><strong>{copy.titles}</strong><small>{copy.titlesHint}</small></span><input type="checkbox" role="switch" checked={draft.captureWindowTitles} onChange={(event) => set("captureWindowTitles", event.target.checked)} /></label></div></section>
       <section className="settings-group"><div className="settings-intro"><Languages size={19} aria-hidden="true" /><div><h2>{copy.appearance}</h2><p>{copy.appearanceHint}</p></div></div><div className="settings-fields"><div className="two-columns"><label>{copy.language}<select value={draft.locale} onChange={(event) => set("locale", event.target.value as Locale)}><option value="es-419">Español (Latinoamérica)</option><option value="en">English</option></select></label><label>{copy.theme}<select value={draft.theme} onChange={(event) => set("theme", event.target.value as SettingsV1["theme"])}><option value="ink">{copy.ink}</option><option value="paper">{copy.paper}</option><option value="system">{copy.system}</option></select></label></div><label className="toggle-row"><span><strong>{copy.updates}</strong><small>{copy.updatesHint}</small></span><input type="checkbox" role="switch" checked={draft.updateChecksEnabled} onChange={(event) => set("updateChecksEnabled", event.target.checked)} /></label></div></section>
+      <IntelligenceSettings draft={draft} saved={settings} experimental={status.experimentalIntelligence} onChange={setDraft} />
+      <ClassificationRulesSettings rules={classificationRules} locale={draft.locale} onSave={onSaveRule} onDelete={onDeleteRule} />
       <section className="settings-group"><div className="settings-intro"><LockKeyhole size={19} aria-hidden="true" /><div><h2>{copy.data}</h2><p>{copy.localEngine(status.serverPort)}</p></div></div><div className="data-actions"><button type="button" className="secondary-button" onClick={() => void onExport("json")}><Download size={16} aria-hidden="true" />{copy.exportJson}</button><button type="button" className="secondary-button" onClick={() => void onExport("csv")}><Download size={16} aria-hidden="true" />{copy.exportCsv}</button><button type="button" className="danger-button" onClick={() => void onDelete()}><Trash2 size={16} aria-hidden="true" />{copy.delete}</button></div></section>
     </>
   );
@@ -381,6 +743,7 @@ export default function App() {
   const [diagnosticBusy, setDiagnosticBusy] = useState(false);
   const [workflowCandidate, setWorkflowCandidate] = useState<AutomationCandidateV1 | null>(null);
   const [workflowIntakes, setWorkflowIntakes] = useState<WorkflowIntakeV1[]>([]);
+  const [classificationRules, setClassificationRules] = useState<ClassificationRuleV1[]>([]);
 
   async function load() {
     setLoading(true);
@@ -388,10 +751,10 @@ export default function App() {
     try {
       const from = new Date(); from.setHours(0, 0, 0, 0);
       const to = new Date(); to.setHours(23, 59, 59, 999);
-      const [nextSettings, nextStatus, nextBlocks, nextCheckIns, nextStudy, nextWorkflowIntakes] = await Promise.all([
-        bridge.getSettings(), bridge.getTrackingStatus(), bridge.getTimeline(from.toISOString(), to.toISOString()), bridge.listCheckIns(), bridge.getStudyProgress(), bridge.listWorkflowIntakes(),
+      const [nextSettings, nextStatus, nextBlocks, nextCheckIns, nextStudy, nextWorkflowIntakes, nextClassificationRules] = await Promise.all([
+        bridge.getSettings(), bridge.getTrackingStatus(), bridge.getTimeline(from.toISOString(), to.toISOString()), bridge.listCheckIns(), bridge.getStudyProgress(), bridge.listWorkflowIntakes(), bridge.listClassificationRules(),
       ]);
-      setSettings(nextSettings); setStatus(nextStatus); setBlocks(nextBlocks); setCheckIns(nextCheckIns); setStudy(nextStudy); setWorkflowIntakes(nextWorkflowIntakes);
+      setSettings(nextSettings); setStatus(nextStatus); setBlocks(nextBlocks); setCheckIns(nextCheckIns); setStudy(nextStudy); setWorkflowIntakes(nextWorkflowIntakes); setClassificationRules(nextClassificationRules);
       setDiagnostic(await bridge.generateDiagnostic(nextStudy.selectedDays));
       if (bridge.shouldResumeAutomationBlueprint()) {
         const intake = nextWorkflowIntakes[0];
@@ -407,6 +770,15 @@ export default function App() {
     }
   }
 
+  async function fetchTodaySnapshot() {
+    const from = new Date(); from.setHours(0, 0, 0, 0);
+    const to = new Date(); to.setHours(23, 59, 59, 999);
+    return Promise.all([
+      bridge.getTrackingStatus(),
+      bridge.getTimeline(from.toISOString(), to.toISOString()),
+    ]);
+  }
+
   async function action(run: () => Promise<void>, success?: string) {
     const fallback = settings ? messages(settings.locale).common.unexpectedError : "No pudimos completar la acción.";
     try {
@@ -418,6 +790,49 @@ export default function App() {
   }
 
   useEffect(() => { void load(); }, []);
+  useEffect(() => {
+    if (!settings?.onboardingCompleted || view !== "today") return;
+    let disposed = false;
+    let refreshing = false;
+    let reportedError = false;
+
+    const refreshToday = async () => {
+      if (document.visibilityState !== "visible" || refreshing) return;
+      refreshing = true;
+      try {
+        const [nextStatus, nextBlocks] = await fetchTodaySnapshot();
+        if (!disposed) {
+          setStatus(nextStatus);
+          setBlocks(nextBlocks);
+          reportedError = false;
+        }
+      } catch (error) {
+        if (!disposed && !reportedError) {
+          setNotice({
+            kind: "error",
+            message: error instanceof Error
+              ? error.message
+              : messages(settings.locale).common.unexpectedError,
+          });
+          reportedError = true;
+        }
+      } finally {
+        refreshing = false;
+      }
+    };
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") void refreshToday();
+    };
+    const timer = window.setInterval(() => void refreshToday(), 60_000);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    void refreshToday();
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [settings?.onboardingCompleted, settings?.locale, view]);
   useEffect(() => {
     if (!settings) return;
     const media = matchMedia("(prefers-color-scheme: light)");
@@ -443,6 +858,7 @@ export default function App() {
   const copy = messages(settings.locale);
   const items: { id: View; label: string; icon: typeof Activity }[] = [
     { id: "today", label: copy.nav.today, icon: Activity },
+    { id: "review", label: copy.nav.review, icon: ListChecks },
     { id: "checkins", label: copy.nav.checkins, icon: HelpCircle },
     { id: "study", label: copy.nav.study, icon: Focus },
     { id: "automate", label: copy.nav.automate, icon: Sparkles },
@@ -450,6 +866,37 @@ export default function App() {
   ];
   const saveSettings = async (value: SettingsV1) => action(async () => { setSettings(await bridge.saveSettings(value)); }, messages(value.locale).notices.settingsSaved);
   const answer = async (value: CheckInAnswer) => action(async () => { await bridge.answerCheckIn(value); setCheckIns(await bridge.listCheckIns()); setStatus(await bridge.getTrackingStatus()); }, copy.notices.contextSaved);
+  const classifySession = async (input: SessionClassificationInputV1) => {
+    const result = await bridge.saveSessionClassification(input);
+    setBlocks((current) => current.map((block) => block.id === result.block.id ? result.block : block));
+    setNotice({ kind: "success", message: copy.notices.contextSaved });
+    return result;
+  };
+  const clearSessionClassification = async (blockId: string) => {
+    const block = await bridge.clearSessionClassification(blockId);
+    setBlocks((current) => current.map((item) => item.id === block.id ? block : item));
+  };
+  const saveClassificationRule = async (rule: ClassificationRuleV1) => {
+    try {
+      await bridge.saveClassificationRule(rule);
+      const [nextRules, snapshot] = await Promise.all([bridge.listClassificationRules(), fetchTodaySnapshot()]);
+      setClassificationRules(nextRules); setStatus(snapshot[0]); setBlocks(snapshot[1]);
+      setNotice({ kind: "success", message: copy.notices.settingsSaved });
+    } catch (error) {
+      setNotice({ kind: "error", message: error instanceof Error ? error.message : copy.common.unexpectedError });
+      throw error;
+    }
+  };
+  const deleteClassificationRule = async (id: string) => {
+    try {
+      await bridge.deleteClassificationRule(id);
+      const [nextRules, snapshot] = await Promise.all([bridge.listClassificationRules(), fetchTodaySnapshot()]);
+      setClassificationRules(nextRules); setStatus(snapshot[0]); setBlocks(snapshot[1]);
+    } catch (error) {
+      setNotice({ kind: "error", message: error instanceof Error ? error.message : copy.common.unexpectedError });
+      throw error;
+    }
+  };
   const selectDays = (days: 7 | 14 | 28) => {
     setStudy({ ...study, selectedDays: days });
     setDiagnosticBusy(true);
@@ -470,18 +917,19 @@ export default function App() {
       <a className="skip-link" href="#main-content">{copy.nav.today}</a>
       <aside className="sidebar">
         <BrandMark />
-        <nav aria-label="Principal">{items.map(({ id, label, icon: Icon }) => <button type="button" key={id} className={view === id ? "active" : ""} aria-current={view === id ? "page" : undefined} aria-label={label} title={label} onClick={() => setView(id)}><Icon size={18} aria-hidden="true" /><span>{label}</span>{id === "checkins" && status.pendingCheckIns > 0 && <b aria-label={`${status.pendingCheckIns}`}>{status.pendingCheckIns}</b>}</button>)}</nav>
-        <div className="sidebar-footer"><StatusPill status={status} locale={settings.locale} /><p><LockKeyhole size={13} aria-hidden="true" />{copy.common.local}</p><small>Ensō Time v0.2 beta</small></div>
+        <nav aria-label="Principal">{items.map(({ id, label, icon: Icon }) => <button type="button" key={id} className={view === id ? "active" : ""} aria-current={view === id ? "page" : undefined} aria-label={label} title={label} onClick={() => setView(id)}><Icon size={18} aria-hidden="true" /><span>{label}</span>{id === "checkins" && status.pendingCheckIns > 0 && <b aria-label={`${status.pendingCheckIns}`}>{status.pendingCheckIns}</b>}{id === "review" && blocks.some((block) => block.category === "unknown") && <b aria-label={`${blocks.filter((block) => block.category === "unknown").length}`}>{blocks.filter((block) => block.category === "unknown").length}</b>}</button>)}</nav>
+        <div className="sidebar-footer"><StatusPill status={status} locale={settings.locale} /><p><LockKeyhole size={13} aria-hidden="true" />{status.dataStaysLocal ? copy.common.local : (settings.locale === "en" ? "Cloud only with consent" : "Nube solo con consentimiento")}</p><small>Ensō Time v0.2 beta</small></div>
       </aside>
       <main className="content" id="main-content" tabIndex={-1}>
-        {status.captureIssue && <CaptureIssueBanner issue={status.captureIssue} locale={settings.locale} onRetry={() => action(async () => { setStatus(await bridge.getTrackingStatus()); })} />}
-        {view === "today" && <TodayView settings={settings} status={status} blocks={blocks} checkIns={checkIns} onNavigate={setView} onPause={() => action(async () => { setStatus(await bridge.pauseTracking(30)); }, copy.notices.paused)} onResume={() => action(async () => { setStatus(await bridge.resumeTracking()); }, copy.notices.resumed)} />}
+        {status.captureIssue && <CaptureIssueBanner issue={status.captureIssue} locale={settings.locale} onRetry={() => action(async () => { setStatus(await bridge.retryCapture()); })} onRequestAccessibility={() => action(async () => { await bridge.requestAccessibilityPermission(); })} />}
+        {view === "today" && <TodayView settings={settings} status={status} blocks={blocks} checkIns={checkIns} onNavigate={setView} onPause={() => action(async () => { setStatus(await bridge.pauseTracking(30)); }, copy.notices.paused)} onResume={() => action(async () => { setStatus(await bridge.resumeTracking()); }, copy.notices.resumed)} onClassify={classifySession} onClear={clearSessionClassification} onSaveRule={saveClassificationRule} onPreviewRule={bridge.previewClassificationRule} />}
+        {view === "review" && <ReviewView settings={settings} onChanged={async () => { const [nextRules, snapshot] = await Promise.all([bridge.listClassificationRules(), fetchTodaySnapshot()]); setClassificationRules(nextRules); setStatus(snapshot[0]); setBlocks(snapshot[1]); }} />}
         {view === "checkins" && <CheckInsView checkIns={checkIns} settings={settings} onAnswer={answer} />}
         {view === "study" && <StudyView progress={study} locale={settings.locale} onDays={selectDays} />}
-        {view === "automate" && <AutomateView diagnostic={diagnostic} locale={settings.locale} busy={diagnosticBusy} onGenerate={async () => { setDiagnosticBusy(true); await action(async () => { setDiagnostic(await bridge.generateDiagnostic(study.selectedDays)); }, copy.notices.diagnosticUpdated); setDiagnosticBusy(false); }} onCopy={() => action(async () => { await navigator.clipboard.writeText(diagnostic.prompt); }, copy.notices.promptCopied)} onOpen={(url) => action(() => bridge.openExternal(url))} onMapWorkflow={(candidate) => { setWorkflowCandidate(candidate); setView("workflow"); }} onOpenBlueprint={(candidate) => { setWorkflowCandidate(candidate); setView("blueprint"); }} blueprintCandidate={blueprintEntry} />}
+        {view === "automate" && <AutomateView diagnostic={diagnostic} locale={settings.locale} busy={diagnosticBusy} aiAvailable={status.experimentalIntelligence} aiEnabled={settings.ai.enabled} days={study.selectedDays} onGenerate={async () => { setDiagnosticBusy(true); await action(async () => { setDiagnostic(await bridge.generateDiagnostic(study.selectedDays)); }, copy.notices.diagnosticUpdated); setDiagnosticBusy(false); }} onCopy={() => action(async () => { await navigator.clipboard.writeText(diagnostic.prompt); }, copy.notices.promptCopied)} onOpen={(url) => action(() => bridge.openExternal(url))} onMapWorkflow={(candidate) => { setWorkflowCandidate(candidate); setView("workflow"); }} onOpenBlueprint={(candidate) => { setWorkflowCandidate(candidate); setView("blueprint"); }} blueprintCandidate={blueprintEntry} />}
         {view === "workflow" && <WorkflowIntakeView candidate={workflowCandidate} locale={settings.locale} onBack={() => setView("automate")} onSaved={saveWorkflowIntake} />}
         {view === "blueprint" && <AutomationBlueprintView candidate={workflowCandidate} locale={settings.locale} onBack={() => setView("automate")} onMapWorkflow={(candidate) => { setWorkflowCandidate(candidate); setView("workflow"); }} onDeleted={() => { setView("automate"); setNotice({ kind: "success", message: copy.blueprint.deleted }); }} />}
-        {view === "settings" && <SettingsView settings={settings} status={status} onSave={saveSettings} onExport={(format) => action(async () => { const path = await bridge.exportData(format); setNotice({ kind: "success", message: copy.notices.exported(path) }); })} onDelete={() => action(async () => { if (!window.confirm(copy.settings.deleteConfirm)) return; await bridge.deleteAllData(); setNotice({ kind: "success", message: copy.notices.deleted }); await load(); })} />}
+        {view === "settings" && <SettingsView settings={settings} status={status} classificationRules={classificationRules} onSave={saveSettings} onSaveRule={saveClassificationRule} onDeleteRule={deleteClassificationRule} onExport={(format) => action(async () => { const path = await bridge.exportData(format); setNotice({ kind: "success", message: copy.notices.exported(path) }); })} onDelete={() => action(async () => { if (!window.confirm(copy.settings.deleteConfirm)) return; await bridge.deleteAllData(); setNotice({ kind: "success", message: copy.notices.deleted }); await load(); })} />}
       </main>
       {notice && <div className={`toast ${notice.kind === "error" ? "is-error" : ""}`} role={notice.kind === "error" ? "alert" : "status"}>{notice.kind === "error" ? <AlertCircle size={15} aria-hidden="true" /> : <Check size={15} aria-hidden="true" />}{notice.message}</div>}
     </div>

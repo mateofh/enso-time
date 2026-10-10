@@ -19,6 +19,23 @@ import type {
   WorkflowIntakeV1,
   SaveAutomationBlueprintInputV1,
   BlueprintEvidenceV1,
+  CategoryId,
+  ClassificationRuleV1,
+  RuleImpactV1,
+  SessionClassificationInputV1,
+  SessionClassificationResultV1,
+  ReviewGroupV1,
+  ApplyReviewGroupInputV1,
+  ReviewOperationV1,
+  UndoReviewOperationInputV1,
+  AiConfigurationStatusV1,
+  AiFeedbackInputV1,
+  ConnectorClientV1,
+  ConnectorPairingV1,
+  EvaluationPayloadPreviewV1,
+  EvaluationReportV1,
+  OpenRouterModelV1,
+  ScreenOcrStatusV1,
 } from "./types";
 
 const STORAGE_KEY = "enso-time-web-state-v1";
@@ -28,10 +45,17 @@ interface WebState {
   checkIns: CheckInV1[];
   pausedUntil?: string;
   captureIssue?: CaptureIssue | null;
+  experimentalIntelligence?: boolean;
   workflowIntakes?: WorkflowIntakeV1[];
   automationBlueprints?: AutomationBlueprintDraftV1[];
   automationBlueprintError?: string | null;
   automationBlueprintConflict?: { currentRevision: number } | null;
+  classificationRules?: ClassificationRuleV1[];
+  classificationOverrides?: Record<string, { category: CategoryId; activityLabel?: string }>;
+  aiReports?: EvaluationReportV1[];
+  aiConsentFingerprint?: string;
+  hasOpenRouterKey?: boolean;
+  connectors?: ConnectorClientV1[];
 }
 
 export class BlueprintBridgeError extends Error {
@@ -48,7 +72,24 @@ function loadWebState(): WebState {
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
     if (stored) {
-      const state = JSON.parse(stored) as WebState;
+      const rawState = JSON.parse(stored) as WebState;
+      const state: WebState = {
+        ...rawState,
+        settings: {
+          ...demoSettings,
+          ...rawState.settings,
+          schemaVersion: 2,
+          deepCapture: {
+            ...demoSettings.deepCapture,
+            ...(rawState.settings?.deepCapture ?? {}),
+            browser: { ...demoSettings.deepCapture.browser, ...(rawState.settings?.deepCapture?.browser ?? {}) },
+            editor: { ...demoSettings.deepCapture.editor, ...(rawState.settings?.deepCapture?.editor ?? {}) },
+            shell: { ...demoSettings.deepCapture.shell, ...(rawState.settings?.deepCapture?.shell ?? {}) },
+            screenshots: { ...demoSettings.deepCapture.screenshots, ...(rawState.settings?.deepCapture?.screenshots ?? {}) },
+          },
+          ai: { ...demoSettings.ai, ...(rawState.settings?.ai ?? {}) },
+        },
+      };
       if (!Array.isArray(state.workflowIntakes)) return state;
       const workflowIntakes = migrateWorkflowIntakes(state.workflowIntakes);
       const migrated = { ...state, workflowIntakes };
@@ -65,9 +106,49 @@ function saveWebState(state: WebState) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
 }
 
+function previewFingerprint(value: unknown): string {
+  const input = JSON.stringify(value);
+  let hash = 2166136261;
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `preview-${(hash >>> 0).toString(16).padStart(8, "0")}`;
+}
+
 function utcDay(timestamp: string): string {
   const milliseconds = Date.parse(timestamp);
   return Number.isFinite(milliseconds) ? new Date(milliseconds).toISOString().slice(0, 10) : timestamp.slice(0, 10);
+}
+
+function normalizedMatch(value: string): string {
+  return value.replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g, "").toLocaleLowerCase().trim().replace(/\s+/g, " ");
+}
+
+function isBrowserApp(app: string): boolean {
+  return /chrome|safari|firefox|edge|arc|brave|orion/i.test(app);
+}
+
+function reviewPattern(block: TimelineBlockV1): string | undefined {
+  if (!isBrowserApp(block.app) || !block.title?.trim()) return undefined;
+  return block.title
+    .split(/\s(?:—|–|-|\||·)\s/)
+    .map((value) => value.trim())
+    .reverse()
+    .find((value) => value.length >= 3 && value.length <= 80 && normalizedMatch(value) !== normalizedMatch(block.app));
+}
+
+function ruleMatches(rule: ClassificationRuleV1, block: TimelineBlockV1): boolean {
+  const app = normalizedMatch(block.app);
+  if (rule.scope === "legacy") return `${app} ${normalizedMatch(block.title ?? "")}`.includes(normalizedMatch(rule.app));
+  if (app !== normalizedMatch(rule.app)) return false;
+  return rule.scope === "app" || normalizedMatch(block.title ?? "").includes(normalizedMatch(rule.titlePattern ?? ""));
+}
+
+function previewRuleImpact(rule: ClassificationRuleV1, state: WebState): RuleImpactV1 {
+  const overrides = state.classificationOverrides ?? {};
+  const matches = demoTimeline.filter((block) => block.correctable && !overrides[block.id] && ruleMatches(rule, block));
+  return { sessions: matches.length, durationSeconds: matches.reduce((sum, block) => sum + block.durationSeconds, 0) };
 }
 
 export function previewBlueprintEvidence(intake: WorkflowIntakeV1, checkIns: CheckInV1[], locale: string): BlueprintEvidenceV1 {
@@ -156,14 +237,144 @@ export const bridge = {
     const state = loadWebState();
     return {
       ...demoTrackingStatus(state.captureIssue),
+      experimentalIntelligence: state.experimentalIntelligence ?? false,
       running: !state.pausedUntil || new Date(state.pausedUntil) <= new Date(),
       pausedUntil: state.pausedUntil,
       pendingCheckIns: state.checkIns.filter((item) => item.status === "pending").length,
     };
   },
 
+  async retryCapture(): Promise<TrackingStatus> {
+    if (isTauri()) return invoke("retry_capture");
+    const state = loadWebState();
+    state.captureIssue = null;
+    saveWebState(state);
+    return bridge.getTrackingStatus();
+  },
+
+  async requestAccessibilityPermission(): Promise<void> {
+    if (isTauri()) return invoke("request_accessibility_permission");
+  },
+
   async getTimeline(from: string, to: string): Promise<TimelineBlockV1[]> {
-    return isTauri() ? invoke("get_timeline", { from, to }) : demoTimeline;
+    if (isTauri()) return invoke("get_timeline", { from, to });
+    const state = loadWebState();
+    const rules = state.classificationRules ?? [];
+    const overrides = state.classificationOverrides ?? {};
+    return demoTimeline.map((block) => {
+      const override = overrides[block.id];
+      if (override) return { ...block, ...override, classificationSource: "override" as const, confidence: 1 };
+      const rule = rules.find((item) => ruleMatches(item, block));
+      return rule ? { ...block, category: rule.category, activityLabel: rule.activityLabel, classificationSource: "rule" as const, ruleId: rule.id, confidence: 1 } : block;
+    });
+  },
+
+  async listClassificationRules(): Promise<ClassificationRuleV1[]> {
+    return isTauri() ? invoke("list_classification_rules") : loadWebState().classificationRules ?? [];
+  },
+
+  async listReviewGroups(from: string, to: string): Promise<ReviewGroupV1[]> {
+    if (isTauri()) return invoke("list_review_groups", { from, to });
+    const blocks = (await bridge.getTimeline(from, to)).filter((block) => block.category === "unknown" && block.correctable !== false);
+    const groups = new Map<string, ReviewGroupV1>();
+    for (const block of blocks) {
+      const titlePattern = reviewPattern(block);
+      const id = `${normalizedMatch(block.app)}::${normalizedMatch(titlePattern ?? "")}`;
+      const group = groups.get(id) ?? {
+        id, app: block.app, titlePattern, sampleTitle: block.title, sessions: 0,
+        durationSeconds: 0, firstSeen: block.start, lastSeen: block.end,
+        browserFallback: isBrowserApp(block.app) && !titlePattern,
+      };
+      group.sessions += 1;
+      group.durationSeconds += block.durationSeconds;
+      if (block.start < group.firstSeen) group.firstSeen = block.start;
+      if (block.end > group.lastSeen) group.lastSeen = block.end;
+      groups.set(id, group);
+    }
+    return [...groups.values()].sort((left, right) => right.durationSeconds - left.durationSeconds);
+  },
+
+  async applyReviewGroup(input: ApplyReviewGroupInputV1): Promise<ReviewOperationV1> {
+    if (isTauri()) return invoke("apply_review_group", { input });
+    const blocks = (await bridge.getTimeline(input.from, input.to)).filter((block) =>
+      block.category === "unknown"
+      && normalizedMatch(block.app) === normalizedMatch(input.app)
+      && normalizedMatch(reviewPattern(block) ?? "") === normalizedMatch(input.titlePattern ?? ""));
+    if (!blocks.length) throw new Error("Este grupo ya no contiene sesiones sin clasificar");
+    const state = loadWebState();
+    if (input.mode === "rule") {
+      const now = new Date().toISOString();
+      const rule: ClassificationRuleV1 = {
+        id: crypto.randomUUID(), scope: input.titlePattern ? "app-title" : "app", app: input.app,
+        titlePattern: input.titlePattern, category: input.category, activityLabel: input.activityLabel,
+        createdAt: now, updatedAt: now,
+      };
+      state.classificationRules = [rule, ...(state.classificationRules ?? []).filter((item) => !(
+        item.scope === rule.scope && normalizedMatch(item.app) === normalizedMatch(rule.app)
+        && normalizedMatch(item.titlePattern ?? "") === normalizedMatch(rule.titlePattern ?? "")))];
+      saveWebState(state);
+      return { id: crypto.randomUUID(), mode: "rule", affectedSessions: blocks.length, blockIds: [], ruleId: rule.id };
+    }
+    state.classificationOverrides = { ...(state.classificationOverrides ?? {}) };
+    for (const block of blocks) state.classificationOverrides[block.id] = { category: input.category, activityLabel: input.activityLabel };
+    saveWebState(state);
+    return { id: crypto.randomUUID(), mode: "sessions", affectedSessions: blocks.length, blockIds: blocks.map((block) => block.id) };
+  },
+
+  async undoReviewOperation(input: UndoReviewOperationInputV1): Promise<void> {
+    if (isTauri()) return invoke("undo_review_operation", { input });
+    const state = loadWebState();
+    if (input.ruleId) state.classificationRules = (state.classificationRules ?? []).filter((rule) => rule.id !== input.ruleId);
+    else for (const blockId of input.blockIds) delete state.classificationOverrides?.[blockId];
+    saveWebState(state);
+  },
+
+  async saveSessionClassification(input: SessionClassificationInputV1): Promise<SessionClassificationResultV1> {
+    if (isTauri()) return invoke("save_session_classification", { input });
+    const state = loadWebState();
+    const block = demoTimeline.find((item) => item.id === input.blockId);
+    if (!block) throw new Error("La sesión ya no está disponible");
+    state.classificationOverrides = { ...(state.classificationOverrides ?? {}), [block.id]: { category: input.category, activityLabel: input.activityLabel } };
+    saveWebState(state);
+    const browser = isBrowserApp(block.app);
+    const now = new Date().toISOString();
+    const rule: ClassificationRuleV1 = {
+      id: crypto.randomUUID(), scope: browser ? "app-title" : "app", app: block.app,
+      titlePattern: browser ? reviewPattern(block) : undefined, category: input.category,
+      activityLabel: input.activityLabel, createdAt: now, updatedAt: now,
+    };
+    if (browser && !rule.titlePattern) rule.scope = "app";
+    return {
+      block: { ...block, category: input.category, activityLabel: input.activityLabel, classificationSource: "override", confidence: 1 },
+      suggestion: { rule, impact: previewRuleImpact(rule, state) },
+    };
+  },
+
+  async clearSessionClassification(blockId: string): Promise<TimelineBlockV1> {
+    if (isTauri()) return invoke("clear_session_classification", { blockId });
+    const state = loadWebState();
+    delete state.classificationOverrides?.[blockId];
+    saveWebState(state);
+    return (await bridge.getTimeline("", "")).find((block) => block.id === blockId)!;
+  },
+
+  async previewClassificationRule(rule: ClassificationRuleV1): Promise<RuleImpactV1> {
+    return isTauri() ? invoke("preview_classification_rule", { rule }) : previewRuleImpact(rule, loadWebState());
+  },
+
+  async saveClassificationRule(rule: ClassificationRuleV1): Promise<ClassificationRuleV1> {
+    if (isTauri()) return invoke("save_classification_rule", { rule });
+    const state = loadWebState();
+    state.classificationRules = [rule, ...(state.classificationRules ?? []).filter((item) => item.id !== rule.id)];
+    saveWebState(state);
+    return rule;
+  },
+
+  async deleteClassificationRule(id: string): Promise<void> {
+    if (isTauri()) return invoke("delete_classification_rule", { id });
+    const state = loadWebState();
+    state.classificationRules = (state.classificationRules ?? []).filter((item) => item.id !== id);
+    saveWebState(state);
   },
 
   async listCheckIns(): Promise<CheckInV1[]> {
@@ -187,6 +398,95 @@ export const bridge = {
     const state = loadWebState();
     const diagnostic = days === 7 ? createDiagnostic(demoTimeline, state.checkIns, 5, state.settings.role, state.settings.goals) : { ...demoDiagnostic, daysObserved: 5, preliminary: true };
     return enrichPreviewDiagnostic(diagnostic, state);
+  },
+
+  async saveOpenRouterApiKey(apiKey: string): Promise<void> {
+    if (isTauri()) return invoke("save_openrouter_api_key", { apiKey });
+    const state = loadWebState(); state.hasOpenRouterKey = Boolean(apiKey.trim()); saveWebState(state);
+  },
+
+  async deleteOpenRouterApiKey(): Promise<void> {
+    if (isTauri()) return invoke("delete_openrouter_api_key");
+    const state = loadWebState(); state.hasOpenRouterKey = false; saveWebState(state);
+  },
+
+  async listOpenRouterModels(): Promise<OpenRouterModelV1[]> {
+    if (isTauri()) return invoke("list_openrouter_models");
+    return [
+      { id: "demo/fast-structured", name: "Demo · Analista rápido", contextLength: 128000, promptPrice: 0.0000002, completionPrice: 0.0000008, supportsStructuredOutput: true },
+      { id: "demo/strong-structured", name: "Demo · Evaluador fuerte", contextLength: 128000, promptPrice: 0.000001, completionPrice: 0.000005, supportsStructuredOutput: true },
+    ];
+  },
+
+  async getAiConfigurationStatus(): Promise<AiConfigurationStatusV1> {
+    if (isTauri()) return invoke("get_ai_configuration_status");
+    const state = loadWebState();
+    return { hasApiKey: Boolean(state.hasOpenRouterKey), ready: Boolean(state.settings.ai.enabled && state.hasOpenRouterKey && state.aiConsentFingerprint), consentCurrent: Boolean(state.aiConsentFingerprint), spentThisMonthUsd: 0, budgetUsd: state.settings.ai.monthlyBudgetUsd, analystModel: state.settings.ai.analystModel, evaluatorModel: state.settings.ai.evaluatorModel };
+  },
+
+  async previewAiEvaluation(days: 7 | 14 | 28): Promise<EvaluationPayloadPreviewV1> {
+    if (isTauri()) return invoke("preview_ai_evaluation", { days });
+    const state = loadWebState();
+    const diagnostic = createDiagnostic(demoTimeline, state.checkIns, Math.min(days, 5), state.settings.role, state.settings.goals);
+    const fingerprint = previewFingerprint({ analyst: state.settings.ai.analystModel, evaluator: state.settings.ai.evaluatorModel, deep: state.settings.deepCapture });
+    return {
+      policyFingerprint: fingerprint,
+      sources: ["timeline-aggregates", "human-corrections"],
+      estimatedInputTokens: 900,
+      estimatedMaxCostUsd: 0.02,
+      budgetRemainingUsd: state.settings.ai.monthlyBudgetUsd ?? 0,
+      consentCurrent: state.aiConsentFingerprint === fingerprint,
+      payload: { schemaVersion: 1, generatedAt: new Date().toISOString(), rangeStart: diagnostic.rangeStart, rangeEnd: diagnostic.rangeEnd, daysObserved: diagnostic.daysObserved, role: state.settings.role, goals: state.settings.goals, sources: ["timeline-aggregates", "human-corrections"], evidence: diagnostic.candidates.map((candidate) => ({ id: candidate.id, kind: "automation-candidate", label: candidate.activityLabel, durationSeconds: candidate.estimatedWeeklyHours * 3600, occurrences: candidate.weeklyFrequency, apps: [], context: candidate.evidence })) },
+    };
+  },
+
+  async grantCloudConsent(policyFingerprint: string): Promise<void> {
+    if (isTauri()) return invoke("grant_cloud_consent", { policyFingerprint });
+    const state = loadWebState(); state.aiConsentFingerprint = policyFingerprint; saveWebState(state);
+  },
+
+  async revokeCloudConsent(): Promise<void> {
+    if (isTauri()) return invoke("revoke_cloud_consent");
+    const state = loadWebState(); delete state.aiConsentFingerprint; saveWebState(state);
+  },
+
+  async runAiEvaluation(days: 7 | 14 | 28, trigger: "manual" | "weekly" = "manual"): Promise<EvaluationReportV1> {
+    if (isTauri()) return invoke("run_ai_evaluation", { days });
+    const state = loadWebState();
+    const diagnostic = createDiagnostic(demoTimeline, state.checkIns, Math.min(days, 5), state.settings.role, state.settings.goals);
+    const candidate = diagnostic.candidates[0];
+    const report: EvaluationReportV1 = { schemaVersion: 1, id: crypto.randomUUID(), trigger, generatedAt: new Date().toISOString(), analystModel: state.settings.ai.analystModel ?? "demo/fast-structured", evaluatorModel: state.settings.ai.evaluatorModel ?? "demo/strong-structured", summary: candidate ? "El evaluador encontró una oportunidad respaldada por tu evidencia." : "Todavía falta evidencia repetida.", opportunities: candidate ? [{ id: `op-${candidate.id}`, title: `Asistir ${candidate.activityLabel} con IA`, candidateId: candidate.id, problem: "La actividad aparece de forma repetida.", solutionLevel: "assistant", evidenceIds: [candidate.id], rationale: candidate.evidence.join(" · "), experiment: "Prueba durante siete días un asistente con revisión humana.", successMetric: "Reducir tiempo sin aumentar correcciones.", estimatedWeeklyHours: candidate.estimatedWeeklyHours, evaluator: { opportunityId: `op-${candidate.id}`, faithfulness: 5, specificity: 4, feasibility: 4, impact: 4, safety: 4, approved: true, reasons: ["Respaldada por evidencia local"] } }] : [], rejectedCount: 0, inputTokens: 900, outputTokens: 350, costUsd: 0.02 };
+    state.aiReports = [report, ...(state.aiReports ?? [])]; saveWebState(state); return report;
+  },
+
+  async listAiReports(): Promise<EvaluationReportV1[]> {
+    return isTauri() ? invoke("list_ai_reports") : loadWebState().aiReports ?? [];
+  },
+
+  async saveAiFeedback(input: AiFeedbackInputV1): Promise<void> {
+    if (isTauri()) return invoke("save_ai_feedback", { input });
+  },
+
+  async createConnectorPairing(kind: "browser" | "editor" | "shell", name: string): Promise<ConnectorPairingV1> {
+    if (isTauri()) return invoke("create_connector_pairing", { kind, name });
+    return { code: "12345678", kind, name, expiresAt: new Date(Date.now() + 300000).toISOString(), serverPort: 5618 };
+  },
+
+  async listConnectorClients(): Promise<ConnectorClientV1[]> {
+    return isTauri() ? invoke("list_connector_clients") : loadWebState().connectors ?? [];
+  },
+
+  async revokeConnectorClient(id: string): Promise<void> {
+    if (isTauri()) return invoke("revoke_connector_client", { id });
+    const state = loadWebState(); state.connectors = (state.connectors ?? []).filter((client) => client.id !== id); saveWebState(state);
+  },
+
+  async getScreenOcrStatus(): Promise<ScreenOcrStatusV1> {
+    return isTauri() ? invoke("get_screen_ocr_status") : { supported: false, permission: "unsupported" };
+  },
+
+  async requestScreenOcrPermission(): Promise<ScreenOcrStatusV1> {
+    return isTauri() ? invoke("request_screen_ocr_permission") : { supported: false, permission: "unsupported" };
   },
 
   async listWorkflowIntakes(): Promise<WorkflowIntakeV1[]> {
