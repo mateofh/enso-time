@@ -589,7 +589,7 @@ export const bridge = {
   },
 
   async checkForUpdate(): Promise<UpdateInfo> {
-    return isTauri() ? invoke("check_for_update") : { available: false, currentVersion: "0.2.0-beta.1" };
+    return isTauri() ? invoke("check_for_update") : { available: false, currentVersion: "0.2.0-beta.2" };
   },
 
   async openExternal(url: string): Promise<void> {
