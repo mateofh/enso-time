@@ -13,3 +13,5 @@ de Ensō Time; Chrome solicitará el permiso de sitio correspondiente.
 El token se guarda en `chrome.storage.local`, funciona solo contra el servidor loopback
 de Ensō Time y puede revocarse desde la aplicación. Desactivar Navegador en Ensō Time
 hace que el servidor rechace inmediatamente nuevos eventos.
+
+Guía completa y solución de problemas: [`docs/CONNECTORS.md`](../../docs/CONNECTORS.md).

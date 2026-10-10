@@ -102,10 +102,12 @@ than silently pretending to track.
 
 ### Optional context connectors
 
+Step-by-step install, pairing, and troubleshooting: [`docs/CONNECTORS.md`](docs/CONNECTORS.md).
+
 - Chromium: load [`connectors/chromium`](connectors/chromium) as an unpacked extension,
   enable **Browser** in Ensō Time, and pair it with the displayed eight-digit code.
-- VS Code/Cursor: package or run [`connectors/vscode`](connectors/vscode) as an extension,
-  enable **Editor**, and run `Ensō Time: Emparejar con la aplicación`.
+- VS Code/Cursor: package [`connectors/vscode`](connectors/vscode) with `vsce`, install the
+  `.vsix`, enable **Editor**, and run `Ensō Time: Emparejar con la aplicación`.
 - Terminal: follow [`connectors/shell/README.md`](connectors/shell/README.md), enable
   **Terminal**, and pair `enso-context.py` once.
 
