@@ -3774,7 +3774,8 @@ fn main() {{
         let client = env::var("ENSO_TEST_CLIENT_NAME").unwrap();
         let hostname = env::var("ENSO_TEST_HOSTNAME").unwrap();
         let key = env::var("ENSO_TEST_API_KEY").unwrap();
-        if client == "aw-watcher-window" {{
+        // Only the macOS capture helper receives the key through the environment.
+        if cfg!(target_os = "macos") && client == "aw-watcher-window" {{
             assert_eq!(env::var("ENSO_ACTIVITYWATCH_API_KEY").unwrap(), key);
             assert!(!args.iter().any(|argument| argument.contains(&key)));
         }}
