@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Ensō Time Context",
+  "version": "0.1.0",
+  "description": "Envía contexto de la pestaña activa a Ensō Time en este equipo.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA1VPBDWopYYqZ3/XOEA4V//sY/tnINq8MrllnfHpiSLQq52A8IgBRH3IRkXMaWBY5QYnPNx83hCRfmWhCKLixfvmnk0ag0fPUREI9bI0iR3iiC+uDUj3c4GSKrINLAJu5s+IYk2bREAocnLpDyBiTx5h6/XPG9C2O+2k8lJPAkOlQmQUs/fROYBB+i3f3sad80DS5SzEbC46qDlzvQNj1rCeOahPSUw7zG/gjL8U7hBzMmxGlfgIoLhfG9rgNzRO2CJQAWH+M/tmS3rmVf5FpXSiFeUMAqEQD10HpN5nfere2dCTq9aqfAlmQ8Sle2D0vqSTkWSK1dXMnfgHQ7sla4QIDAQAB",
+  "permissions": ["alarms", "storage", "tabs", "scripting"],
+  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "background": { "service_worker": "service-worker.js", "type": "module" },
+  "options_page": "options.html",
+  "action": { "default_title": "Configurar Ensō Time Context" }
+}

@@ -11,6 +11,7 @@ import {
   normalizeTarget,
   parseArgs,
   TARGETS,
+  watchersForTarget,
 } from "./prepare-activitywatch.mjs";
 
 test("normaliza triples de Tauri y targets canónicos", () => {
@@ -26,6 +27,12 @@ test("detecta las tres plataformas soportadas", () => {
   assert.equal(detectTarget("darwin", "x64"), "macos-x86_64");
   assert.equal(detectTarget("win32", "x64"), "windows-x86_64");
   assert.throws(() => detectTarget("linux", "x64"), /Plataforma no soportada/);
+});
+
+test("macOS usa captura nativa y Windows conserva ambos watchers", () => {
+  assert.deepEqual(watchersForTarget("macos-arm64"), []);
+  assert.deepEqual(watchersForTarget("macos-x86_64"), []);
+  assert.deepEqual(watchersForTarget("windows-x86_64"), ["aw-watcher-window", "aw-watcher-afk"]);
 });
 
 test("parsea dry-run sin cambiar el target explícito", () => {
@@ -61,7 +68,8 @@ test("el manifiesto enumera y firma el runtime extraído", async () => {
       source: "https://example.test/fixture.zip",
       target: "macos-arm64",
     });
-    assert.equal(manifest.schemaVersion, 1);
+    assert.equal(manifest.schemaVersion, 2);
+    assert.equal(manifest.windowHelper, null);
     assert.equal(manifest.files.length, 1);
     assert.equal(manifest.files[0].path, "aw-watcher-afk/aw-watcher-afk");
     assert.equal(manifest.files[0].bytes, 7);

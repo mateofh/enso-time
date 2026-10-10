@@ -1,0 +1,20 @@
+{
+  "name": "enso-time-context",
+  "displayName": "Ensō Time Context",
+  "description": "Comparte metadatos de proyecto con Ensō Time; el contenido solo se comparte manualmente.",
+  "version": "0.1.0",
+  "publisher": "enso-time",
+  "license": "SEE LICENSE IN ../../LICENSE",
+  "engines": { "vscode": "^1.90.0" },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished", "onCommand:ensoTime.pair", "onCommand:ensoTime.shareSelection"],
+  "main": "extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "ensoTime.pair", "title": "Ensō Time: Emparejar con la aplicación" },
+      { "command": "ensoTime.shareSelection", "title": "Ensō Time: Compartir selección una vez" },
+      { "command": "ensoTime.disconnect", "title": "Ensō Time: Desconectar este editor" }
+    ]
+  },
+  "scripts": { "test": "node --test extension.test.js" }
+}

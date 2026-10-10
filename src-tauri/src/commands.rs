@@ -5,13 +5,21 @@ use crate::blueprint::{
     BlueprintStatusV1, SaveAutomationBlueprintInputV1, BLUEPRINT_EXPORT_SCHEMA_VERSION,
 };
 use crate::diagnostics::create_diagnostic;
+use crate::intelligence::{
+    AiConfigurationStatusV1, AiFeedbackInputV1, ContextObservationV2, EvaluationPayloadPreviewV1,
+    EvaluationReportV1, EvidenceBundleV1, OpenRouterModelV1,
+};
 use crate::models::{
-    iso_now, parse_utc, CheckInAnswer, CheckInV1, DiagnosticV1, ExportEnvelope, SettingsV1,
-    StudyProgress, TimelineBlockV1, TrackingStatus, UpdateInfo, WorkflowIntakeV1,
+    iso_now, parse_utc, ApplyReviewGroupInputV1, CheckInAnswer, CheckInV1,
+    ClassificationOverrideV1, ClassificationRuleV1, DiagnosticV1, ExportEnvelope, ReviewGroupV1,
+    ReviewOperationV1, RuleImpactV1, RuleSuggestionV1, SessionClassificationInputV1,
+    SessionClassificationResultV1, SettingsV1, StudyProgress, TimelineBlockV1, TrackingStatus,
+    UndoReviewOperationInputV1, UpdateInfo, WorkflowIntakeV1,
 };
 use crate::storage::{BlueprintStoreResult, LocalStore};
 use chrono::{Datelike, Duration, Timelike, Utc};
 use chrono_tz::Tz;
+use std::collections::HashMap;
 use std::fs::{OpenOptions, Permissions};
 use std::io::Write;
 use std::path::PathBuf;
@@ -31,6 +39,7 @@ pub struct AppState {
     pub store: Arc<LocalStore>,
     pub activity: Arc<ActivityWatchRuntime>,
     pub app_data_dir: PathBuf,
+    pub connector_gateway: Arc<crate::connectors::ConnectorGateway>,
 }
 
 pub struct CaptureGate {
@@ -187,7 +196,10 @@ impl Drop for SchedulerHandle {
 
 #[tauri::command]
 pub fn get_settings(state: State<'_, AppState>) -> Result<SettingsV1, String> {
-    state.store.settings()
+    state
+        .store
+        .settings()
+        .map(crate::features::effective_settings)
 }
 
 #[tauri::command]
@@ -198,6 +210,7 @@ pub fn save_settings(
 ) -> Result<SettingsV1, String> {
     let operation = state.capture_gate.operation()?;
     let previous = state.store.settings()?;
+    let settings = crate::features::effective_settings(settings);
     settings.validate()?;
     configure_autostart(&app, settings.onboarding_completed && settings.autostart)?;
     state.store.save_settings(&settings)?;
@@ -224,6 +237,12 @@ pub fn save_settings(
         }
     }
     state.store.prune_checkins(settings.retention_days)?;
+    state
+        .store
+        .prune_classification_overrides(settings.retention_days)?;
+    state
+        .store
+        .prune_context_and_ai_runs(settings.retention_days)?;
     state.activity.prune_activity(settings.retention_days)?;
     Ok(settings)
 }
@@ -231,6 +250,39 @@ pub fn save_settings(
 #[tauri::command]
 pub fn get_tracking_status(state: State<'_, AppState>) -> Result<TrackingStatus, String> {
     status(&state)
+}
+
+#[tauri::command]
+pub fn retry_capture(state: State<'_, AppState>) -> Result<TrackingStatus, String> {
+    let operation = state.capture_gate.operation()?;
+    if is_running(&state.store)? {
+        let settings = state.store.settings()?;
+        operation.ensure_current()?;
+        state
+            .activity
+            .retry_watchers(settings.capture_window_titles)?;
+    }
+    drop(operation);
+    status(&state)
+}
+
+#[tauri::command]
+pub fn request_accessibility_permission(state: State<'_, AppState>) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        state.activity.request_accessibility_permission()?;
+        let status = std::process::Command::new("/usr/bin/open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+            .status()
+            .map_err(|error| format!("No se pudo abrir Accesibilidad: {error}"))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("Ajustes del Sistema terminó con {status}"))
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    Err("Accesibilidad sólo está disponible en macOS".into())
 }
 
 #[tauri::command]
@@ -244,9 +296,11 @@ pub fn get_timeline(
     validate_range(from_date, to_date)?;
     let settings = state.store.settings()?;
     let checkins = state.store.checkins_between(&from, &to)?;
+    let rules = state.store.classification_rules()?;
+    let overrides = state.store.classification_overrides_between(&from, &to)?;
     state
         .activity
-        .timeline(from_date, to_date, &settings, &checkins)
+        .timeline(from_date, to_date, &settings, &checkins, &rules, &overrides)
 }
 
 #[tauri::command]
@@ -260,6 +314,434 @@ pub fn answer_checkin(
     answer: CheckInAnswer,
 ) -> Result<CheckInV1, String> {
     state.store.answer_checkin(&answer)
+}
+
+#[tauri::command]
+pub fn list_classification_rules(
+    state: State<'_, AppState>,
+) -> Result<Vec<ClassificationRuleV1>, String> {
+    state.store.classification_rules()
+}
+
+#[tauri::command]
+pub fn list_review_groups(
+    state: State<'_, AppState>,
+    from: String,
+    to: String,
+) -> Result<Vec<ReviewGroupV1>, String> {
+    let blocks = timeline_for_review(&state, &from, &to)?;
+    let mut groups: HashMap<String, ReviewGroupV1> = HashMap::new();
+    for block in blocks
+        .into_iter()
+        .filter(|block| block.category == "unknown" && block.correctable)
+    {
+        let title_pattern = review_title_pattern(&block);
+        let normalized_app = crate::activitywatch::normalize_match_text(&block.app);
+        let normalized_pattern = title_pattern
+            .as_deref()
+            .map(crate::activitywatch::normalize_match_text)
+            .unwrap_or_default();
+        let id = format!("{normalized_app}::{normalized_pattern}");
+        let entry = groups.entry(id.clone()).or_insert_with(|| ReviewGroupV1 {
+            id,
+            app: block.app.clone(),
+            title_pattern: title_pattern.clone(),
+            sample_title: block.title.clone(),
+            sessions: 0,
+            duration_seconds: 0,
+            first_seen: block.start.clone(),
+            last_seen: block.end.clone(),
+            browser_fallback: crate::activitywatch::is_browser(&normalized_app)
+                && title_pattern.is_none(),
+        });
+        entry.sessions += 1;
+        entry.duration_seconds += block.duration_seconds;
+        if block.start < entry.first_seen {
+            entry.first_seen = block.start;
+        }
+        if block.end > entry.last_seen {
+            entry.last_seen = block.end;
+        }
+    }
+    let mut groups = groups.into_values().collect::<Vec<_>>();
+    groups.sort_by(|left, right| {
+        right
+            .duration_seconds
+            .cmp(&left.duration_seconds)
+            .then_with(|| left.app.cmp(&right.app))
+    });
+    Ok(groups)
+}
+
+#[tauri::command]
+pub fn apply_review_group(
+    state: State<'_, AppState>,
+    mut input: ApplyReviewGroupInputV1,
+) -> Result<ReviewOperationV1, String> {
+    input.app = input.app.trim().to_string();
+    input.title_pattern = input
+        .title_pattern
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    input.activity_label = input
+        .activity_label
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    input.validate()?;
+    let blocks = timeline_for_review(&state, &input.from, &input.to)?;
+    let normalized_app = crate::activitywatch::normalize_match_text(&input.app);
+    let normalized_pattern = input
+        .title_pattern
+        .as_deref()
+        .map(crate::activitywatch::normalize_match_text);
+    let matching = blocks
+        .into_iter()
+        .filter(|block| block.category == "unknown" && block.correctable)
+        .filter(|block| crate::activitywatch::normalize_match_text(&block.app) == normalized_app)
+        .filter(|block| {
+            review_title_pattern(block)
+                .as_deref()
+                .map(crate::activitywatch::normalize_match_text)
+                == normalized_pattern
+        })
+        .collect::<Vec<_>>();
+    if matching.is_empty() {
+        return Err("Este grupo ya no contiene sesiones sin clasificar".into());
+    }
+    let operation_id = Uuid::new_v4().to_string();
+    if input.mode == "rule" {
+        let now = iso_now();
+        let scope = if input.title_pattern.is_some() {
+            "app-title"
+        } else {
+            "app"
+        };
+        let rule = ClassificationRuleV1 {
+            id: Uuid::new_v4().to_string(),
+            scope: scope.into(),
+            app: input.app,
+            title_pattern: input.title_pattern,
+            category: input.category,
+            activity_label: input.activity_label,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        let rule = state.store.save_classification_rule(&rule)?;
+        return Ok(ReviewOperationV1 {
+            id: operation_id,
+            mode: "rule".into(),
+            affected_sessions: matching.len(),
+            block_ids: Vec::new(),
+            rule_id: Some(rule.id),
+        });
+    }
+
+    let now = iso_now();
+    let overrides = matching
+        .iter()
+        .map(|block| ClassificationOverrideV1 {
+            block_id: block.id.clone(),
+            event_start: block.start.clone(),
+            event_end: block.end.clone(),
+            category: input.category.clone(),
+            activity_label: input.activity_label.clone(),
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        })
+        .collect::<Vec<_>>();
+    state.store.save_classification_overrides(&overrides)?;
+    Ok(ReviewOperationV1 {
+        id: operation_id,
+        mode: "sessions".into(),
+        affected_sessions: overrides.len(),
+        block_ids: overrides.into_iter().map(|item| item.block_id).collect(),
+        rule_id: None,
+    })
+}
+
+#[tauri::command]
+pub fn undo_review_operation(
+    state: State<'_, AppState>,
+    input: UndoReviewOperationInputV1,
+) -> Result<(), String> {
+    if let Some(rule_id) = input.rule_id {
+        if rule_id.is_empty() || rule_id.chars().count() > 128 {
+            return Err("La regla no es válida".into());
+        }
+        state.store.delete_classification_rule(&rule_id)
+    } else {
+        state
+            .store
+            .delete_classification_overrides(&input.block_ids)
+    }
+}
+
+fn timeline_for_review(
+    state: &AppState,
+    from: &str,
+    to: &str,
+) -> Result<Vec<TimelineBlockV1>, String> {
+    let from_date = parse_utc(from)?;
+    let to_date = parse_utc(to)?;
+    validate_range(from_date, to_date)?;
+    let settings = state.store.settings()?;
+    let checkins = state.store.checkins_between(from, to)?;
+    let rules = state.store.classification_rules()?;
+    let overrides = state.store.classification_overrides_between(from, to)?;
+    state
+        .activity
+        .timeline(from_date, to_date, &settings, &checkins, &rules, &overrides)
+}
+
+fn review_title_pattern(block: &TimelineBlockV1) -> Option<String> {
+    crate::activitywatch::is_browser(&crate::activitywatch::normalize_match_text(&block.app))
+        .then(|| {
+            block
+                .title
+                .as_deref()
+                .and_then(|title| suggest_title_pattern(title, &block.app))
+        })
+        .flatten()
+}
+
+fn same_rule_key(left: &ClassificationRuleV1, right: &ClassificationRuleV1) -> bool {
+    left.scope == right.scope
+        && crate::activitywatch::normalize_match_text(&left.app)
+            == crate::activitywatch::normalize_match_text(&right.app)
+        && left
+            .title_pattern
+            .as_deref()
+            .map(crate::activitywatch::normalize_match_text)
+            == right
+                .title_pattern
+                .as_deref()
+                .map(crate::activitywatch::normalize_match_text)
+}
+
+#[tauri::command]
+pub fn save_session_classification(
+    state: State<'_, AppState>,
+    input: SessionClassificationInputV1,
+) -> Result<SessionClassificationResultV1, String> {
+    input.validate()?;
+    let current = classification_block(&state, &input.block_id)?;
+    if !current.correctable {
+        return Err("Esta sesión no admite una corrección manual".into());
+    }
+    let now = iso_now();
+    let item = ClassificationOverrideV1 {
+        block_id: current.id.clone(),
+        event_start: current.start.clone(),
+        event_end: current.end.clone(),
+        category: input.category.clone(),
+        activity_label: input
+            .activity_label
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        created_at: now.clone(),
+        updated_at: now.clone(),
+    };
+    state.store.save_classification_override(&item)?;
+    let block = classification_block(&state, &input.block_id)?;
+    let suggestion = suggested_rule(&block, &now)
+        .map(|rule| {
+            let impact = classification_rule_impact(&state, &rule)?;
+            Ok::<_, String>(RuleSuggestionV1 { rule, impact })
+        })
+        .transpose()?;
+    Ok(SessionClassificationResultV1 { block, suggestion })
+}
+
+#[tauri::command]
+pub fn clear_session_classification(
+    state: State<'_, AppState>,
+    block_id: String,
+) -> Result<TimelineBlockV1, String> {
+    state.store.delete_classification_override(&block_id)?;
+    if let Some((source_id, _)) = block_id.split_once('@') {
+        state.store.delete_classification_override(source_id)?;
+    }
+    classification_block(&state, &block_id)
+}
+
+#[tauri::command]
+pub fn preview_classification_rule(
+    state: State<'_, AppState>,
+    rule: ClassificationRuleV1,
+) -> Result<RuleImpactV1, String> {
+    rule.validate()?;
+    classification_rule_impact(&state, &rule)
+}
+
+#[tauri::command]
+pub fn save_classification_rule(
+    state: State<'_, AppState>,
+    mut rule: ClassificationRuleV1,
+) -> Result<ClassificationRuleV1, String> {
+    let now = iso_now();
+    let existing = state
+        .store
+        .classification_rules()?
+        .into_iter()
+        .find(|item| item.id == rule.id);
+    rule.created_at = existing
+        .as_ref()
+        .map(|item| item.created_at.clone())
+        .unwrap_or_else(|| now.clone());
+    rule.updated_at = now;
+    rule.app = rule.app.trim().to_string();
+    rule.title_pattern = rule
+        .title_pattern
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    rule.activity_label = rule
+        .activity_label
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if existing.is_none() {
+        if let Some(duplicate) = state
+            .store
+            .classification_rules()?
+            .into_iter()
+            .find(|item| same_rule_key(item, &rule))
+        {
+            rule.id = duplicate.id;
+            rule.created_at = duplicate.created_at;
+        }
+    }
+    state.store.save_classification_rule(&rule)
+}
+
+#[tauri::command]
+pub fn delete_classification_rule(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    if id.is_empty() || id.chars().count() > 128 {
+        return Err("La regla no es válida".into());
+    }
+    state.store.delete_classification_rule(&id)
+}
+
+fn classification_block(state: &AppState, block_id: &str) -> Result<TimelineBlockV1, String> {
+    let (start, end) = state.activity.window_event_interval(block_id)?;
+    let from = start.to_rfc3339();
+    let to = end.to_rfc3339();
+    let settings = state.store.settings()?;
+    let checkins = state.store.checkins_between(&from, &to)?;
+    let rules = state.store.classification_rules()?;
+    let overrides = state.store.classification_overrides_between(&from, &to)?;
+    state
+        .activity
+        .timeline(start, end, &settings, &checkins, &rules, &overrides)?
+        .into_iter()
+        .find(|block| block.id == block_id)
+        .ok_or_else(|| "La sesión ya no está disponible".into())
+}
+
+fn suggested_rule(block: &TimelineBlockV1, now: &str) -> Option<ClassificationRuleV1> {
+    let normalized_app = crate::activitywatch::normalize_match_text(&block.app);
+    let (scope, title_pattern) = if crate::activitywatch::is_browser(&normalized_app) {
+        match block
+            .title
+            .as_deref()
+            .and_then(|title| suggest_title_pattern(title, &block.app))
+        {
+            Some(pattern) => ("app-title", Some(pattern)),
+            None => ("app", None),
+        }
+    } else {
+        ("app", None)
+    };
+    Some(ClassificationRuleV1 {
+        id: Uuid::new_v4().to_string(),
+        scope: scope.into(),
+        app: block.app.clone(),
+        title_pattern,
+        category: block.category.clone(),
+        activity_label: block.activity_label.clone(),
+        created_at: now.into(),
+        updated_at: now.into(),
+    })
+}
+
+fn suggest_title_pattern(title: &str, app: &str) -> Option<String> {
+    let mut separated = title.trim().to_string();
+    for separator in [" — ", " – ", " - ", " | ", " · "] {
+        separated = separated.replace(separator, "\u{1f}");
+    }
+    let normalized_app = crate::activitywatch::normalize_match_text(app);
+    let candidate = separated
+        .split('\u{1f}')
+        .map(str::trim)
+        .rev()
+        .find(|segment| {
+            let normalized = crate::activitywatch::normalize_match_text(segment);
+            (3..=80).contains(&segment.chars().count())
+                && normalized != normalized_app
+                && !crate::activitywatch::is_browser(&normalized)
+        })
+        .or_else(|| {
+            let trimmed = title.trim();
+            (3..=80)
+                .contains(&trimmed.chars().count())
+                .then_some(trimmed)
+        })?;
+    Some(candidate.to_string())
+}
+
+fn classification_rule_impact(
+    state: &AppState,
+    rule: &ClassificationRuleV1,
+) -> Result<RuleImpactV1, String> {
+    rule.validate()?;
+    let settings = state.store.settings()?;
+    let now = Utc::now();
+    let start = settings
+        .retention_days
+        .map(|days| now - Duration::days(i64::from(days)))
+        .unwrap_or(chrono::DateTime::<Utc>::UNIX_EPOCH);
+    let from = start.to_rfc3339();
+    let to = now.to_rfc3339();
+    let checkins = state.store.checkins_between(&from, &to)?;
+    let overrides = state.store.classification_overrides_between(&from, &to)?;
+    let current_rules = state.store.classification_rules()?;
+    let current =
+        state
+            .activity
+            .timeline(start, now, &settings, &checkins, &current_rules, &overrides)?;
+    let mut proposed_rules = current_rules
+        .into_iter()
+        .filter(|item| item.id != rule.id)
+        .collect::<Vec<_>>();
+    proposed_rules.insert(0, rule.clone());
+    let proposed = state.activity.timeline(
+        start,
+        now,
+        &settings,
+        &checkins,
+        &proposed_rules,
+        &overrides,
+    )?;
+    let current_by_id = current
+        .into_iter()
+        .map(|block| (block.id.clone(), block))
+        .collect::<std::collections::HashMap<_, _>>();
+    let changed = proposed.into_iter().filter(|block| {
+        block.rule_id.as_deref() == Some(rule.id.as_str())
+            && current_by_id.get(&block.id).is_some_and(|current| {
+                current.category != block.category
+                    || current.activity_label != block.activity_label
+                    || current.rule_id != block.rule_id
+            })
+    });
+    let mut sessions = 0;
+    let mut duration_seconds = 0;
+    for block in changed {
+        sessions += 1;
+        duration_seconds += block.duration_seconds;
+    }
+    Ok(RuleImpactV1 {
+        sessions,
+        duration_seconds,
+    })
 }
 
 #[tauri::command]
@@ -280,7 +762,13 @@ pub fn get_study_progress(state: State<'_, AppState>) -> Result<StudyProgress, S
     let checkins = state
         .store
         .checkins_between(&start.to_rfc3339(), &now.to_rfc3339())?;
-    let timeline = state.activity.timeline(start, now, &settings, &checkins)?;
+    let rules = state.store.classification_rules()?;
+    let overrides = state
+        .store
+        .classification_overrides_between(&start.to_rfc3339(), &now.to_rfc3339())?;
+    let timeline = state
+        .activity
+        .timeline(start, now, &settings, &checkins, &rules, &overrides)?;
     let tracked_seconds: i64 = timeline
         .iter()
         .filter(|block| !block.afk)
@@ -331,12 +819,258 @@ pub fn generate_diagnostic(state: State<'_, AppState>, days: u16) -> Result<Diag
         .store
         .checkins_between(&start.to_rfc3339(), &now.to_rfc3339())?;
     let workflows = state.store.list_workflow_intakes()?;
-    let blocks = state.activity.timeline(start, now, &settings, &checkins)?;
+    let rules = state.store.classification_rules()?;
+    let overrides = state
+        .store
+        .classification_overrides_between(&start.to_rfc3339(), &now.to_rfc3339())?;
+    let blocks = state
+        .activity
+        .timeline(start, now, &settings, &checkins, &rules, &overrides)?;
     let observed = ((now - start).num_seconds().max(0) as f64 / 86_400.0).min(f64::from(days));
     operation.ensure_current()?;
     Ok(create_diagnostic(
         &blocks, &checkins, observed, &settings, &workflows,
     ))
+}
+
+fn intelligence_bundle(
+    state: &AppState,
+    days: u16,
+) -> Result<
+    (
+        SettingsV1,
+        EvidenceBundleV1,
+        Vec<crate::models::AutomationCandidateV1>,
+    ),
+    String,
+> {
+    intelligence_bundle_from(&state.store, &state.activity, days)
+}
+
+fn intelligence_bundle_from(
+    store: &LocalStore,
+    activity: &ActivityWatchRuntime,
+    days: u16,
+) -> Result<
+    (
+        SettingsV1,
+        EvidenceBundleV1,
+        Vec<crate::models::AutomationCandidateV1>,
+    ),
+    String,
+> {
+    if !matches!(days, 7 | 14 | 28) {
+        return Err("La evaluación debe cubrir 7, 14 o 28 días".into());
+    }
+    let settings = store.settings()?;
+    let now = Utc::now();
+    let start = (now - Duration::days(i64::from(days))).max(
+        store
+            .get_value("study_started_at")?
+            .and_then(|value| parse_utc(&value).ok())
+            .unwrap_or(now - Duration::days(i64::from(days))),
+    );
+    let from = start.to_rfc3339();
+    let to = now.to_rfc3339();
+    let checkins = store.checkins_between(&from, &to)?;
+    let workflows = store.list_workflow_intakes()?;
+    let rules = store.classification_rules()?;
+    let overrides = store.classification_overrides_between(&from, &to)?;
+    let blocks = activity.timeline(start, now, &settings, &checkins, &rules, &overrides)?;
+    let observed = ((now - start).num_seconds().max(0) as f64 / 86_400.0).min(f64::from(days));
+    let diagnostic = create_diagnostic(&blocks, &checkins, observed, &settings, &workflows);
+    let observations = crate::intelligence::context_observations_between(store, &from, &to)?;
+    let bundle = crate::intelligence::build_evidence_bundle(
+        &settings,
+        &blocks,
+        &diagnostic.candidates,
+        &observations,
+        observed,
+    );
+    Ok((settings, bundle, diagnostic.candidates))
+}
+
+#[tauri::command]
+pub fn save_openrouter_api_key(state: State<'_, AppState>, api_key: String) -> Result<(), String> {
+    crate::features::require_experimental_intelligence()?;
+    let operation = state.capture_gate.operation()?;
+    crate::intelligence::save_openrouter_key(&api_key)?;
+    operation.ensure_current()
+}
+
+#[tauri::command]
+pub fn delete_openrouter_api_key(state: State<'_, AppState>) -> Result<(), String> {
+    let operation = state.capture_gate.operation()?;
+    crate::intelligence::delete_openrouter_key()?;
+    operation.ensure_current()
+}
+
+#[tauri::command]
+pub fn list_openrouter_models() -> Result<Vec<OpenRouterModelV1>, String> {
+    crate::features::require_experimental_intelligence()?;
+    crate::intelligence::list_openrouter_models()
+}
+
+#[tauri::command]
+pub fn get_ai_configuration_status(
+    state: State<'_, AppState>,
+) -> Result<AiConfigurationStatusV1, String> {
+    let settings = state.store.settings()?;
+    crate::intelligence::configuration_status(&state.store, &settings)
+}
+
+#[tauri::command]
+pub fn preview_ai_evaluation(
+    state: State<'_, AppState>,
+    days: u16,
+) -> Result<EvaluationPayloadPreviewV1, String> {
+    crate::features::require_experimental_intelligence()?;
+    let (settings, bundle) = {
+        let operation = state.capture_gate.operation()?;
+        let (settings, bundle, _) = intelligence_bundle(&state, days)?;
+        operation.ensure_current()?;
+        (settings, bundle)
+    };
+    crate::intelligence::preview_evaluation(&state.store, &settings, bundle)
+}
+
+#[tauri::command]
+pub fn grant_cloud_consent(
+    state: State<'_, AppState>,
+    policy_fingerprint: String,
+) -> Result<(), String> {
+    crate::features::require_experimental_intelligence()?;
+    let operation = state.capture_gate.operation()?;
+    let settings = state.store.settings()?;
+    crate::intelligence::grant_consent(&state.store, &settings, &policy_fingerprint)?;
+    operation.ensure_current()
+}
+
+#[tauri::command]
+pub fn revoke_cloud_consent(state: State<'_, AppState>) -> Result<(), String> {
+    let operation = state.capture_gate.operation()?;
+    crate::intelligence::revoke_consent(&state.store)?;
+    operation.ensure_current()
+}
+
+#[tauri::command]
+pub fn run_ai_evaluation(
+    state: State<'_, AppState>,
+    days: u16,
+) -> Result<EvaluationReportV1, String> {
+    crate::features::require_experimental_intelligence()?;
+    // Hold a shared capture operation until the provider response and audit row
+    // finish, so deletion cannot be followed by a late write from this run.
+    let operation = state.capture_gate.operation()?;
+    let (settings, bundle, candidates) = intelligence_bundle(&state, days)?;
+    let report = crate::intelligence::run_evaluation(
+        &state.store,
+        &settings,
+        &bundle,
+        &candidates,
+        "manual",
+    )?;
+    operation.ensure_current()?;
+    Ok(report)
+}
+
+#[tauri::command]
+pub fn list_ai_reports(state: State<'_, AppState>) -> Result<Vec<EvaluationReportV1>, String> {
+    crate::intelligence::list_reports(&state.store)
+}
+
+#[tauri::command]
+pub fn save_ai_feedback(
+    state: State<'_, AppState>,
+    input: AiFeedbackInputV1,
+) -> Result<(), String> {
+    crate::features::require_experimental_intelligence()?;
+    let operation = state.capture_gate.operation()?;
+    crate::intelligence::save_feedback(&state.store, input)?;
+    operation.ensure_current()
+}
+
+#[tauri::command]
+pub fn save_context_observation(
+    state: State<'_, AppState>,
+    observation: ContextObservationV2,
+) -> Result<ContextObservationV2, String> {
+    let operation = state.capture_gate.operation()?;
+    let settings = crate::features::effective_settings(state.store.settings()?);
+    let enabled = match observation.source.as_str() {
+        "browser" => settings.deep_capture.browser.enabled,
+        "editor" => settings.deep_capture.editor.enabled,
+        "shell" => settings.deep_capture.shell.enabled,
+        "screenshot" => settings.deep_capture.screenshots.enabled,
+        _ => false,
+    };
+    if !enabled {
+        return Err("Esta fuente de contexto no está habilitada".into());
+    }
+    let observation = crate::intelligence::save_context_observation(&state.store, observation)?;
+    operation.ensure_current()?;
+    Ok(observation)
+}
+
+#[tauri::command]
+pub fn get_screen_ocr_status(
+    state: State<'_, AppState>,
+) -> Result<crate::screen_ocr::ScreenOcrStatusV1, String> {
+    Ok(crate::screen_ocr::ScreenOcrStatusV1 {
+        supported: crate::screen_ocr::supported(),
+        permission: crate::screen_ocr::permission().into(),
+        last_observation_at: state.store.get_value("last_screenshot_ocr_at")?,
+        last_error: state
+            .store
+            .get_value("last_screenshot_ocr_error")?
+            .filter(|value| !value.is_empty()),
+    })
+}
+
+#[tauri::command]
+pub fn request_screen_ocr_permission(
+    state: State<'_, AppState>,
+) -> Result<crate::screen_ocr::ScreenOcrStatusV1, String> {
+    crate::features::require_experimental_intelligence()?;
+    let _ = crate::screen_ocr::request_permission();
+    get_screen_ocr_status(state)
+}
+
+#[tauri::command]
+pub fn create_connector_pairing(
+    state: State<'_, AppState>,
+    kind: String,
+    name: String,
+) -> Result<crate::connectors::ConnectorPairingV1, String> {
+    let operation = state.capture_gate.operation()?;
+    let settings = state.store.settings()?;
+    let enabled = match kind.as_str() {
+        "browser" => settings.deep_capture.browser.enabled,
+        "editor" => settings.deep_capture.editor.enabled,
+        "shell" => settings.deep_capture.shell.enabled,
+        _ => false,
+    };
+    if !enabled {
+        return Err("Habilita esta fuente antes de emparejar el conector".into());
+    }
+    let pairing =
+        state
+            .connector_gateway
+            .create_pairing(&kind, &name, state.activity.port_if_ready())?;
+    operation.ensure_current()?;
+    Ok(pairing)
+}
+
+#[tauri::command]
+pub fn list_connector_clients(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::connectors::ConnectorClientV1>, String> {
+    state.connector_gateway.list_clients()
+}
+
+#[tauri::command]
+pub fn revoke_connector_client(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    state.connector_gateway.revoke_client(&id)
 }
 
 #[tauri::command]
@@ -678,6 +1412,8 @@ pub fn export_data(state: State<'_, AppState>, format: String) -> Result<String,
         .checkins_between(&start.to_rfc3339(), &now.to_rfc3339())?;
     let workflows = state.store.list_workflow_intakes()?;
     let blueprint_drafts = state.store.list_automation_blueprint_drafts()?;
+    let classification_rules = state.store.classification_rules()?;
+    let classification_overrides = state.store.classification_overrides()?;
     let mut blueprints = Vec::with_capacity(blueprint_drafts.len());
     for draft in blueprint_drafts {
         blueprints.push(assess_stored_blueprint(
@@ -686,7 +1422,14 @@ pub fn export_data(state: State<'_, AppState>, format: String) -> Result<String,
             &settings.locale,
         )?);
     }
-    let timeline = state.activity.timeline(start, now, &settings, &checkins)?;
+    let timeline = state.activity.timeline(
+        start,
+        now,
+        &settings,
+        &checkins,
+        &classification_rules,
+        &classification_overrides,
+    )?;
     let export_dir = state.app_data_dir.join("exports");
     create_private_directory(&export_dir)?;
     let filename = format!(
@@ -704,6 +1447,8 @@ pub fn export_data(state: State<'_, AppState>, format: String) -> Result<String,
             &timeline,
             &workflows,
             &blueprints,
+            &classification_rules,
+            &classification_overrides,
             &now,
         )?
     } else {
@@ -719,6 +1464,8 @@ fn json_export(
     timeline: &[TimelineBlockV1],
     workflows: &[WorkflowIntakeV1],
     blueprints: &[AutomationBlueprintV1],
+    classification_rules: &[ClassificationRuleV1],
+    classification_overrides: &[ClassificationOverrideV1],
     exported_at: &chrono::DateTime<Utc>,
 ) -> Result<String, String> {
     serde_json::to_string_pretty(&ExportEnvelope {
@@ -729,6 +1476,8 @@ fn json_export(
         timeline: timeline.iter().map(Into::into).collect(),
         workflows: workflows.to_vec(),
         automation_blueprints: blueprints.to_vec(),
+        classification_rules: classification_rules.to_vec(),
+        classification_overrides: classification_overrides.to_vec(),
         deletion_boundary: deletion_boundary(&settings.locale).into(),
     })
     .map_err(|error| format!("No se pudo preparar la exportación: {error}"))
@@ -739,7 +1488,11 @@ pub fn delete_all_data(state: State<'_, AppState>, confirmation: String) -> Resu
     if confirmation != "DELETE_ENSO_TIME_DATA" {
         return Err("La confirmación de borrado no coincide".into());
     }
-    delete_all_data_inner(&state.store, &state.activity, &state.capture_gate)
+    delete_all_data_inner(&state.store, &state.activity, &state.capture_gate)?;
+    state.connector_gateway.clear_pending();
+    crate::intelligence::delete_openrouter_key().map_err(|error| {
+        format!("Los datos locales se borraron, pero la credencial de OpenRouter no: {error}")
+    })
 }
 
 fn delete_all_data_inner(
@@ -892,18 +1645,21 @@ where
 
 fn scheduler_tick(
     app: &AppHandle,
-    store: &LocalStore,
-    activity: &ActivityWatchRuntime,
-    capture_gate: &CaptureGate,
+    store: &Arc<LocalStore>,
+    activity: &Arc<ActivityWatchRuntime>,
+    capture_gate: &Arc<CaptureGate>,
 ) -> Result<(), String> {
     let operation = capture_gate.operation()?;
     let settings = store.settings()?;
     let today = Utc::now().date_naive().to_string();
     if store.get_value("last_retention_prune")?.as_deref() != Some(&today) {
         store.prune_checkins(settings.retention_days)?;
+        store.prune_classification_overrides(settings.retention_days)?;
+        store.prune_context_and_ai_runs(settings.retention_days)?;
         activity.prune_activity(settings.retention_days)?;
         store.set_value("last_retention_prune", &today)?;
     }
+    schedule_weekly_ai_if_due(app, store, activity, capture_gate, &settings)?;
     if !is_running(store)? {
         return Ok(());
     }
@@ -912,13 +1668,17 @@ fn scheduler_tick(
         if operation.ensure_current().is_err() || activity.shutdown_requested() {
             return Ok(());
         }
-        activity.start_watchers(settings.capture_window_titles)?;
+        if !activity.start_watchers_if_due(settings.capture_window_titles)? {
+            return Ok(());
+        }
     }
     if !inside_work_schedule(&settings, Utc::now()) {
         return Ok(());
     }
+    schedule_screen_ocr_if_due(store, capture_gate, &settings)?;
     let (start, end) = completed_interval(Utc::now(), settings.cadence_minutes);
-    let Some(reason) = activity.interval_reason(start, end, &settings)? else {
+    let rules = store.classification_rules()?;
+    let Some(reason) = activity.interval_reason(start, end, &settings, &rules)? else {
         return Ok(());
     };
     let checkin = CheckInV1 {
@@ -949,26 +1709,177 @@ fn scheduler_tick(
     Ok(())
 }
 
+fn schedule_screen_ocr_if_due(
+    store: &Arc<LocalStore>,
+    capture_gate: &Arc<CaptureGate>,
+    settings: &SettingsV1,
+) -> Result<(), String> {
+    if !crate::features::EXPERIMENTAL_INTELLIGENCE
+        || !settings.deep_capture.screenshots.enabled
+        || !crate::screen_ocr::supported()
+    {
+        return Ok(());
+    }
+    if crate::screen_ocr::permission() != "granted" {
+        store.set_value(
+            "last_screenshot_ocr_error",
+            "screen-recording-permission-required",
+        )?;
+        return Ok(());
+    }
+    let interval_seconds = i64::from(settings.deep_capture.screenshot_interval_minutes) * 60;
+    let slot = Utc::now()
+        .timestamp()
+        .div_euclid(interval_seconds)
+        .to_string();
+    if store.get_value("last_screenshot_ocr_slot")?.as_deref() == Some(&slot) {
+        return Ok(());
+    }
+    // Claim before spawning to prevent parallel Vision jobs on consecutive ticks.
+    store.set_value("last_screenshot_ocr_slot", &slot)?;
+    let worker_store = Arc::clone(store);
+    let worker_gate = Arc::clone(capture_gate);
+    let excluded_apps = settings.deep_capture.excluded_apps.clone();
+    std::thread::Builder::new()
+        .name("enso-screen-ocr".into())
+        .spawn(move || {
+            let result = (|| {
+                let operation = worker_gate.operation()?;
+                let (app, terms) = crate::screen_ocr::recognize_front_screen(&excluded_apps)?;
+                operation.ensure_current()?;
+                if terms.is_empty() {
+                    return Ok(());
+                }
+                let observed_at = iso_now();
+                let observation = ContextObservationV2 {
+                    schema_version: 2,
+                    id: Uuid::new_v4().to_string(),
+                    source: "screenshot".into(),
+                    observed_at: observed_at.clone(),
+                    duration_seconds: interval_seconds,
+                    app: Some(app),
+                    title: None,
+                    domain: None,
+                    project: None,
+                    repository: None,
+                    branch: None,
+                    file_type: None,
+                    text_excerpt: None,
+                    ocr_terms: terms,
+                    // Only normalized terms survive Vision; the screenshot pixels and
+                    // full OCR text are never persisted. Cloud inclusion still requires
+                    // the separate screenshots.cloudAllowed policy.
+                    sensitivity: "normal".into(),
+                    client_id: None,
+                    created_at: observed_at.clone(),
+                };
+                crate::intelligence::save_context_observation(&worker_store, observation)?;
+                worker_store.set_value("last_screenshot_ocr_at", &observed_at)?;
+                worker_store.set_value("last_screenshot_ocr_error", "")?;
+                Ok::<(), String>(())
+            })();
+            if let Err(error) = result {
+                if error != "excluded-app" {
+                    let public_error = error.chars().take(500).collect::<String>();
+                    let _ = worker_store.set_value("last_screenshot_ocr_error", &public_error);
+                    eprintln!("Ensō Time screen OCR: {public_error}");
+                }
+            }
+        })
+        .map(|_| ())
+        .map_err(|error| format!("No se pudo iniciar el OCR local: {error}"))
+}
+
+fn schedule_weekly_ai_if_due(
+    app: &AppHandle,
+    store: &Arc<LocalStore>,
+    activity: &Arc<ActivityWatchRuntime>,
+    capture_gate: &Arc<CaptureGate>,
+    settings: &SettingsV1,
+) -> Result<(), String> {
+    if !crate::features::EXPERIMENTAL_INTELLIGENCE
+        || !settings.ai.enabled
+        || !settings.ai.weekly_enabled
+    {
+        return Ok(());
+    }
+    if !crate::intelligence::configuration_status(store, settings)?.ready {
+        return Ok(());
+    }
+    let timezone: Tz = settings.timezone.parse().unwrap_or(chrono_tz::UTC);
+    let local = Utc::now().with_timezone(&timezone);
+    let local_day = local.weekday().num_days_from_sunday() as u8;
+    let due = local_day > settings.ai.weekly_day
+        || (local_day == settings.ai.weekly_day
+            && local.hour() >= u32::from(settings.ai.weekly_hour));
+    if !due {
+        return Ok(());
+    }
+    let slot = format!("{}-{:02}", local.year(), local.format("%U"));
+    if store.get_value("last_weekly_ai_attempt_slot")?.as_deref() == Some(&slot) {
+        return Ok(());
+    }
+
+    // Claim the slot before any network request. A failed provider must not trigger
+    // another charge attempt every 30 seconds; the user can still retry manually.
+    store.set_value("last_weekly_ai_attempt_slot", &slot)?;
+    store.set_value("last_weekly_ai_error", "")?;
+    let days = store
+        .get_value("selected_days")?
+        .and_then(|value| value.parse::<u16>().ok())
+        .filter(|value| matches!(value, 7 | 14 | 28))
+        .unwrap_or(7);
+    let worker_app = app.clone();
+    let worker_store = Arc::clone(store);
+    let worker_activity = Arc::clone(activity);
+    let worker_gate = Arc::clone(capture_gate);
+    std::thread::Builder::new()
+        .name("enso-weekly-ai".into())
+        .spawn(move || {
+            let result = (|| {
+                let operation = worker_gate.operation()?;
+                let (current, bundle, candidates) =
+                    intelligence_bundle_from(&worker_store, &worker_activity, days)?;
+                let report = crate::intelligence::run_evaluation(
+                    &worker_store,
+                    &current,
+                    &bundle,
+                    &candidates,
+                    "weekly",
+                )?;
+                operation.ensure_current()?;
+                Ok::<_, String>(report)
+            })();
+            match result {
+                Ok(_) => {
+                    let _ = worker_app
+                        .notification()
+                        .builder()
+                        .title("Ensō Time · Evaluación semanal lista")
+                        .body("El analista y el evaluador terminaron la revisión.")
+                        .show();
+                }
+                Err(error) => {
+                    let public_error = error.chars().take(500).collect::<String>();
+                    let _ = worker_store.set_value("last_weekly_ai_error", &public_error);
+                    eprintln!("Ensō Time weekly evaluation: {public_error}");
+                }
+            }
+        })
+        .map(|_| ())
+        .map_err(|error| format!("No se pudo iniciar la evaluación semanal: {error}"))
+}
+
 fn status(state: &AppState) -> Result<TrackingStatus, String> {
-    let operation = state.capture_gate.operation()?;
+    let _operation = state.capture_gate.operation()?;
     let should_run = is_running(&state.store)?;
     let paused_until = state.store.paused_until()?;
-    if should_run {
-        let settings = state.store.settings()?;
-        let (window, afk) = state.activity.watcher_statuses();
-        if window == "stopped" || afk == "stopped" {
-            if operation.ensure_current().is_ok() && !state.activity.shutdown_requested() {
-                let _ = state
-                    .activity
-                    .start_watchers(settings.capture_window_titles);
-            }
-        }
-    }
     let (window_watcher, afk_watcher) = state.activity.watcher_statuses();
     let running = should_run
         && window_watcher == "running"
         && afk_watcher == "running"
         && state.activity.port_if_ready().is_some();
+    let settings = crate::features::effective_settings(state.store.settings()?);
     Ok(TrackingStatus {
         running,
         paused_until,
@@ -977,12 +1888,20 @@ fn status(state: &AppState) -> Result<TrackingStatus, String> {
         afk_watcher,
         last_event_at: state.activity.latest_event_at()?,
         pending_check_ins: state.store.pending_count()?,
-        data_stays_local: true,
+        data_stays_local: !settings.ai.enabled,
+        processing_mode: if settings.ai.enabled {
+            "cloud-opt-in"
+        } else {
+            "local-only"
+        }
+        .into(),
+        last_cloud_run_at: state.store.get_value("last_cloud_run_at")?,
         capture_issue: state.activity.capture_issue(),
+        experimental_intelligence: crate::features::EXPERIMENTAL_INTELLIGENCE,
     })
 }
 
-fn is_running(store: &LocalStore) -> Result<bool, String> {
+pub(crate) fn is_running(store: &LocalStore) -> Result<bool, String> {
     if !store.settings()?.onboarding_completed {
         return Ok(false);
     }
@@ -1011,7 +1930,7 @@ fn configure_autostart(app: &AppHandle, enabled: bool) -> Result<(), String> {
     }
 }
 
-fn inside_work_schedule(settings: &SettingsV1, now: chrono::DateTime<Utc>) -> bool {
+pub(crate) fn inside_work_schedule(settings: &SettingsV1, now: chrono::DateTime<Utc>) -> bool {
     let timezone: Tz = settings.timezone.parse().unwrap_or(chrono_tz::UTC);
     let local = now.with_timezone(&timezone);
     if !settings
@@ -1180,6 +2099,46 @@ mod tests {
             "\"'=HYPERLINK(\"\"https://evil.test\"\")\""
         );
         assert_eq!(csv_escape("+1+1"), "'+1+1");
+    }
+
+    #[test]
+    fn status_is_observational_and_never_spawns_watchers() {
+        let temp = TempDir::new().unwrap();
+        let store = Arc::new(LocalStore::open(&temp.path().join("enso-time.sqlite")).unwrap());
+        let mut settings = SettingsV1::default();
+        settings.onboarding_completed = true;
+        store.save_settings(&settings).unwrap();
+        let activity = Arc::new(
+            ActivityWatchRuntime::start(
+                &temp.path().join("activity"),
+                temp.path().join("empty-resources"),
+            )
+            .unwrap(),
+        );
+        let capture_gate = Arc::new(CaptureGate::new());
+        let connector_gateway = Arc::new(crate::connectors::ConnectorGateway::new(
+            Arc::clone(&store),
+            Arc::clone(&capture_gate),
+        ));
+        let state = AppState {
+            scheduler: SchedulerHandle {
+                state: Mutex::new(SchedulerState {
+                    stop_sender: None,
+                    thread: None,
+                }),
+            },
+            capture_gate,
+            store,
+            activity: Arc::clone(&activity),
+            app_data_dir: temp.path().join("app-data"),
+            connector_gateway,
+        };
+
+        assert_eq!(activity.test_managed_watcher_pids(), (None, None));
+        let snapshot = status(&state).unwrap();
+        assert!(!snapshot.running);
+        assert_eq!(activity.test_managed_watcher_pids(), (None, None));
+        activity.shutdown().unwrap();
     }
 
     #[test]
@@ -1505,17 +2464,23 @@ mod tests {
             duration_seconds: 900,
             app: "Browser".into(),
             title: Some("private-raw-window-title".into()),
+            activity_label: None,
             category: "admin".into(),
             confidence: 0.8,
             afk: false,
             source: "window".into(),
             check_in_id: None,
+            classification_source: "builtin".into(),
+            rule_id: None,
+            correctable: true,
         };
         let exported = json_export(
             &SettingsV1::default(),
             &[],
             &[raw_timeline],
             &workflows,
+            &[],
+            &[],
             &[],
             &Utc::now(),
         )

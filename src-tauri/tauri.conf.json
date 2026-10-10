@@ -43,8 +43,7 @@
       "icons/icon.ico"
     ],
     "macOS": {
-      "minimumSystemVersion": "11.0",
-      "signingIdentity": "-"
+      "minimumSystemVersion": "12.0"
     },
     "windows": {
       "digestAlgorithm": "sha256",
