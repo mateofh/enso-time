@@ -1,5 +1,4 @@
 const vscode = require("vscode");
-const crypto = require("node:crypto");
 
 const PORT_START = 5610;
 const PORT_END = 5699;
@@ -25,8 +24,7 @@ async function pair(context) {
   const code = await vscode.window.showInputBox({ prompt: "Código de ocho dígitos mostrado por Ensō Time", password: true, validateInput: (value) => /^\d{8}$/.test(value) ? null : "Usa exactamente ocho dígitos" });
   if (!code) return;
   const port = await findServer(context.globalState.get(STATE_PORT));
-  const clientId = context.globalState.get(STATE_CLIENT) || crypto.randomUUID();
-  const response = await fetch(`${baseUrl(port)}/pair`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code, clientId }) });
+  const response = await fetch(`${baseUrl(port)}/pair`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code }) });
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || `Emparejamiento rechazado (${response.status}).`);
   await context.secrets.store(SECRET_TOKEN, result.token);

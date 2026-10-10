@@ -27,7 +27,7 @@ async function pair(code, preferredPort) {
   const response = await fetch(`${baseUrl(port)}/pair`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ code: String(code).trim(), clientId: current.clientId }),
+    body: JSON.stringify({ code: String(code).trim() }),
   });
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || `Emparejamiento rechazado (${response.status}).`);
