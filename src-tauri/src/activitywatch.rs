@@ -1,4 +1,7 @@
-use crate::models::{AppRule, CaptureIssueCode, CheckInV1, SettingsV1, TimelineBlockV1};
+use crate::models::{
+    AppRule, CaptureIssueCode, CheckInV1, ClassificationOverrideV1, ClassificationRuleV1,
+    SettingsV1, TimelineBlockV1,
+};
 use aw_datastore::Datastore;
 use aw_models::Event;
 use chrono::{DateTime, Duration, Utc};
@@ -7,7 +10,9 @@ use std::fs::OpenOptions;
 use std::io::Read;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+#[cfg(any(not(target_os = "macos"), test))]
+use std::process::Stdio;
+use std::process::{Child, Command, ExitStatus};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
@@ -22,11 +27,83 @@ const LEGACY_APP_NAME: &str = "activitywatch";
 const PROFILED_APP_NAME: &str = "activitywatch-enso-time";
 const WATCHER_REGISTRATION_TIMEOUT: StdDuration = StdDuration::from_secs(20);
 const WATCHER_STALE_TIMEOUT: StdDuration = StdDuration::from_secs(45);
+#[cfg(all(target_os = "macos", not(test)))]
+const WINDOW_HEARTBEAT_PULSETIME_SECONDS: f64 = 5.0;
+#[cfg(all(target_os = "macos", not(test)))]
+const AFK_HEARTBEAT_PULSETIME_SECONDS: f64 = 15.0;
+#[cfg(all(target_os = "macos", not(test)))]
+const AFK_IDLE_THRESHOLD_SECONDS: f64 = 180.0;
 const CAPTURE_START_CANCELLED: &str = "La operación de captura fue cancelada";
+const WINDOW_PERMISSION_REQUIRED: &str = "El permiso de Accesibilidad no está disponible";
+#[cfg(target_os = "macos")]
+const WINDOW_HELPER_BINARY: &str = "enso-aw-watcher-window-macos";
+#[cfg(all(target_os = "macos", test))]
+const AFK_HELPER_BINARY: &str = "enso-aw-watcher-afk-macos";
+#[cfg(target_os = "macos")]
+const WINDOW_PERMISSION_EXIT: i32 = 77;
+#[cfg(target_os = "macos")]
+const ACTIVITYWATCH_API_KEY_ENV: &str = "ENSO_ACTIVITYWATCH_API_KEY";
 
 struct ManagedWatcher {
     child: Child,
     stderr_path: PathBuf,
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+struct ManagedNativeWorker {
+    stop: Arc<AtomicBool>,
+    running: Arc<AtomicBool>,
+    thread: JoinHandle<()>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowCaptureMode {
+    Stopped,
+    Full,
+    AppOnlyPreference,
+    AppOnlyPermission,
+}
+
+#[derive(Debug)]
+struct WatcherRetryState {
+    failures: u32,
+    next_retry: Option<Instant>,
+}
+
+impl WatcherRetryState {
+    fn new() -> Self {
+        Self {
+            failures: 0,
+            next_retry: None,
+        }
+    }
+
+    fn due(&self) -> bool {
+        self.next_retry
+            .is_none_or(|deadline| Instant::now() >= deadline)
+    }
+
+    fn success(&mut self) {
+        self.failures = 0;
+        self.next_retry = None;
+    }
+
+    fn failure(&mut self) {
+        self.failures = self.failures.saturating_add(1);
+        let delay = match self.failures {
+            1 => 30,
+            2 => 60,
+            3 => 120,
+            _ => 300,
+        };
+        self.next_retry = Some(Instant::now() + StdDuration::from_secs(delay));
+    }
+
+    #[cfg(test)]
+    fn retry_delay(&self) -> Option<StdDuration> {
+        self.next_retry
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+    }
 }
 
 struct RuntimeCancellation {
@@ -181,7 +258,9 @@ pub struct ActivityWatchRuntime {
     server_shutdown: Arc<Mutex<Option<rocket::Shutdown>>>,
     server_thread: Mutex<Option<JoinHandle<()>>>,
     capture_issue: Arc<Mutex<Option<CaptureIssueCode>>>,
-    capture_titles: AtomicBool,
+    capture_titles: Arc<AtomicBool>,
+    window_capture_mode: Arc<Mutex<WindowCaptureMode>>,
+    watcher_retry: Mutex<WatcherRetryState>,
     capture_generation: AtomicU64,
     capture_suspended: AtomicBool,
     shutdown_started: AtomicBool,
@@ -192,10 +271,15 @@ pub struct ActivityWatchRuntime {
     window_health: Mutex<Option<WatcherHealth>>,
     afk_health: Mutex<Option<WatcherHealth>>,
     window_watcher: Arc<Mutex<Option<ManagedWatcher>>>,
+    #[cfg(all(target_os = "macos", not(test)))]
+    window_worker: Mutex<Option<ManagedNativeWorker>>,
+    #[cfg(all(target_os = "macos", not(test)))]
+    afk_worker: Mutex<Option<ManagedNativeWorker>>,
     afk_watcher: Arc<Mutex<Option<ManagedWatcher>>>,
     resource_dir: PathBuf,
     profile: WatcherProfilePaths,
     api_key: String,
+    connector_gateway: Option<Arc<crate::connectors::ConnectorGateway>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -227,6 +311,22 @@ struct WatcherHealth {
 
 impl ActivityWatchRuntime {
     pub fn start(data_dir: &Path, resource_dir: PathBuf) -> Result<Self, String> {
+        Self::start_inner(data_dir, resource_dir, None)
+    }
+
+    pub fn start_with_gateway(
+        data_dir: &Path,
+        resource_dir: PathBuf,
+        connector_gateway: Arc<crate::connectors::ConnectorGateway>,
+    ) -> Result<Self, String> {
+        Self::start_inner(data_dir, resource_dir, Some(connector_gateway))
+    }
+
+    fn start_inner(
+        data_dir: &Path,
+        resource_dir: PathBuf,
+        connector_gateway: Option<Arc<crate::connectors::ConnectorGateway>>,
+    ) -> Result<Self, String> {
         std::fs::create_dir_all(data_dir)
             .map_err(|error| format!("No se pudo crear el almacén de actividad: {error}"))?;
         let database = data_dir.join("activitywatch.sqlite");
@@ -267,7 +367,9 @@ impl ActivityWatchRuntime {
             server_shutdown,
             server_thread: Mutex::new(None),
             capture_issue,
-            capture_titles: AtomicBool::new(false),
+            capture_titles: Arc::new(AtomicBool::new(false)),
+            window_capture_mode: Arc::new(Mutex::new(WindowCaptureMode::Stopped)),
+            watcher_retry: Mutex::new(WatcherRetryState::new()),
             capture_generation: AtomicU64::new(0),
             capture_suspended: AtomicBool::new(false),
             shutdown_started: AtomicBool::new(false),
@@ -278,10 +380,15 @@ impl ActivityWatchRuntime {
             window_health: Mutex::new(None),
             afk_health: Mutex::new(None),
             window_watcher,
+            #[cfg(all(target_os = "macos", not(test)))]
+            window_worker: Mutex::new(None),
+            #[cfg(all(target_os = "macos", not(test)))]
+            afk_worker: Mutex::new(None),
             afk_watcher,
             resource_dir,
             profile,
             api_key,
+            connector_gateway,
         };
         runtime.launch_server()?;
         Ok(runtime)
@@ -314,6 +421,7 @@ impl ActivityWatchRuntime {
         let server_port = Arc::clone(&self.port);
         let server_profile = self.profile.clone();
         let server_api_key = self.api_key.clone();
+        let connector_gateway = self.connector_gateway.clone();
         let (startup_sender, startup_receiver) = mpsc::sync_channel(1);
         // Rocket owns its async runtime. It is isolated from Tauri so a local capture
         // failure cannot take down the UI thread.
@@ -325,6 +433,7 @@ impl ActivityWatchRuntime {
                     server_port,
                     server_api_key,
                     server_profile,
+                    connector_gateway,
                     ready.clone(),
                     shutdown,
                     startup_sender,
@@ -385,7 +494,14 @@ impl ActivityWatchRuntime {
     }
 
     pub fn capture_issue(&self) -> Option<CaptureIssueCode> {
-        self.capture_issue.lock().ok().and_then(|value| *value)
+        let fatal = self.capture_issue.lock().ok().and_then(|value| *value);
+        fatal.or_else(|| {
+            matches!(
+                self.window_capture_mode.lock().ok().as_deref(),
+                Some(WindowCaptureMode::AppOnlyPermission)
+            )
+            .then_some(CaptureIssueCode::AccessibilityPermissionRequired)
+        })
     }
 
     pub fn start_watchers(&self, capture_titles: bool) -> Result<(), String> {
@@ -398,7 +514,32 @@ impl ActivityWatchRuntime {
         if self.cancellation.is_cancelled() || self.capture_suspended.load(Ordering::Acquire) {
             return Err(CAPTURE_START_CANCELLED.into());
         }
-        self.start_watchers_with_timeout(capture_titles, WATCHER_REGISTRATION_TIMEOUT)
+        let result = self.start_watchers_with_timeout(capture_titles, WATCHER_REGISTRATION_TIMEOUT);
+        self.record_start_result(&result);
+        result
+    }
+
+    pub fn start_watchers_if_due(&self, capture_titles: bool) -> Result<bool, String> {
+        if !self
+            .watcher_retry
+            .lock()
+            .map_err(|_| "No se pudo consultar el reintento del capturador".to_string())?
+            .due()
+        {
+            return Ok(false);
+        }
+        self.retry_watchers(capture_titles).map(|_| true)
+    }
+
+    fn record_start_result(&self, result: &Result<(), String>) {
+        let Ok(mut retry) = self.watcher_retry.lock() else {
+            return;
+        };
+        match result {
+            Ok(()) => retry.success(),
+            Err(error) if error == CAPTURE_START_CANCELLED => {}
+            Err(_) => retry.failure(),
+        }
     }
 
     #[cfg(test)]
@@ -418,6 +559,21 @@ impl ActivityWatchRuntime {
         *self.watcher_lifecycle_lock_attempt.lock().unwrap() = Some(sender);
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_managed_watcher_pids(&self) -> (Option<u32>, Option<u32>) {
+        let window = self
+            .window_watcher
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(|watcher| watcher.child.id()));
+        let afk = self
+            .afk_watcher
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(|watcher| watcher.child.id()));
+        (window, afk)
+    }
+
     fn start_watchers_with_timeout(
         &self,
         capture_titles: bool,
@@ -431,32 +587,123 @@ impl ActivityWatchRuntime {
             self.set_capture_issue(CaptureIssueCode::ServerUnavailable);
             error
         })?;
+        // Never overwrite a live Child handle. A partial previous run must be
+        // terminated before a full pair is spawned or it would become orphaned.
+        self.stop_watchers_unlocked()?;
+        let mut window_mode =
+            self.resolve_window_capture_mode(capture_titles)
+                .map_err(|error| {
+                    self.set_capture_issue(CaptureIssueCode::WindowWatcherUnavailable);
+                    error
+                })?;
         let window_baseline = self.required_watcher_baseline(WatcherKind::Window)?;
         let afk_baseline = self.required_watcher_baseline(WatcherKind::Afk)?;
-        if let Err(error) =
-            self.start_watcher(WatcherKind::Window, port, capture_titles, generation)
-        {
+        if let Err(error) = self.start_watcher(WatcherKind::Window, port, window_mode, generation) {
             self.set_capture_issue(error.code);
             let _ = self.stop_watchers_unlocked();
             return Err(error.message);
         }
-        if let Err(error) = self.start_watcher(WatcherKind::Afk, port, capture_titles, generation) {
-            self.set_capture_issue(error.code);
-            let _ = self.stop_watchers_unlocked();
-            return Err(error.message);
-        }
-        let result = self.await_watcher_progress(
-            &[
-                (WatcherKind::Window, window_baseline),
-                (WatcherKind::Afk, afk_baseline),
-            ],
-            timeout,
+        if let Err(error) = self.start_watcher(
+            WatcherKind::Afk,
+            port,
+            WindowCaptureMode::Stopped,
             generation,
-        );
+        ) {
+            self.set_capture_issue(error.code);
+            let _ = self.stop_watchers_unlocked();
+            return Err(error.message);
+        }
+        let baselines = [
+            (WatcherKind::Window, window_baseline),
+            (WatcherKind::Afk, afk_baseline),
+        ];
+        let mut result = self.await_watcher_progress(&baselines, timeout, generation);
+        if result.as_ref().err().map(String::as_str) == Some(WINDOW_PERMISSION_REQUIRED) {
+            window_mode = WindowCaptureMode::AppOnlyPermission;
+            self.set_window_capture_mode(window_mode);
+            self.start_watcher(WatcherKind::Window, port, window_mode, generation)
+                .map_err(|error| {
+                    self.set_capture_issue(error.code);
+                    let _ = self.stop_watchers_unlocked();
+                    error.message
+                })?;
+            result = self.await_watcher_progress(&baselines, timeout, generation);
+        }
         if result.is_ok() {
             self.capture_titles.store(capture_titles, Ordering::Release);
+            self.set_window_capture_mode(window_mode);
         }
         result
+    }
+
+    pub fn retry_watchers(&self, capture_titles: bool) -> Result<(), String> {
+        let _lifecycle = self
+            .watcher_lifecycle
+            .lock()
+            .map_err(|_| "No se pudo coordinar el capturador".to_string())?;
+        let generation = self.capture_generation.load(Ordering::Acquire);
+        if self.capture_cancelled(generation) {
+            return Err(CAPTURE_START_CANCELLED.into());
+        }
+        let current_mode = self.window_capture_mode();
+        if capture_titles && current_mode == WindowCaptureMode::AppOnlyPermission {
+            let desired = self.resolve_window_capture_mode(true)?;
+            if desired == WindowCaptureMode::AppOnlyPermission {
+                #[cfg(all(target_os = "macos", not(test)))]
+                if self.native_window_inspection().status == "running" {
+                    return Ok(());
+                }
+                #[cfg(not(all(target_os = "macos", not(test))))]
+                {
+                    let inspection = inspect_watcher(
+                        &self.window_watcher,
+                        self.binary_path(WatcherKind::Window).exists(),
+                        WatcherKind::Window,
+                    );
+                    if inspection.status == "running" {
+                        return Ok(());
+                    }
+                }
+            }
+            let result = self.restart_window_watcher_unlocked(true, desired, generation);
+            self.record_start_result(&result);
+            return result;
+        }
+        let (window, afk) = self.watcher_statuses_with_timeout(WATCHER_STALE_TIMEOUT);
+        if window == "running" && afk == "running" {
+            return Ok(());
+        }
+        let result = self.start_watchers_with_timeout(capture_titles, WATCHER_REGISTRATION_TIMEOUT);
+        self.record_start_result(&result);
+        result
+    }
+
+    pub fn request_accessibility_permission(&self) -> Result<(), String> {
+        #[cfg(all(target_os = "macos", not(test)))]
+        {
+            crate::macos_capture::request_accessibility_permission();
+            return Ok(());
+        }
+        #[cfg(all(target_os = "macos", test))]
+        {
+            let helper = self.binary_path(WatcherKind::Window);
+            let output = Command::new(&helper)
+                .arg("--request-accessibility")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .output()
+                .map_err(|error| format!("No se pudo solicitar Accesibilidad: {error}"))?;
+            if output.status.success() || output.status.code() == Some(WINDOW_PERMISSION_EXIT) {
+                return Ok(());
+            }
+            return Err(format!(
+                "macOS no pudo solicitar Accesibilidad{}",
+                diagnostic_suffix(&String::from_utf8_lossy(&output.stderr))
+            ));
+        }
+        #[cfg(not(target_os = "macos"))]
+        Err("Accesibilidad sólo está disponible en macOS".into())
     }
 
     pub fn restart_window_watcher(&self, capture_titles: bool) -> Result<(), String> {
@@ -468,28 +715,51 @@ impl ActivityWatchRuntime {
         if self.capture_cancelled(generation) {
             return Err(CAPTURE_START_CANCELLED.into());
         }
-        // Never stop a healthy watcher until Rocket has confirmed that the private
-        // loopback endpoint is ours. This also closes the bind/start TOCTOU window.
+        let mode = self.resolve_window_capture_mode(capture_titles)?;
+        self.restart_window_watcher_unlocked(capture_titles, mode, generation)
+    }
+
+    fn restart_window_watcher_unlocked(
+        &self,
+        capture_titles: bool,
+        mut mode: WindowCaptureMode,
+        generation: u64,
+    ) -> Result<(), String> {
+        if self.capture_cancelled(generation) {
+            return Err(CAPTURE_START_CANCELLED.into());
+        }
         let port = self.ready_port().map_err(|error| {
             self.set_capture_issue(CaptureIssueCode::ServerUnavailable);
             error
         })?;
         let baseline = self.required_watcher_baseline(WatcherKind::Window)?;
+        #[cfg(all(target_os = "macos", not(test)))]
+        self.stop_native_window_worker()?;
+        #[cfg(not(all(target_os = "macos", not(test))))]
         terminate_slot(&self.window_watcher)?;
-        if let Err(error) =
-            self.start_watcher(WatcherKind::Window, port, capture_titles, generation)
-        {
+        if let Err(error) = self.start_watcher(WatcherKind::Window, port, mode, generation) {
             self.set_capture_issue(error.code);
-            let _ = self.stop_watchers_unlocked();
             return Err(error.message);
         }
-        let result = self.await_watcher_progress(
-            &[(WatcherKind::Window, baseline)],
+        let mut result = self.await_watcher_progress(
+            &[(WatcherKind::Window, baseline.clone())],
             WATCHER_REGISTRATION_TIMEOUT,
             generation,
         );
+        if result.as_ref().err().map(String::as_str) == Some(WINDOW_PERMISSION_REQUIRED) {
+            mode = WindowCaptureMode::AppOnlyPermission;
+            self.set_window_capture_mode(mode);
+            self.start_watcher(WatcherKind::Window, port, mode, generation)
+                .map_err(|error| error.message)?;
+            result = self.await_watcher_progress(
+                &[(WatcherKind::Window, baseline)],
+                WATCHER_REGISTRATION_TIMEOUT,
+                generation,
+            );
+        }
         if result.is_ok() {
             self.capture_titles.store(capture_titles, Ordering::Release);
+            self.set_window_capture_mode(mode);
         }
         result
     }
@@ -502,6 +772,73 @@ impl ActivityWatchRuntime {
         })
     }
 
+    fn window_capture_mode(&self) -> WindowCaptureMode {
+        self.window_capture_mode
+            .lock()
+            .map(|mode| *mode)
+            .unwrap_or(WindowCaptureMode::Stopped)
+    }
+
+    fn set_window_capture_mode(&self, mode: WindowCaptureMode) {
+        if let Ok(mut current) = self.window_capture_mode.lock() {
+            *current = mode;
+        }
+    }
+
+    fn resolve_window_capture_mode(
+        &self,
+        capture_titles: bool,
+    ) -> Result<WindowCaptureMode, String> {
+        if !capture_titles {
+            return Ok(WindowCaptureMode::AppOnlyPreference);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            return self.accessibility_is_trusted().map(|trusted| {
+                if trusted {
+                    WindowCaptureMode::Full
+                } else {
+                    WindowCaptureMode::AppOnlyPermission
+                }
+            });
+        }
+        #[cfg(not(target_os = "macos"))]
+        Ok(WindowCaptureMode::Full)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn accessibility_is_trusted(&self) -> Result<bool, String> {
+        #[cfg(not(test))]
+        {
+            return Ok(crate::macos_capture::accessibility_is_trusted());
+        }
+        #[cfg(test)]
+        {
+            let helper = self.binary_path(WatcherKind::Window);
+            if !helper.is_file() {
+                return Err(format!(
+                    "No se encontró el capturador de ventanas en {}",
+                    helper.display()
+                ));
+            }
+            let output = Command::new(&helper)
+                .arg("--accessibility-status")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .output()
+                .map_err(|error| format!("No se pudo comprobar Accesibilidad: {error}"))?;
+            match output.status.code() {
+                Some(0) => Ok(true),
+                Some(WINDOW_PERMISSION_EXIT) => Ok(false),
+                _ => Err(format!(
+                    "No se pudo comprobar Accesibilidad{}",
+                    diagnostic_suffix(&String::from_utf8_lossy(&output.stderr))
+                )),
+            }
+        }
+    }
+
     pub fn stop_watchers(&self) -> Result<(), String> {
         let _lifecycle = self
             .watcher_lifecycle
@@ -511,10 +848,331 @@ impl ActivityWatchRuntime {
     }
 
     fn stop_watchers_unlocked(&self) -> Result<(), String> {
+        #[cfg(all(target_os = "macos", not(test)))]
+        let window_result = self.stop_native_window_worker();
+        #[cfg(not(all(target_os = "macos", not(test))))]
         let window_result = terminate_slot(&self.window_watcher);
+        #[cfg(all(target_os = "macos", not(test)))]
+        let afk_result = self.stop_native_afk_worker();
+        #[cfg(not(all(target_os = "macos", not(test))))]
         let afk_result = terminate_slot(&self.afk_watcher);
         self.clear_watcher_health();
+        self.set_window_capture_mode(WindowCaptureMode::Stopped);
         window_result.and(afk_result)
+    }
+
+    #[cfg(all(target_os = "macos", not(test)))]
+    fn start_native_window_worker(&self, generation: u64) -> Result<(), WatcherStartError> {
+        let mut slot = self.window_worker.lock().map_err(|_| {
+            WatcherStartError::unavailable(
+                WatcherKind::Window,
+                "No se pudo coordinar la captura de ventanas".into(),
+            )
+        })?;
+        if slot
+            .as_ref()
+            .is_some_and(|worker| worker.running.load(Ordering::Acquire))
+        {
+            return Ok(());
+        }
+        if let Some(worker) = slot.take() {
+            worker.stop.store(true, Ordering::Release);
+            let _ = worker.thread.join();
+        }
+        let datastore = self
+            .datastore()
+            .map_err(|message| WatcherStartError::unavailable(WatcherKind::Window, message))?;
+        let bucket_id = self.watcher_bucket_id(WatcherKind::Window);
+        let hostname = gethostname::gethostname().to_string_lossy().into_owned();
+        let buckets = safe_datastore(|| datastore.get_buckets())
+            .map_err(|message| WatcherStartError::unavailable(WatcherKind::Window, message))?;
+        if !buckets.contains_key(&bucket_id) {
+            let bucket = aw_models::Bucket {
+                bid: None,
+                id: bucket_id.clone(),
+                _type: WatcherKind::Window.bucket_type().into(),
+                client: WatcherKind::Window.binary_name().into(),
+                hostname,
+                created: Some(Utc::now()),
+                data: serde_json::Map::new(),
+                metadata: aw_models::BucketMetadata::default(),
+                events: None,
+                last_updated: None,
+            };
+            safe_datastore(|| datastore.create_bucket(&bucket))
+                .map_err(|message| WatcherStartError::unavailable(WatcherKind::Window, message))?;
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let running = Arc::new(AtomicBool::new(true));
+        let worker_stop = Arc::clone(&stop);
+        let worker_running = Arc::clone(&running);
+        let capture_titles = Arc::clone(&self.capture_titles);
+        let capture_issue = Arc::clone(&self.capture_issue);
+        let window_mode = Arc::clone(&self.window_capture_mode);
+        let cancellation = Arc::clone(&self.cancellation);
+        let thread = std::thread::Builder::new()
+            .name("enso-window-capture".into())
+            .spawn(move || {
+                while !worker_stop.load(Ordering::Acquire) && !cancellation.is_cancelled() {
+                    let include_title = capture_titles.load(Ordering::Acquire);
+                    let observation = crate::macos_capture::current_window(include_title);
+                    let mode = if !include_title {
+                        WindowCaptureMode::AppOnlyPreference
+                    } else if observation.accessibility_trusted {
+                        WindowCaptureMode::Full
+                    } else {
+                        WindowCaptureMode::AppOnlyPermission
+                    };
+                    if let Ok(mut current) = window_mode.lock() {
+                        *current = mode;
+                    }
+                    if let Ok(mut issue) = capture_issue.lock() {
+                        if mode == WindowCaptureMode::AppOnlyPermission {
+                            *issue = Some(CaptureIssueCode::AccessibilityPermissionRequired);
+                        } else if *issue == Some(CaptureIssueCode::AccessibilityPermissionRequired)
+                        {
+                            *issue = None;
+                        }
+                    }
+                    let mut data = serde_json::Map::new();
+                    data.insert("app".into(), serde_json::Value::String(observation.app));
+                    data.insert(
+                        "title".into(),
+                        serde_json::Value::String(
+                            observation.title.unwrap_or_else(|| "excluded".into()),
+                        ),
+                    );
+                    let event = Event::new(Utc::now(), Duration::zero(), data);
+                    if safe_datastore(|| {
+                        datastore.heartbeat(&bucket_id, event, WINDOW_HEARTBEAT_PULSETIME_SECONDS)
+                    })
+                    .is_err()
+                    {
+                        if let Ok(mut issue) = capture_issue.lock() {
+                            *issue = Some(CaptureIssueCode::WindowWatcherUnavailable);
+                        }
+                        break;
+                    }
+                    for _ in 0..20 {
+                        if worker_stop.load(Ordering::Acquire) || cancellation.is_cancelled() {
+                            break;
+                        }
+                        std::thread::sleep(StdDuration::from_millis(100));
+                    }
+                }
+                worker_running.store(false, Ordering::Release);
+            })
+            .map_err(|error| {
+                WatcherStartError::unavailable(
+                    WatcherKind::Window,
+                    format!("No se pudo iniciar la captura de ventanas: {error}"),
+                )
+            })?;
+        if self.capture_cancelled(generation) {
+            stop.store(true, Ordering::Release);
+            let _ = thread.join();
+            return Err(WatcherStartError::unavailable(
+                WatcherKind::Window,
+                CAPTURE_START_CANCELLED.into(),
+            ));
+        }
+        *slot = Some(ManagedNativeWorker {
+            stop,
+            running,
+            thread,
+        });
+        Ok(())
+    }
+
+    #[cfg(all(target_os = "macos", not(test)))]
+    fn start_native_afk_worker(&self, generation: u64) -> Result<(), WatcherStartError> {
+        let mut slot = self.afk_worker.lock().map_err(|_| {
+            WatcherStartError::unavailable(
+                WatcherKind::Afk,
+                "No se pudo coordinar la captura de inactividad".into(),
+            )
+        })?;
+        if slot
+            .as_ref()
+            .is_some_and(|worker| worker.running.load(Ordering::Acquire))
+        {
+            return Ok(());
+        }
+        if let Some(worker) = slot.take() {
+            worker.stop.store(true, Ordering::Release);
+            let _ = worker.thread.join();
+        }
+        let datastore = self
+            .datastore()
+            .map_err(|message| WatcherStartError::unavailable(WatcherKind::Afk, message))?;
+        let bucket_id = self.watcher_bucket_id(WatcherKind::Afk);
+        let hostname = gethostname::gethostname().to_string_lossy().into_owned();
+        let buckets = safe_datastore(|| datastore.get_buckets())
+            .map_err(|message| WatcherStartError::unavailable(WatcherKind::Afk, message))?;
+        if !buckets.contains_key(&bucket_id) {
+            let bucket = aw_models::Bucket {
+                bid: None,
+                id: bucket_id.clone(),
+                _type: WatcherKind::Afk.bucket_type().into(),
+                client: WatcherKind::Afk.binary_name().into(),
+                hostname,
+                created: Some(Utc::now()),
+                data: serde_json::Map::new(),
+                metadata: aw_models::BucketMetadata::default(),
+                events: None,
+                last_updated: None,
+            };
+            safe_datastore(|| datastore.create_bucket(&bucket))
+                .map_err(|message| WatcherStartError::unavailable(WatcherKind::Afk, message))?;
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let running = Arc::new(AtomicBool::new(true));
+        let worker_stop = Arc::clone(&stop);
+        let worker_running = Arc::clone(&running);
+        let capture_issue = Arc::clone(&self.capture_issue);
+        let cancellation = Arc::clone(&self.cancellation);
+        let thread = std::thread::Builder::new()
+            .name("enso-afk-capture".into())
+            .spawn(move || {
+                while !worker_stop.load(Ordering::Acquire) && !cancellation.is_cancelled() {
+                    let status =
+                        if crate::macos_capture::idle_seconds() >= AFK_IDLE_THRESHOLD_SECONDS {
+                            "afk"
+                        } else {
+                            "not-afk"
+                        };
+                    let mut data = serde_json::Map::new();
+                    data.insert("status".into(), serde_json::Value::String(status.into()));
+                    let event = Event::new(Utc::now(), Duration::zero(), data);
+                    if safe_datastore(|| {
+                        datastore.heartbeat(&bucket_id, event, AFK_HEARTBEAT_PULSETIME_SECONDS)
+                    })
+                    .is_err()
+                    {
+                        if let Ok(mut issue) = capture_issue.lock() {
+                            *issue = Some(CaptureIssueCode::AfkWatcherUnavailable);
+                        }
+                        break;
+                    }
+                    for _ in 0..50 {
+                        if worker_stop.load(Ordering::Acquire) || cancellation.is_cancelled() {
+                            break;
+                        }
+                        std::thread::sleep(StdDuration::from_millis(100));
+                    }
+                }
+                worker_running.store(false, Ordering::Release);
+            })
+            .map_err(|error| {
+                WatcherStartError::unavailable(
+                    WatcherKind::Afk,
+                    format!("No se pudo iniciar la captura de inactividad: {error}"),
+                )
+            })?;
+        if self.capture_cancelled(generation) {
+            stop.store(true, Ordering::Release);
+            let _ = thread.join();
+            return Err(WatcherStartError::unavailable(
+                WatcherKind::Afk,
+                CAPTURE_START_CANCELLED.into(),
+            ));
+        }
+        *slot = Some(ManagedNativeWorker {
+            stop,
+            running,
+            thread,
+        });
+        Ok(())
+    }
+
+    #[cfg(all(target_os = "macos", not(test)))]
+    fn stop_native_window_worker(&self) -> Result<(), String> {
+        let worker = self
+            .window_worker
+            .lock()
+            .map_err(|_| "No se pudo detener la captura de ventanas".to_string())?
+            .take();
+        let Some(worker) = worker else {
+            return Ok(());
+        };
+        worker.stop.store(true, Ordering::Release);
+        worker
+            .thread
+            .join()
+            .map_err(|_| "La captura de ventanas no terminó correctamente".into())
+    }
+
+    #[cfg(all(target_os = "macos", not(test)))]
+    fn stop_native_afk_worker(&self) -> Result<(), String> {
+        let worker = self
+            .afk_worker
+            .lock()
+            .map_err(|_| "No se pudo detener la captura de inactividad".to_string())?
+            .take();
+        let Some(worker) = worker else {
+            return Ok(());
+        };
+        worker.stop.store(true, Ordering::Release);
+        worker
+            .thread
+            .join()
+            .map_err(|_| "La captura de inactividad no terminó correctamente".into())
+    }
+
+    #[cfg(all(target_os = "macos", not(test)))]
+    fn native_window_inspection(&self) -> WatcherInspection {
+        let Ok(slot) = self.window_worker.lock() else {
+            return WatcherInspection {
+                status: "error".into(),
+                issue: Some(CaptureIssueCode::WindowWatcherUnavailable),
+                exit_code: None,
+            };
+        };
+        match slot.as_ref() {
+            Some(worker) if worker.running.load(Ordering::Acquire) => WatcherInspection {
+                status: "running".into(),
+                issue: None,
+                exit_code: None,
+            },
+            Some(_) => WatcherInspection {
+                status: "stopped".into(),
+                issue: Some(CaptureIssueCode::WindowWatcherUnavailable),
+                exit_code: None,
+            },
+            None => WatcherInspection {
+                status: "stopped".into(),
+                issue: None,
+                exit_code: None,
+            },
+        }
+    }
+
+    #[cfg(all(target_os = "macos", not(test)))]
+    fn native_afk_inspection(&self) -> WatcherInspection {
+        let Ok(slot) = self.afk_worker.lock() else {
+            return WatcherInspection {
+                status: "error".into(),
+                issue: Some(CaptureIssueCode::AfkWatcherUnavailable),
+                exit_code: None,
+            };
+        };
+        match slot.as_ref() {
+            Some(worker) if worker.running.load(Ordering::Acquire) => WatcherInspection {
+                status: "running".into(),
+                issue: None,
+                exit_code: None,
+            },
+            Some(_) => WatcherInspection {
+                status: "stopped".into(),
+                issue: Some(CaptureIssueCode::AfkWatcherUnavailable),
+                exit_code: None,
+            },
+            None => WatcherInspection {
+                status: "stopped".into(),
+                issue: None,
+                exit_code: None,
+            },
+        }
     }
 
     pub fn watcher_statuses(&self) -> (String, String) {
@@ -530,16 +1188,28 @@ impl ActivityWatchRuntime {
             self.set_capture_issue(CaptureIssueCode::ServerUnavailable);
             let _ = self.stop_watchers_unlocked();
         }
+        #[cfg(all(target_os = "macos", not(test)))]
+        let window = self.native_window_inspection();
+        #[cfg(not(all(target_os = "macos", not(test))))]
         let window = inspect_watcher(
             &self.window_watcher,
             self.binary_path(WatcherKind::Window).exists(),
             WatcherKind::Window,
         );
+        #[cfg(all(target_os = "macos", not(test)))]
+        let afk = self.native_afk_inspection();
+        #[cfg(not(all(target_os = "macos", not(test))))]
         let afk = inspect_watcher(
             &self.afk_watcher,
             self.binary_path(WatcherKind::Afk).exists(),
             WatcherKind::Afk,
         );
+        #[cfg(target_os = "macos")]
+        if window.exit_code == Some(WINDOW_PERMISSION_EXIT) {
+            self.set_window_capture_mode(WindowCaptureMode::AppOnlyPermission);
+            self.clear_capture_issue();
+            return ("stopped".into(), afk.status);
+        }
         if let Some(issue) = window.issue.or(afk.issue) {
             self.set_capture_issue(issue);
             let _ = self.stop_watchers_unlocked();
@@ -565,6 +1235,8 @@ impl ActivityWatchRuntime {
         to: DateTime<Utc>,
         settings: &SettingsV1,
         checkins: &[CheckInV1],
+        rules: &[ClassificationRuleV1],
+        overrides: &[ClassificationOverrideV1],
     ) -> Result<Vec<TimelineBlockV1>, String> {
         if to <= from {
             return Err("El fin del rango debe ser posterior al inicio".into());
@@ -580,75 +1252,211 @@ impl ActivityWatchRuntime {
             .filter(|bucket| bucket._type == "afkstatus")
             .collect();
 
-        let mut afk_events = Vec::new();
+        let mut afk_intervals = Vec::new();
         for bucket in afk_buckets {
-            afk_events.extend(safe_datastore(|| {
-                datastore.get_events(&bucket.id, Some(from), Some(to), None)
-            })?);
-        }
-
-        let mut blocks = Vec::new();
-        for bucket in window_buckets {
             let events =
                 safe_datastore(|| datastore.get_events(&bucket.id, Some(from), Some(to), None))?;
             for event in events {
-                let event_end = event.calculate_endtime();
-                let app =
-                    string_field(&event, "app").unwrap_or_else(|| "Aplicación desconocida".into());
-                let title = if settings.capture_window_titles {
-                    string_field(&event, "title")
+                if string_field(&event, "status").as_deref() != Some("afk")
+                    || event.duration <= Duration::zero()
+                {
+                    continue;
+                }
+                let start = event.timestamp.max(from);
+                let end = event.calculate_endtime().min(to);
+                if end > start {
+                    afk_intervals.push((start, end));
+                }
+            }
+        }
+        afk_intervals.sort_by_key(|(start, _)| *start);
+
+        let answered_checkins = checkins
+            .iter()
+            .filter(|item| item.status == "answered")
+            .filter_map(|item| {
+                let start = crate::models::parse_utc(&item.interval_start).ok()?;
+                let end = crate::models::parse_utc(&item.interval_end).ok()?;
+                (end > start).then_some((item, start, end))
+            })
+            .collect::<Vec<_>>();
+        let override_intervals = overrides
+            .iter()
+            .filter_map(|item| {
+                let start = crate::models::parse_utc(&item.event_start).ok()?;
+                let end = crate::models::parse_utc(&item.event_end).ok()?;
+                (end > start).then_some((item, start, end))
+            })
+            .collect::<Vec<_>>();
+
+        let mut window_events = Vec::new();
+        for bucket in window_buckets {
+            for event in
+                safe_datastore(|| datastore.get_events(&bucket.id, Some(from), Some(to), None))?
+            {
+                window_events.push((bucket.id.clone(), event));
+            }
+        }
+        window_events.sort_by_key(|(_, event)| event.timestamp);
+
+        let mut blocks = Vec::new();
+        for (bucket_id, event) in window_events {
+            let event_start = event.timestamp.max(from);
+            let event_end = event.calculate_endtime().min(to);
+            if event_end <= event_start {
+                continue;
+            }
+            let app =
+                string_field(&event, "app").unwrap_or_else(|| "Aplicación desconocida".into());
+            let title = if settings.capture_window_titles {
+                string_field(&event, "title").filter(|title| title != "excluded")
+            } else {
+                None
+            };
+            let base_block_id = format!(
+                "{}-{}",
+                bucket_id,
+                event
+                    .id
+                    .unwrap_or_else(|| event.timestamp.timestamp_millis())
+            );
+            let automatic = classify(&app, title.as_deref(), rules, &settings.app_rules);
+
+            let afk_start = afk_intervals.partition_point(|(_, end)| *end <= event_start);
+            let relevant_afk = afk_intervals[afk_start..]
+                .iter()
+                .take_while(|(start, _)| *start < event_end)
+                .copied()
+                .collect::<Vec<_>>();
+            let relevant_checkins = answered_checkins
+                .iter()
+                .filter(|(_, start, end)| ranges_overlap(*start, *end, event_start, event_end))
+                .copied()
+                .collect::<Vec<_>>();
+            let relevant_overrides = override_intervals
+                .iter()
+                .filter(|(item, start, end)| {
+                    source_block_id(&item.block_id) == base_block_id
+                        && ranges_overlap(*start, *end, event_start, event_end)
+                })
+                .copied()
+                .collect::<Vec<_>>();
+            let mut cuts = vec![event_start, event_end];
+            for (_, start, end) in &relevant_checkins {
+                cuts.push((*start).max(event_start));
+                cuts.push((*end).min(event_end));
+            }
+            for (_, start, end) in &relevant_overrides {
+                cuts.push((*start).max(event_start));
+                cuts.push((*end).min(event_end));
+            }
+            for (start, end) in &relevant_afk {
+                cuts.push((*start).max(event_start));
+                cuts.push((*end).min(event_end));
+            }
+            cuts.sort_unstable();
+            cuts.dedup();
+            let segmented = cuts.len() > 2;
+            for interval in cuts.windows(2) {
+                let segment_start = interval[0];
+                let segment_end = interval[1];
+                if segment_end <= segment_start {
+                    continue;
+                }
+                let id = if segmented {
+                    format!(
+                        "{}@{}-{}",
+                        base_block_id,
+                        segment_start.timestamp_millis(),
+                        segment_end.timestamp_millis()
+                    )
                 } else {
-                    None
+                    base_block_id.clone()
                 };
-                let matched_checkin = checkins.iter().find(|checkin| {
-                    checkin.status == "answered"
-                        && overlaps_strings(
-                            &checkin.interval_start,
-                            &checkin.interval_end,
-                            event.timestamp,
-                            event_end,
-                        )
-                });
-                let (category, source, check_in_id, confidence) =
-                    if let Some(checkin) = matched_checkin {
+                let matched_override = relevant_overrides
+                    .iter()
+                    .filter(|(_, start, end)| {
+                        ranges_overlap(*start, *end, segment_start, segment_end)
+                    })
+                    .max_by_key(|(item, start, end)| {
                         (
-                            checkin.category.clone().unwrap_or_else(|| "unknown".into()),
-                            "checkin".into(),
-                            Some(checkin.id.clone()),
-                            1.0,
+                            item.block_id == id,
+                            std::cmp::Reverse((*end - *start).num_milliseconds()),
+                            item.updated_at.as_str(),
+                            item.block_id.as_str(),
                         )
-                    } else {
-                        let (category, confidence) =
-                            classify(&app, title.as_deref(), &settings.app_rules);
-                        (category, "window".into(), None, confidence)
-                    };
-                let is_afk = afk_events.iter().any(|afk| {
-                    string_field(afk, "status").as_deref() == Some("afk")
-                        && ranges_overlap(
-                            event.timestamp,
-                            event_end,
-                            afk.timestamp,
-                            afk.calculate_endtime(),
-                        )
+                    });
+                let matched_checkin = relevant_checkins.iter().find(|(_, start, end)| {
+                    ranges_overlap(*start, *end, segment_start, segment_end)
                 });
+                let is_afk = relevant_afk
+                    .iter()
+                    .any(|(start, end)| ranges_overlap(*start, *end, segment_start, segment_end));
+                let (
+                    category,
+                    activity_label,
+                    source,
+                    check_in_id,
+                    confidence,
+                    classification_source,
+                    rule_id,
+                ) = if let Some((item, _, _)) = matched_override {
+                    (
+                        item.category.clone(),
+                        item.activity_label.clone(),
+                        "window".into(),
+                        None,
+                        1.0,
+                        "override".into(),
+                        None,
+                    )
+                } else if let Some((checkin, _, _)) = matched_checkin {
+                    (
+                        checkin.category.clone().unwrap_or_else(|| "unknown".into()),
+                        checkin.activity_label.clone(),
+                        "checkin".into(),
+                        Some(checkin.id.clone()),
+                        1.0,
+                        "checkin".into(),
+                        None,
+                    )
+                } else if is_afk {
+                    (
+                        "break".into(),
+                        None,
+                        "window".into(),
+                        None,
+                        1.0,
+                        "afk".into(),
+                        None,
+                    )
+                } else {
+                    (
+                        automatic.category.clone(),
+                        automatic.activity_label.clone(),
+                        "window".into(),
+                        None,
+                        automatic.confidence,
+                        automatic.source.clone(),
+                        automatic.rule_id.clone(),
+                    )
+                };
                 blocks.push(TimelineBlockV1 {
-                    id: format!(
-                        "{}-{}",
-                        bucket.id,
-                        event
-                            .id
-                            .unwrap_or_else(|| event.timestamp.timestamp_millis())
-                    ),
-                    start: event.timestamp.to_rfc3339(),
-                    end: event_end.to_rfc3339(),
-                    duration_seconds: event.duration.num_seconds().max(0),
-                    app,
-                    title,
-                    category: if is_afk { "break".into() } else { category },
+                    id,
+                    start: segment_start.to_rfc3339(),
+                    end: segment_end.to_rfc3339(),
+                    duration_seconds: (segment_end - segment_start).num_seconds().max(0),
+                    app: app.clone(),
+                    title: title.clone(),
+                    activity_label,
+                    category,
                     confidence,
                     afk: is_afk,
                     source,
                     check_in_id,
+                    classification_source,
+                    rule_id,
+                    correctable: true,
                 });
             }
         }
@@ -668,11 +1476,15 @@ impl ActivityWatchRuntime {
                         duration_seconds: (end.min(to) - start.max(from)).num_seconds().max(0),
                         app: "Contexto manual".into(),
                         title: checkin.activity_label.clone(),
+                        activity_label: checkin.activity_label.clone(),
                         category: checkin.category.clone().unwrap_or_else(|| "unknown".into()),
                         confidence: 1.0,
                         afk: false,
                         source: "checkin".into(),
                         check_in_id: Some(checkin.id.clone()),
+                        classification_source: "checkin".into(),
+                        rule_id: None,
+                        correctable: false,
                     });
                 }
             }
@@ -681,13 +1493,59 @@ impl ActivityWatchRuntime {
         Ok(blocks)
     }
 
+    pub fn window_event_interval(
+        &self,
+        block_id: &str,
+    ) -> Result<(DateTime<Utc>, DateTime<Utc>), String> {
+        let (base_id, projected_interval) = block_id
+            .split_once('@')
+            .map_or((block_id, None), |(base, interval)| (base, Some(interval)));
+        let (bucket_id, event_id) = base_id
+            .rsplit_once('-')
+            .ok_or_else(|| "La sesión no es válida".to_string())?;
+        let event_id = event_id
+            .parse::<i64>()
+            .map_err(|_| "La sesión no es válida".to_string())?;
+        let datastore = self.datastore()?;
+        let bucket = safe_datastore(|| datastore.get_bucket(bucket_id))?;
+        if bucket._type != "currentwindow" {
+            return Err("La sesión no corresponde a una ventana".into());
+        }
+        let event = safe_datastore(|| datastore.get_event(bucket_id, event_id))?;
+        let event_end = event.calculate_endtime();
+        if event_end <= event.timestamp {
+            return Err("La sesión todavía no tiene duración suficiente".into());
+        }
+        if let Some(interval) = projected_interval {
+            let (start, projected_end) = interval
+                .split_once('-')
+                .ok_or_else(|| "La sesión no es válida".to_string())?;
+            let start = DateTime::<Utc>::from_timestamp_millis(
+                start.parse::<i64>().map_err(|_| "La sesión no es válida")?,
+            )
+            .ok_or_else(|| "La sesión no es válida".to_string())?;
+            let projected_end = DateTime::<Utc>::from_timestamp_millis(
+                projected_end
+                    .parse::<i64>()
+                    .map_err(|_| "La sesión no es válida")?,
+            )
+            .ok_or_else(|| "La sesión no es válida".to_string())?;
+            if start < event.timestamp || projected_end > event_end || projected_end <= start {
+                return Err("La sesión no es válida".into());
+            }
+            return Ok((start, projected_end));
+        }
+        Ok((event.timestamp, event_end))
+    }
+
     pub fn interval_reason(
         &self,
         from: DateTime<Utc>,
         to: DateTime<Utc>,
         settings: &SettingsV1,
+        rules: &[ClassificationRuleV1],
     ) -> Result<Option<String>, String> {
-        let blocks = self.timeline(from, to, settings, &[])?;
+        let blocks = self.timeline(from, to, settings, &[], rules, &[])?;
         let interval_seconds = (to - from).num_seconds().max(1);
         let tracked: i64 = blocks.iter().map(|block| block.duration_seconds).sum();
         let afk: i64 = blocks
@@ -780,98 +1638,143 @@ impl ActivityWatchRuntime {
         &self,
         kind: WatcherKind,
         port: u16,
-        capture_titles: bool,
+        window_mode: WindowCaptureMode,
         generation: u64,
     ) -> Result<(), WatcherStartError> {
+        #[cfg(all(target_os = "macos", not(test)))]
+        let _ = (port, window_mode);
         if self.capture_cancelled(generation) {
             return Err(WatcherStartError::unavailable(
                 kind,
                 CAPTURE_START_CANCELLED.into(),
             ));
         }
-        let slot = match kind {
-            WatcherKind::Window => &self.window_watcher,
-            WatcherKind::Afk => &self.afk_watcher,
-        };
-        if matches!(
-            inspect_watcher(slot, self.binary_path(kind).exists(), kind)
-                .status
-                .as_str(),
-            "running"
-        ) {
-            return Ok(());
+        #[cfg(all(target_os = "macos", not(test)))]
+        match kind {
+            WatcherKind::Window => return self.start_native_window_worker(generation),
+            WatcherKind::Afk => return self.start_native_afk_worker(generation),
         }
-        let binary = self.binary_path(kind);
-        if !binary.is_file() {
-            return Err(WatcherStartError::unavailable(
-                kind,
-                format!(
-                    "No se encontró el capturador {} en {}",
-                    kind.label(),
-                    binary.display()
-                ),
-            ));
+        #[cfg(any(not(target_os = "macos"), test))]
+        {
+            let slot = match kind {
+                WatcherKind::Window => &self.window_watcher,
+                WatcherKind::Afk => &self.afk_watcher,
+            };
+            if matches!(
+                inspect_watcher(slot, self.binary_path(kind).exists(), kind)
+                    .status
+                    .as_str(),
+                "running"
+            ) {
+                return Ok(());
+            }
+            let binary = self.binary_path(kind);
+            if !binary.is_file() {
+                return Err(WatcherStartError::unavailable(
+                    kind,
+                    format!(
+                        "No se encontró el capturador {} en {}",
+                        kind.label(),
+                        binary.display()
+                    ),
+                ));
+            }
+            let stderr_path = self
+                .profile
+                .diagnostics
+                .join(format!("{}.stderr.log", kind.binary_name()));
+            let stderr = private_log_file(&stderr_path)
+                .map_err(|message| WatcherStartError::unavailable(kind, message))?;
+            let stdout = stderr.try_clone().map_err(|error| {
+                WatcherStartError::unavailable(
+                    kind,
+                    format!("No se pudo preparar el diagnóstico privado: {error}"),
+                )
+            })?;
+            let mut command = Command::new(&binary);
+            #[cfg(target_os = "macos")]
+            {
+                if matches!(kind, WatcherKind::Afk) {
+                    command.arg("--afk");
+                }
+                command
+                    .arg(format!("http://127.0.0.1:{port}"))
+                    .arg(self.watcher_bucket_id(kind))
+                    .arg(gethostname::gethostname())
+                    .arg(kind.binary_name())
+                    .env(ACTIVITYWATCH_API_KEY_ENV, &self.api_key);
+                if matches!(kind, WatcherKind::Window) && window_mode != WindowCaptureMode::Full {
+                    command.arg("--exclude-title");
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                command
+                    .arg("--host")
+                    .arg("127.0.0.1")
+                    .arg("--port")
+                    .arg(port.to_string());
+                if matches!(kind, WatcherKind::Window) && window_mode != WindowCaptureMode::Full {
+                    command.arg("--exclude-title");
+                }
+            }
+            command
+                .stdin(Stdio::null())
+                .stdout(Stdio::from(stdout))
+                .stderr(Stdio::from(stderr));
+            self.profile.configure(&mut command);
+            #[cfg(test)]
+            command
+                .env("ENSO_TEST_API_KEY", &self.api_key)
+                .env("ENSO_TEST_BUCKET_ID", self.watcher_bucket_id(kind))
+                .env("ENSO_TEST_BUCKET_TYPE", kind.bucket_type())
+                .env("ENSO_TEST_CLIENT_NAME", kind.binary_name())
+                .env(
+                    "ENSO_TEST_HOSTNAME",
+                    gethostname::gethostname().to_string_lossy().as_ref(),
+                )
+                .env("ENSO_TEST_PORT", port.to_string())
+                .env(
+                    "ENSO_TEST_WINDOW_MODE",
+                    match window_mode {
+                        WindowCaptureMode::Full => "full",
+                        WindowCaptureMode::AppOnlyPreference => "app-only-preference",
+                        WindowCaptureMode::AppOnlyPermission => "app-only-permission",
+                        WindowCaptureMode::Stopped => "stopped",
+                    },
+                );
+            if self.capture_cancelled(generation) {
+                return Err(WatcherStartError::unavailable(
+                    kind,
+                    CAPTURE_START_CANCELLED.into(),
+                ));
+            }
+            let child = command.spawn().map_err(|error| {
+                WatcherStartError::unavailable(
+                    kind,
+                    format!("No se pudo iniciar el capturador {}: {error}", kind.label()),
+                )
+            })?;
+            *slot.lock().map_err(|_| {
+                WatcherStartError::unavailable(
+                    kind,
+                    "No se pudo actualizar el estado del capturador".into(),
+                )
+            })? = Some(ManagedWatcher {
+                child,
+                stderr_path: stderr_path.clone(),
+            });
+            // Cancellation can race the final pre-spawn check. Publishing the child
+            // first and revalidating closes the only window where stop could miss it.
+            if self.capture_cancelled(generation) {
+                let _ = terminate_slot(slot);
+                return Err(WatcherStartError::unavailable(
+                    kind,
+                    CAPTURE_START_CANCELLED.into(),
+                ));
+            }
+            Ok(())
         }
-        let stderr_path = self
-            .profile
-            .diagnostics
-            .join(format!("{}.stderr.log", kind.binary_name()));
-        let stderr = private_log_file(&stderr_path)
-            .map_err(|message| WatcherStartError::unavailable(kind, message))?;
-        let mut command = Command::new(&binary);
-        command
-            .arg("--host")
-            .arg("127.0.0.1")
-            .arg("--port")
-            .arg(port.to_string())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::from(stderr));
-        self.profile.configure(&mut command);
-        #[cfg(test)]
-        command
-            .env("ENSO_TEST_API_KEY", &self.api_key)
-            .env("ENSO_TEST_BUCKET_ID", self.watcher_bucket_id(kind))
-            .env("ENSO_TEST_BUCKET_TYPE", kind.bucket_type())
-            .env("ENSO_TEST_CLIENT_NAME", kind.binary_name())
-            .env(
-                "ENSO_TEST_HOSTNAME",
-                gethostname::gethostname().to_string_lossy().as_ref(),
-            );
-        if matches!(kind, WatcherKind::Window) && !capture_titles {
-            command.arg("--exclude-title");
-        }
-        if self.capture_cancelled(generation) {
-            return Err(WatcherStartError::unavailable(
-                kind,
-                CAPTURE_START_CANCELLED.into(),
-            ));
-        }
-        let child = command.spawn().map_err(|error| {
-            WatcherStartError::unavailable(
-                kind,
-                format!("No se pudo iniciar el capturador {}: {error}", kind.label()),
-            )
-        })?;
-        *slot.lock().map_err(|_| {
-            WatcherStartError::unavailable(
-                kind,
-                "No se pudo actualizar el estado del capturador".into(),
-            )
-        })? = Some(ManagedWatcher {
-            child,
-            stderr_path: stderr_path.clone(),
-        });
-        // Cancellation can race the final pre-spawn check. Publishing the child
-        // first and revalidating closes the only window where stop could miss it.
-        if self.capture_cancelled(generation) {
-            let _ = terminate_slot(slot);
-            return Err(WatcherStartError::unavailable(
-                kind,
-                CAPTURE_START_CANCELLED.into(),
-            ));
-        }
-        Ok(())
     }
 
     fn capture_cancelled(&self, generation: u64) -> bool {
@@ -908,6 +1811,15 @@ impl ActivityWatchRuntime {
                     self.fail_capture(kind.unavailable_code());
                     message
                 })? {
+                    #[cfg(target_os = "macos")]
+                    if matches!(kind, WatcherKind::Window)
+                        && status.code() == Some(WINDOW_PERMISSION_EXIT)
+                    {
+                        let _ = terminate_slot(slot);
+                        self.set_window_capture_mode(WindowCaptureMode::AppOnlyPermission);
+                        self.clear_capture_issue();
+                        return Err(WINDOW_PERMISSION_REQUIRED.into());
+                    }
                     let stderr_path = self
                         .profile
                         .diagnostics
@@ -1265,9 +2177,17 @@ impl ActivityWatchRuntime {
     fn binary_path(&self, kind: WatcherKind) -> PathBuf {
         let name = kind.binary_name();
         let directory = self.resource_dir.join("activitywatch").join(name);
+        #[cfg(target_os = "macos")]
+        let binary = directory.join(match kind {
+            WatcherKind::Window => WINDOW_HELPER_BINARY,
+            #[cfg(test)]
+            WatcherKind::Afk => AFK_HELPER_BINARY,
+            #[cfg(not(test))]
+            WatcherKind::Afk => "native-afk-capture",
+        });
         #[cfg(target_os = "windows")]
         let binary = directory.join(format!("{name}.exe"));
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
         let binary = directory.join(name);
         binary
     }
@@ -1360,6 +2280,7 @@ fn run_server(
     selected_port: Arc<AtomicU16>,
     api_key: String,
     profile: WatcherProfilePaths,
+    connector_gateway: Option<Arc<crate::connectors::ConnectorGateway>>,
     ready: Arc<AtomicBool>,
     shutdown_slot: Arc<Mutex<Option<rocket::Shutdown>>>,
     startup_sender: mpsc::SyncSender<Result<(), String>>,
@@ -1381,6 +2302,11 @@ fn run_server(
             config.testing = false;
             config.cors.clear();
             config.cors_regex.clear();
+            if connector_gateway.is_some() {
+                config
+                    .cors_regex
+                    .push(crate::connectors::CHROMIUM_EXTENSION_ORIGIN_REGEX.into());
+            }
             config.auth.api_key = Some(api_key.clone());
             let state = aw_server::endpoints::ServerState {
                 datastore: Mutex::new(datastore.clone()),
@@ -1404,11 +2330,13 @@ fn run_server(
                     let _ = startup.send(Ok(()));
                 })
             });
-            let rocket = match aw_server::endpoints::build_rocket(state, config)
-                .attach(fairing)
-                .ignite()
-                .await
-            {
+            let rocket = aw_server::endpoints::build_rocket(state, config);
+            let rocket = if let Some(gateway) = connector_gateway.clone() {
+                crate::connectors::mount_gateway(rocket, gateway)
+            } else {
+                rocket
+            };
+            let rocket = match rocket.attach(fairing).ignite().await {
                 Ok(rocket) => rocket,
                 Err(error) => {
                     last_error = Some(format!(
@@ -1642,6 +2570,7 @@ where
 struct WatcherInspection {
     status: String,
     issue: Option<CaptureIssueCode>,
+    exit_code: Option<i32>,
 }
 
 fn inspect_watcher(
@@ -1653,20 +2582,23 @@ fn inspect_watcher(
         return WatcherInspection {
             status: "error".into(),
             issue: Some(kind.unavailable_code()),
+            exit_code: None,
         };
     };
     let Some(watcher) = guard.as_mut() else {
         return WatcherInspection {
             status: if binary_exists { "stopped" } else { "missing" }.into(),
             issue: None,
+            exit_code: None,
         };
     };
     match watcher.child.try_wait() {
         Ok(None) => WatcherInspection {
             status: "running".into(),
             issue: None,
+            exit_code: None,
         },
-        Ok(Some(_)) => {
+        Ok(Some(status)) => {
             let diagnostic = read_diagnostic(&watcher.stderr_path).to_ascii_lowercase();
             let conflict = diagnostic.contains("another instance")
                 || diagnostic.contains("already running")
@@ -1679,11 +2611,13 @@ fn inspect_watcher(
                 } else {
                     kind.unavailable_code()
                 }),
+                exit_code: status.code(),
             }
         }
         Err(_) => WatcherInspection {
             status: "error".into(),
             issue: Some(kind.unavailable_code()),
+            exit_code: None,
         },
     }
 }
@@ -1736,41 +2670,179 @@ fn string_field(event: &Event, key: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn classify(app: &str, title: Option<&str>, rules: &[AppRule]) -> (String, f64) {
-    let searchable = format!("{} {}", app, title.unwrap_or_default()).to_lowercase();
-    if let Some(rule) = rules
-        .iter()
-        .find(|rule| searchable.contains(&rule.pattern.to_lowercase()))
-    {
-        return (rule.category.clone(), 1.0);
+struct ClassificationMatch {
+    category: String,
+    activity_label: Option<String>,
+    confidence: f64,
+    source: String,
+    rule_id: Option<String>,
+}
+
+fn classify(
+    app: &str,
+    title: Option<&str>,
+    rules: &[ClassificationRuleV1],
+    legacy_settings_rules: &[AppRule],
+) -> ClassificationMatch {
+    let normalized_app = normalize_match_text(app);
+    let normalized_title = title.map(normalize_match_text).unwrap_or_default();
+    let searchable = format!("{normalized_app} {normalized_title}");
+
+    for scope in ["app-title", "app", "legacy"] {
+        if let Some(rule) = rules
+            .iter()
+            .filter(|rule| {
+                if rule.scope != scope {
+                    return false;
+                }
+                match scope {
+                    "app-title" => {
+                        normalize_match_text(&rule.app) == normalized_app
+                            && rule.title_pattern.as_deref().is_some_and(|pattern| {
+                                normalized_title.contains(&normalize_match_text(pattern))
+                            })
+                    }
+                    "app" => normalize_match_text(&rule.app) == normalized_app,
+                    "legacy" => searchable.contains(&normalize_match_text(&rule.app)),
+                    _ => false,
+                }
+            })
+            .max_by(|left, right| {
+                let left_specificity = left
+                    .title_pattern
+                    .as_deref()
+                    .map(normalize_match_text)
+                    .map(|value| value.chars().count())
+                    .unwrap_or_default();
+                let right_specificity = right
+                    .title_pattern
+                    .as_deref()
+                    .map(normalize_match_text)
+                    .map(|value| value.chars().count())
+                    .unwrap_or_default();
+                left_specificity
+                    .cmp(&right_specificity)
+                    .then_with(|| left.updated_at.cmp(&right.updated_at))
+                    .then_with(|| left.id.cmp(&right.id))
+            })
+        {
+            return ClassificationMatch {
+                category: rule.category.clone(),
+                activity_label: rule.activity_label.clone(),
+                confidence: 1.0,
+                source: "rule".into(),
+                rule_id: Some(rule.id.clone()),
+            };
+        }
     }
-    let app_lower = app.to_lowercase();
-    let category = if contains_any(&app_lower, &["zoom", "meet", "teams", "facetime"]) {
+
+    if let Some(rule) = legacy_settings_rules
+        .iter()
+        .find(|rule| searchable.contains(&normalize_match_text(&rule.pattern)))
+    {
+        return ClassificationMatch {
+            category: rule.category.clone(),
+            activity_label: rule.activity_label.clone(),
+            confidence: 1.0,
+            source: "rule".into(),
+            rule_id: Some(rule.id.clone()),
+        };
+    }
+
+    let category = built_in_category(&normalized_app, &normalized_title);
+    ClassificationMatch {
+        category: category.into(),
+        activity_label: None,
+        confidence: if category == "unknown" { 0.25 } else { 0.7 },
+        source: if category == "unknown" {
+            "unknown"
+        } else {
+            "builtin"
+        }
+        .into(),
+        rule_id: None,
+    }
+}
+
+fn built_in_category(app: &str, title: &str) -> &'static str {
+    if is_browser(app) {
+        if contains_any(title, &["google meet", "meet.google", "zoom meeting"]) {
+            return "meetings";
+        }
+        if contains_any(title, &["gmail", "outlook mail"]) {
+            return "communication";
+        }
+        return "unknown";
+    }
+    if contains_any(app, &["zoom", "microsoft teams", "facetime"]) {
         "meetings"
-    } else if contains_any(
-        &app_lower,
-        &["slack", "mail", "outlook", "whatsapp", "discord"],
-    ) {
+    } else if contains_any(app, &["slack", "mail", "outlook", "whatsapp", "discord"]) {
         "communication"
     } else if contains_any(
-        &app_lower,
-        &["code", "terminal", "xcode", "figma", "photoshop", "notion"],
+        app,
+        &[
+            "visual studio code",
+            "terminal",
+            "xcode",
+            "figma",
+            "photoshop",
+            "notion",
+        ],
     ) {
         "creation"
-    } else if contains_any(&app_lower, &["kindle", "books", "coursera"]) {
+    } else if contains_any(app, &["kindle", "books", "coursera"]) {
         "learning"
     } else if contains_any(
-        &app_lower,
-        &["settings", "finder", "explorer", "excel", "sheets"],
+        app,
+        &[
+            "system settings",
+            "settings",
+            "finder",
+            "explorer",
+            "excel",
+            "sheets",
+            "enso time",
+        ],
     ) {
         "admin"
     } else {
         "unknown"
-    };
-    (
-        category.into(),
-        if category == "unknown" { 0.25 } else { 0.7 },
-    )
+    }
+}
+
+pub fn normalize_match_text(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| {
+            !character.is_control()
+                && !matches!(
+                    *character,
+                    '\u{200b}'..='\u{200f}'
+                        | '\u{202a}'..='\u{202e}'
+                        | '\u{2060}'..='\u{206f}'
+                        | '\u{feff}'
+                )
+        })
+        .flat_map(char::to_lowercase)
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+pub fn is_browser(normalized_app: &str) -> bool {
+    [
+        "google chrome",
+        "chrome",
+        "safari",
+        "firefox",
+        "microsoft edge",
+        "arc",
+        "brave browser",
+        "orion",
+    ]
+    .iter()
+    .any(|candidate| normalized_app == *candidate)
 }
 
 fn contains_any(value: &str, needles: &[&str]) -> bool {
@@ -1786,14 +2858,10 @@ fn ranges_overlap(
     a_start < b_end && b_start < a_end
 }
 
-fn overlaps_strings(start: &str, end: &str, b_start: DateTime<Utc>, b_end: DateTime<Utc>) -> bool {
-    let Ok(a_start) = crate::models::parse_utc(start) else {
-        return false;
-    };
-    let Ok(a_end) = crate::models::parse_utc(end) else {
-        return false;
-    };
-    ranges_overlap(a_start, a_end, b_start, b_end)
+fn source_block_id(block_id: &str) -> &str {
+    block_id
+        .split_once('@')
+        .map_or(block_id, |(source, _)| source)
 }
 
 pub fn completed_interval(
@@ -1842,6 +2910,23 @@ mod tests {
             .iter()
             .any(|(reserved_port, _)| *reserved_port == port));
         assert_ne!(port, 5600);
+    }
+
+    #[test]
+    fn connector_gateway_origin_does_not_abort_server_startup() {
+        let temp = TempDir::new().unwrap();
+        let store =
+            Arc::new(crate::storage::LocalStore::open(&temp.path().join("enso.sqlite")).unwrap());
+        let gate = Arc::new(crate::commands::CaptureGate::new());
+        let gateway = Arc::new(crate::connectors::ConnectorGateway::new(store, gate));
+        let runtime = ActivityWatchRuntime::start_with_gateway(
+            &temp.path().join("data"),
+            temp.path().join("empty-resources"),
+            gateway,
+        )
+        .unwrap();
+
+        assert!((PORT_START..=PORT_END).contains(&wait_until_ready(&runtime)));
     }
 
     #[test]
@@ -1979,6 +3064,147 @@ mod tests {
     }
 
     #[test]
+    fn timeline_splits_partial_afk_and_human_context_wins() {
+        let temp = TempDir::new().unwrap();
+        let runtime = ActivityWatchRuntime::start(
+            &temp.path().join("data"),
+            temp.path().join("empty-resources"),
+        )
+        .unwrap();
+        let datastore = runtime.datastore().unwrap();
+        let start = DateTime::parse_from_rfc3339("2026-08-21T12:00:00Z")
+            .unwrap()
+            .to_utc();
+        for (id, bucket_type, client) in [
+            ("timeline-window", "currentwindow", "aw-watcher-window"),
+            ("timeline-afk", "afkstatus", "aw-watcher-afk"),
+        ] {
+            datastore
+                .create_bucket(&aw_models::Bucket {
+                    bid: None,
+                    id: id.into(),
+                    _type: bucket_type.into(),
+                    client: client.into(),
+                    hostname: "test".into(),
+                    created: Some(start),
+                    data: Map::new(),
+                    metadata: aw_models::BucketMetadata::default(),
+                    events: None,
+                    last_updated: None,
+                })
+                .unwrap();
+        }
+        let mut window_data = Map::new();
+        window_data.insert("app".into(), serde_json::Value::String("Terminal".into()));
+        window_data.insert(
+            "title".into(),
+            serde_json::Value::String("Ensō tests".into()),
+        );
+        datastore
+            .insert_events(
+                "timeline-window",
+                &[Event::new(start, Duration::minutes(10), window_data)],
+            )
+            .unwrap();
+        let mut afk_data = Map::new();
+        afk_data.insert("status".into(), serde_json::Value::String("afk".into()));
+        datastore
+            .insert_events(
+                "timeline-afk",
+                &[
+                    Event::new(
+                        start + Duration::minutes(4),
+                        Duration::minutes(2),
+                        afk_data.clone(),
+                    ),
+                    Event::new(start + Duration::minutes(8), Duration::zero(), afk_data),
+                ],
+            )
+            .unwrap();
+        let checkin = CheckInV1 {
+            id: "human-context".into(),
+            interval_start: (start + Duration::minutes(5)).to_rfc3339(),
+            interval_end: (start + Duration::minutes(7)).to_rfc3339(),
+            reason: "afk".into(),
+            status: "answered".into(),
+            activity_label: Some("Reunión caminando".into()),
+            category: Some("meetings".into()),
+            project: None,
+            repetitive: Some(false),
+            rules_clear: Some(false),
+            created_at: start.to_rfc3339(),
+            answered_at: Some((start + Duration::minutes(7)).to_rfc3339()),
+        };
+        let mut settings = SettingsV1::default();
+        settings.capture_window_titles = true;
+        let timeline = runtime
+            .timeline(
+                start,
+                start + Duration::minutes(10),
+                &settings,
+                std::slice::from_ref(&checkin),
+                &[],
+                &[],
+            )
+            .unwrap();
+        assert_eq!(timeline.len(), 5);
+        assert_eq!(
+            timeline
+                .iter()
+                .map(|block| (block.duration_seconds, block.category.as_str(), block.afk))
+                .collect::<Vec<_>>(),
+            vec![
+                (240, "creation", false),
+                (60, "break", true),
+                (60, "meetings", true),
+                (60, "meetings", false),
+                (180, "creation", false),
+            ]
+        );
+        assert!(timeline.iter().all(|block| block.correctable));
+
+        let target = timeline
+            .iter()
+            .find(|block| block.category == "meetings" && block.afk)
+            .unwrap();
+        let override_item = ClassificationOverrideV1 {
+            block_id: target.id.clone(),
+            event_start: target.start.clone(),
+            event_end: target.end.clone(),
+            category: "focus".into(),
+            activity_label: Some("Lectura en papel".into()),
+            created_at: start.to_rfc3339(),
+            updated_at: start.to_rfc3339(),
+        };
+        let base_override = ClassificationOverrideV1 {
+            block_id: target.id.split_once('@').unwrap().0.into(),
+            event_start: start.to_rfc3339(),
+            event_end: (start + Duration::minutes(10)).to_rfc3339(),
+            category: "personal".into(),
+            activity_label: Some("Corrección anterior".into()),
+            created_at: start.to_rfc3339(),
+            updated_at: (start + Duration::minutes(1)).to_rfc3339(),
+        };
+        let corrected = runtime
+            .timeline(
+                start,
+                start + Duration::minutes(10),
+                &settings,
+                &[checkin],
+                &[],
+                &[base_override, override_item],
+            )
+            .unwrap();
+        let corrected = corrected
+            .iter()
+            .find(|block| block.start == target.start && block.end == target.end)
+            .unwrap();
+        assert_eq!(corrected.category, "focus");
+        assert_eq!(corrected.classification_source, "override");
+        assert!(corrected.afk);
+    }
+
+    #[test]
     fn explicit_rules_win_over_defaults() {
         let rules = vec![AppRule {
             id: "one".into(),
@@ -1986,7 +3212,199 @@ mod tests {
             category: "focus".into(),
             activity_label: None,
         }];
-        assert_eq!(classify("Notion", None, &rules), ("focus".into(), 1.0));
+        let classified = classify("Notion", None, &[], &rules);
+        assert_eq!(classified.category, "focus");
+        assert_eq!(classified.confidence, 1.0);
+    }
+
+    #[test]
+    fn title_rules_are_more_specific_and_matching_ignores_invisible_unicode() {
+        let now = "2026-08-22T12:00:00Z".to_string();
+        let rules = vec![
+            ClassificationRuleV1 {
+                id: "app-rule".into(),
+                scope: "app".into(),
+                app: "Google Chrome".into(),
+                title_pattern: None,
+                category: "personal".into(),
+                activity_label: None,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            },
+            ClassificationRuleV1 {
+                id: "title-rule".into(),
+                scope: "app-title".into(),
+                app: "\u{200e}Google Chrome".into(),
+                title_pattern: Some("Client Portal".into()),
+                category: "focus".into(),
+                activity_label: Some("Trabajo de cliente".into()),
+                created_at: now.clone(),
+                updated_at: now,
+            },
+        ];
+        let classified = classify(
+            "Google Chrome",
+            Some("Overview — CLIENT   PORTAL"),
+            &rules,
+            &[],
+        );
+        assert_eq!(classified.category, "focus");
+        assert_eq!(classified.rule_id.as_deref(), Some("title-rule"));
+        assert_eq!(
+            classified.activity_label.as_deref(),
+            Some("Trabajo de cliente")
+        );
+    }
+
+    #[test]
+    fn multipurpose_browsers_stay_unknown_without_a_useful_title_signal() {
+        let classified = classify("Google Chrome", None, &[], &[]);
+        assert_eq!(classified.category, "unknown");
+        assert_eq!(classified.source, "unknown");
+        let meeting = classify("Google Chrome", Some("Weekly sync — Google Meet"), &[], &[]);
+        assert_eq!(meeting.category, "meetings");
+    }
+
+    #[test]
+    fn watcher_retry_uses_bounded_exponential_delays_and_resets() {
+        let mut retry = WatcherRetryState::new();
+        assert!(retry.due());
+        for expected in [30, 60, 120, 300, 300] {
+            retry.failure();
+            let delay = retry.retry_delay().unwrap().as_secs();
+            assert!(
+                (expected - 1..=expected).contains(&delay),
+                "expected about {expected}s, got {delay}s"
+            );
+            assert!(!retry.due());
+        }
+        retry.success();
+        assert!(retry.due());
+        assert_eq!(retry.failures, 0);
+        assert!(retry.next_retry.is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn missing_accessibility_stays_healthy_in_app_only_mode_without_restart_or_prompt() {
+        let temp = TempDir::new().unwrap();
+        let resources = compiled_watcher_resources(temp.path(), "permission_missing");
+        let runtime = ActivityWatchRuntime::start(&temp.path().join("data"), resources).unwrap();
+        wait_until_ready(&runtime);
+
+        runtime.start_watchers(true).unwrap();
+        let initial_pids = runtime.test_managed_watcher_pids();
+        assert!(initial_pids.0.is_some() && initial_pids.1.is_some());
+        assert_eq!(
+            runtime.capture_issue(),
+            Some(CaptureIssueCode::AccessibilityPermissionRequired)
+        );
+        assert_eq!(
+            runtime.watcher_statuses_with_timeout(StdDuration::from_millis(150)),
+            ("running".into(), "running".into())
+        );
+        runtime.retry_watchers(true).unwrap();
+        assert_eq!(runtime.test_managed_watcher_pids(), initial_pids);
+        assert!(!temp.path().join("permission-requested").exists());
+
+        let window_bucket = runtime.watcher_bucket_id(WatcherKind::Window);
+        let events = runtime
+            .datastore()
+            .unwrap()
+            .get_events(&window_bucket, None, None, None)
+            .unwrap();
+        assert!(!events.is_empty());
+        assert!(events.iter().all(|event| !event.data.contains_key("url")));
+        assert!(events.iter().all(|event| {
+            event.data.get("title").and_then(|value| value.as_str()) == Some("excluded")
+        }));
+
+        let mut settings = SettingsV1::default();
+        settings.capture_window_titles = true;
+        let from = DateTime::parse_from_rfc3339("2026-08-21T11:59:00Z")
+            .unwrap()
+            .to_utc();
+        let to = DateTime::parse_from_rfc3339("2026-08-21T12:02:00Z")
+            .unwrap()
+            .to_utc();
+        let timeline = runtime
+            .timeline(from, to, &settings, &[], &[], &[])
+            .unwrap();
+        assert!(!timeline.is_empty());
+        assert!(timeline.iter().all(|block| block.title.is_none()));
+        runtime.stop_watchers().unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn granting_accessibility_restarts_only_window_watcher_and_restores_titles() {
+        let temp = TempDir::new().unwrap();
+        let resources = compiled_watcher_resources(temp.path(), "permission_toggle");
+        let runtime = ActivityWatchRuntime::start(&temp.path().join("data"), resources).unwrap();
+        wait_until_ready(&runtime);
+        runtime.start_watchers(true).unwrap();
+        let before = runtime.test_managed_watcher_pids();
+        assert_eq!(
+            runtime.capture_issue(),
+            Some(CaptureIssueCode::AccessibilityPermissionRequired)
+        );
+
+        std::fs::write(temp.path().join("permission-granted"), "granted").unwrap();
+        runtime.retry_watchers(true).unwrap();
+        let after = runtime.test_managed_watcher_pids();
+        assert_ne!(after.0, before.0);
+        assert_eq!(after.1, before.1);
+        assert_eq!(runtime.capture_issue(), None);
+
+        let events = runtime
+            .datastore()
+            .unwrap()
+            .get_events(
+                &runtime.watcher_bucket_id(WatcherKind::Window),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(events.iter().any(|event| {
+            event.data.get("title").and_then(|value| value.as_str())
+                == Some("enso-runtime-sensitive-marker")
+        }));
+
+        std::fs::remove_file(temp.path().join("permission-granted")).unwrap();
+        std::thread::sleep(StdDuration::from_millis(200));
+        assert_eq!(
+            runtime.watcher_statuses_with_timeout(StdDuration::from_secs(5)),
+            ("stopped".into(), "running".into())
+        );
+        assert_eq!(
+            runtime.capture_issue(),
+            Some(CaptureIssueCode::AccessibilityPermissionRequired)
+        );
+        runtime.start_watchers_if_due(true).unwrap();
+        let degraded = runtime.test_managed_watcher_pids();
+        assert_ne!(degraded.0, after.0);
+        assert_eq!(degraded.1, after.1);
+        assert_eq!(
+            runtime.watcher_statuses_with_timeout(StdDuration::from_secs(5)),
+            ("running".into(), "running".into())
+        );
+        runtime.stop_watchers().unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn accessibility_prompt_is_only_triggered_by_the_explicit_action() {
+        let temp = TempDir::new().unwrap();
+        let resources = compiled_watcher_resources(temp.path(), "permission_missing");
+        let runtime = ActivityWatchRuntime::start(&temp.path().join("data"), resources).unwrap();
+        wait_until_ready(&runtime);
+        runtime.start_watchers(true).unwrap();
+        let marker = temp.path().join("permission-requested");
+        assert!(!marker.exists());
+        runtime.request_accessibility_permission().unwrap();
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "requested");
+        runtime.stop_watchers().unwrap();
     }
 
     #[test]
@@ -1996,7 +3414,7 @@ mod tests {
         let runtime = ActivityWatchRuntime::start(&temp.path().join("data"), resources).unwrap();
         let port = wait_until_ready(&runtime);
 
-        runtime.start_watchers(false).unwrap();
+        runtime.start_watchers(true).unwrap();
         assert_eq!(
             runtime.watcher_statuses(),
             ("running".into(), "running".into())
@@ -2332,24 +3750,45 @@ fn request(port: u16, method: &str, path: &str, body: &str, key: &str) {{
 
 fn main() {{
     let mode = {mode:?};
+    let args: Vec<String> = env::args().collect();
+    let permission_granted = std::path::Path::new({permission_granted:?});
+    let permission_requested = std::path::Path::new({permission_requested:?});
+    if args.get(1).map(String::as_str) == Some("--accessibility-status") {{
+        if mode == "permission_missing" || (mode == "permission_toggle" && !permission_granted.exists()) {{
+            std::process::exit(77);
+        }}
+        std::process::exit(0);
+    }}
+    if args.get(1).map(String::as_str) == Some("--request-accessibility") {{
+        std::fs::write(permission_requested, "requested").unwrap();
+        std::process::exit(77);
+    }}
     if mode == "conflict" {{
         eprintln!("Another instance is already running, quitting.");
         std::process::exit(255);
     }}
-    if mode == "healthy" || mode == "healthy_then_disconnected" {{
-        let args: Vec<String> = env::args().collect();
-        let port_index = args.iter().position(|arg| arg == "--port").unwrap();
-        let port = args[port_index + 1].parse::<u16>().unwrap();
+    if mode == "healthy" || mode == "healthy_then_disconnected" || mode == "permission_missing" || mode == "permission_toggle" {{
+        let port = env::var("ENSO_TEST_PORT").unwrap().parse::<u16>().unwrap();
         let bucket = env::var("ENSO_TEST_BUCKET_ID").unwrap();
         let bucket_type = env::var("ENSO_TEST_BUCKET_TYPE").unwrap();
         let client = env::var("ENSO_TEST_CLIENT_NAME").unwrap();
         let hostname = env::var("ENSO_TEST_HOSTNAME").unwrap();
         let key = env::var("ENSO_TEST_API_KEY").unwrap();
+        // Only the macOS capture helper receives the key through the environment.
+        if cfg!(target_os = "macos") && client == "aw-watcher-window" {{
+            assert_eq!(env::var("ENSO_ACTIVITYWATCH_API_KEY").unwrap(), key);
+            assert!(!args.iter().any(|argument| argument.contains(&key)));
+        }}
         let body = format!(r#"{{{{"client":"{{}}","hostname":"{{}}","type":"{{}}"}}}}"#, client, hostname, bucket_type);
         request(port, "POST", &format!("/api/0/buckets/{{}}", bucket), &body, &key);
         let mut pulse = 0_u64;
         loop {{
-            let event = format!(r#"{{{{"timestamp":"2026-08-21T12:00:00Z","duration":1.0,"data":{{{{"app":"fixture","title":"enso-runtime-sensitive-marker","status":"not-afk","process":{{}},"pulse":{{}}}}}}}}}}"#, std::process::id(), pulse);
+            let window_mode = env::var("ENSO_TEST_WINDOW_MODE").unwrap_or_default();
+            if client == "aw-watcher-window" && mode == "permission_toggle" && window_mode == "full" && !permission_granted.exists() {{
+                std::process::exit(77);
+            }}
+            let title = if window_mode.starts_with("app-only") {{ "excluded" }} else {{ "enso-runtime-sensitive-marker" }};
+            let event = format!(r#"{{{{"timestamp":"2026-08-21T12:00:00Z","duration":1.0,"data":{{{{"app":"fixture","title":"{{}}","status":"not-afk","process":{{}},"pulse":{{}}}}}}}}}}"#, title, std::process::id(), pulse);
             request(
                 port,
                 "POST",
@@ -2365,9 +3804,12 @@ fn main() {{
     loop {{ thread::sleep(Duration::from_secs(30)); }}
 }}
 "###,
+            permission_granted = root.join("permission-granted"),
+            permission_requested = root.join("permission-requested"),
         );
         std::fs::write(&source, fixture_source).unwrap();
-        let output = Command::new("rustc")
+        let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+        let output = Command::new(rustc)
             .arg("--edition=2021")
             .arg(&source)
             .arg("-o")
@@ -2389,10 +3831,17 @@ fn main() {{
 
     fn fixture_binary_path(resources: &Path, name: &str) -> PathBuf {
         let directory = resources.join("activitywatch").join(name);
+        #[cfg(target_os = "macos")]
+        let binary = directory.join(match name {
+            "aw-watcher-window" => WINDOW_HELPER_BINARY,
+            "aw-watcher-afk" => AFK_HELPER_BINARY,
+            _ => name,
+        });
         #[cfg(target_os = "windows")]
-        return directory.join(format!("{name}.exe"));
-        #[cfg(not(target_os = "windows"))]
-        return directory.join(name);
+        let binary = directory.join(format!("{name}.exe"));
+        #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+        let binary = directory.join(name);
+        binary
     }
 
     fn wait_until_ready(runtime: &ActivityWatchRuntime) -> u16 {

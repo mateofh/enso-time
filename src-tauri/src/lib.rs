@@ -1,14 +1,20 @@
 mod activitywatch;
 mod blueprint;
 mod commands;
+mod connectors;
 mod diagnostics;
+mod features;
+mod intelligence;
+#[cfg(all(target_os = "macos", not(test)))]
+mod macos_capture;
 mod models;
+mod screen_ocr;
 mod storage;
 
 use activitywatch::ActivityWatchRuntime;
 use commands::AppState;
 use std::sync::Arc;
-use storage::LocalStore;
+use storage::{prepare_projection_v2, LocalStore};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Manager, RunEvent};
@@ -39,6 +45,7 @@ pub fn run() {
                 use std::os::unix::fs::PermissionsExt;
                 std::fs::set_permissions(&app_data_dir, std::fs::Permissions::from_mode(0o700))?;
             }
+            prepare_projection_v2(&app_data_dir)?;
             let store = Arc::new(LocalStore::open(&app_data_dir.join("enso-time.sqlite"))?);
             let packaged_resources = app.path().resource_dir().map_err(|error| {
                 format!("No se pudo resolver el directorio de recursos: {error}")
@@ -46,11 +53,16 @@ pub fn run() {
             let development_resources =
                 std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources");
             let resource_dir = resolve_resource_dir(packaged_resources, development_resources);
-            let activity = Arc::new(ActivityWatchRuntime::start(
+            let capture_gate = Arc::new(commands::CaptureGate::new());
+            let connector_gateway = Arc::new(connectors::ConnectorGateway::new(
+                Arc::clone(&store),
+                Arc::clone(&capture_gate),
+            ));
+            let activity = Arc::new(ActivityWatchRuntime::start_with_gateway(
                 &app_data_dir.join("activitywatch"),
                 resource_dir,
+                Arc::clone(&connector_gateway),
             )?);
-            let capture_gate = Arc::new(commands::CaptureGate::new());
             let settings = store.settings()?;
             if settings.onboarding_completed && settings.autostart {
                 use tauri_plugin_autostart::ManagerExt;
@@ -95,6 +107,7 @@ pub fn run() {
                 app_data_dir,
                 scheduler,
                 capture_gate,
+                connector_gateway,
             };
             app.manage(state);
             install_tray(app)?;
@@ -104,11 +117,38 @@ pub fn run() {
             commands::get_settings,
             commands::save_settings,
             commands::get_tracking_status,
+            commands::retry_capture,
+            commands::request_accessibility_permission,
             commands::get_timeline,
+            commands::list_classification_rules,
+            commands::list_review_groups,
+            commands::apply_review_group,
+            commands::undo_review_operation,
+            commands::save_session_classification,
+            commands::clear_session_classification,
+            commands::preview_classification_rule,
+            commands::save_classification_rule,
+            commands::delete_classification_rule,
             commands::list_checkins,
             commands::answer_checkin,
             commands::get_study_progress,
             commands::generate_diagnostic,
+            commands::save_openrouter_api_key,
+            commands::delete_openrouter_api_key,
+            commands::list_openrouter_models,
+            commands::get_ai_configuration_status,
+            commands::preview_ai_evaluation,
+            commands::grant_cloud_consent,
+            commands::revoke_cloud_consent,
+            commands::run_ai_evaluation,
+            commands::list_ai_reports,
+            commands::save_ai_feedback,
+            commands::save_context_observation,
+            commands::get_screen_ocr_status,
+            commands::request_screen_ocr_permission,
+            commands::create_connector_pairing,
+            commands::list_connector_clients,
+            commands::revoke_connector_client,
             commands::list_workflow_intakes,
             commands::save_workflow_intake,
             commands::get_automation_blueprint_v1,

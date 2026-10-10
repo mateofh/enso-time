@@ -1,4 +1,4 @@
-# Vendored ActivityWatch server
+# Vendored ActivityWatch components
 
 This directory contains the minimum Rust server workspace required by Ensō Time:
 `aw-server`, `aw-client-rust`, `aw-datastore`, `aw-models`, `aw-query`, and

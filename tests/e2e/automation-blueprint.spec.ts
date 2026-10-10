@@ -203,11 +203,14 @@ async function seedDesktop(page: Page, options: {
         state.calls.push({ command, args });
         switch (command) {
           case "get_settings": return scenario.settings;
-          case "get_tracking_status": return { running: true, windowWatcher: "running", afkWatcher: "running", pendingCheckIns: 0, dataStaysLocal: true };
+          case "get_tracking_status": return { running: true, windowWatcher: "running", afkWatcher: "running", pendingCheckIns: 0, dataStaysLocal: true, processingMode: "local-only" };
           case "get_timeline": return [];
+          case "list_classification_rules": return [];
           case "list_checkins": return scenario.checkIns;
           case "get_study_progress": return { startedAt: "2026-08-20T12:00:00.000Z", selectedDays: 7, observedDays: 2, trackedHours: 1, answeredCheckIns: scenario.checkIns.length, coveragePercent: 100 };
           case "list_workflow_intakes": return scenario.intakes;
+          case "get_ai_configuration_status": return { hasApiKey: false, ready: false, consentCurrent: false, spentThisMonthUsd: 0 };
+          case "list_ai_reports": return [];
           case "generate_diagnostic": return { schemaVersion: 1, rangeStart: "2026-08-20T00:00:00.000Z", rangeEnd: "2026-08-21T00:00:00.000Z", daysObserved: 2, metrics: [], recommendations: [], candidates: [], prompt: "", preliminary: false, generatedAt: "2026-08-21T00:00:00.000Z" };
           case "get_automation_blueprint_v1":
             if (state.getMode === "pending") return new Promise<never>(() => undefined);
@@ -239,7 +242,7 @@ async function seedDesktop(page: Page, options: {
     draft: options.draft ?? {},
     intakes: options.intakes ?? [intake],
     checkIns: options.checkIns ?? checkIns(options.observations ?? 2),
-    settings: { schemaVersion: 1, onboardingCompleted: true, locale, theme: "ink", timezone: "America/Bogota", cadenceMinutes: 15, autostart: true, captureWindowTitles: true, retentionDays: 90, updateChecksEnabled: false, goals: ["Recuperar tiempo"], role: "Operaciones", workSchedule: { start: "08:30", end: "18:00", days: [1, 2, 3, 4, 5] }, appRules: [] },
+    settings: { schemaVersion: 2, onboardingCompleted: true, locale, theme: "ink", timezone: "America/Bogota", cadenceMinutes: 15, autostart: true, captureWindowTitles: true, retentionDays: 90, updateChecksEnabled: false, goals: ["Recuperar tiempo"], role: "Operaciones", workSchedule: { start: "08:30", end: "18:00", days: [1, 2, 3, 4, 5] }, appRules: [], deepCapture: { browser: { enabled: false, cloudAllowed: false }, editor: { enabled: false, cloudAllowed: false }, shell: { enabled: false, cloudAllowed: false }, screenshots: { enabled: false, cloudAllowed: false }, screenshotIntervalMinutes: 15, browserTextAllowlist: [], excludedApps: ["1Password"], excludedSites: [] }, ai: { enabled: false, weeklyEnabled: false, weeklyDay: 1, weeklyHour: 8 } },
   });
   await page.goto("/");
 }

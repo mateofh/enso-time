@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-const workflow = readFileSync(new URL("../../.github/workflows/release.yml", import.meta.url), "utf8");
+// Windows checkouts may convert to CRLF; the job-splitting assertions expect LF.
+const workflow = readFileSync(new URL("../../.github/workflows/release.yml", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 const provenanceDocs = readFileSync(new URL("../../docs/RELEASE_PROVENANCE.md", import.meta.url), "utf8");
 const tauriConfig = JSON.parse(readFileSync(new URL("../../src-tauri/tauri.conf.json", import.meta.url), "utf8"));
 
@@ -104,11 +105,23 @@ test("Windows packaging uses an ASCII product name without changing the macOS br
   assert.match(windows, /config\.bundle = \{ windows: \{ wix: \{ upgradeCode: windowsUpgradeCode \} \} \}/);
   assert.match(windows, /Windows productName must be printable ASCII/);
 
-  const macStart = configure.indexOf('if (process.platform === "darwin")');
-  assert.ok(macStart > 0 && macStart < windowsStart);
-  const mac = configure.slice(macStart, windowsStart);
-  assert.doesNotMatch(mac, /productName/);
+  // macOS keeps the configured brand: only the Windows branch renames it.
+  assert.doesNotMatch(configure.slice(0, windowsStart), /productName/);
+  assert.doesNotMatch(configure, /signingIdentity: "-"/);
   assert.equal(tauriConfig.productName, "Ensō Time");
+});
+
+test("Apple signing secrets are reachable only through the protected macOS environment", () => {
+  const buildStart = workflow.indexOf("\n  build:");
+  const nextJob = workflow.slice(buildStart + 1).search(/\n  [a-z][a-z-]*:\n/) + buildStart + 1;
+  const build = workflow.slice(buildStart, nextJob);
+  assert.match(build, /environment: \$\{\{ matrix\.signing_environment \}\}/);
+  assert.equal(build.match(/signing_environment: macos-signing/g)?.length, 2);
+  assert.match(build, /os: windows-2022[\s\S]*?signing_environment: ''/);
+  const secretJobs = workflow.split(/\n  (?=[a-z][a-z-]*:\n)/).filter((job) => /secrets\.APPLE_/.test(job));
+  assert.equal(secretJobs.length, 1);
+  assert.ok(secretJobs[0].startsWith("build:"));
+  assert.match(build, /if: always\(\) && runner\.os == 'macOS'[\s\S]*?security delete-keychain/);
 });
 
 test("Windows verifies MSI identity through COM and enables verbose Tauri diagnostics", () => {

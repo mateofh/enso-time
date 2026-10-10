@@ -119,7 +119,6 @@ if (vendorReadme.includes("repository root `LICENSE`")) {
     "handoff: vendor/activitywatch/README.md still points to the root LICENSE; its owner must point it to LICENSES/MPL-2.0.txt",
   );
 }
-
 const noticeHashRows = [...thirdParty.matchAll(/^\| `([^`]+)` \| `([0-9a-f]{64})` \|$/gm)];
 const noticeHashes = new Map(noticeHashRows.map((match) => [match[1], match[2]]));
 requireCondition(

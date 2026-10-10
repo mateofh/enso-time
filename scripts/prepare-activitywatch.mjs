@@ -29,11 +29,13 @@ export const TARGETS = Object.freeze({
     archive: `activitywatch-${ACTIVITYWATCH_VERSION}-macos-arm64.zip`,
     sha256: "e70639b63df662e1c72b4277e073bd80f7b94c516f12a8d01404f4aa526e8731",
     executableSuffix: "",
+    swiftArchitecture: "arm64",
   },
   "macos-x86_64": {
     archive: `activitywatch-${ACTIVITYWATCH_VERSION}-macos-x86_64.zip`,
     sha256: "eb9bf65f2a0e28489b4f89eb64159a15b82f8f07d6eb6cd3efe0dd3565e61b36",
     executableSuffix: "",
+    swiftArchitecture: "x86_64",
   },
   "windows-x86_64": {
     archive: `activitywatch-${ACTIVITYWATCH_VERSION}-windows-x86_64.zip`,
@@ -73,6 +75,10 @@ export function detectTarget(platform = process.platform, architecture = process
   if (platform === "darwin" && architecture === "x64") return "macos-x86_64";
   if (platform === "win32" && architecture === "x64") return "windows-x86_64";
   throw new Error(`Plataforma no soportada: ${platform}/${architecture}. Indica --target.`);
+}
+
+export function watchersForTarget(target) {
+  return target.startsWith("macos-") ? [] : WATCHERS;
 }
 
 export function parseArgs(argv) {
@@ -131,6 +137,23 @@ async function run(command, args) {
   });
 }
 
+async function runCapture(command, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    const stdout = [];
+    const stderr = [];
+    child.stdout.on("data", (chunk) => stdout.push(chunk));
+    child.stderr.on("data", (chunk) => stderr.push(chunk));
+    child.once("error", reject);
+    child.once("exit", (code) => {
+      const output = Buffer.concat(stdout).toString("utf8");
+      const diagnostic = Buffer.concat(stderr).toString("utf8").trim();
+      if (code === 0) resolve(output);
+      else reject(new Error(`${command} terminó con código ${code}${diagnostic ? `: ${diagnostic}` : ""}`));
+    });
+  });
+}
+
 async function download(url, destination) {
   const temporary = `${destination}.${process.pid}.download`;
   await rm(temporary, { force: true });
@@ -173,20 +196,32 @@ export async function buildManifest(root, metadata) {
     });
   }
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     activitywatchVersion: ACTIVITYWATCH_VERSION,
     source: metadata.source,
     sourceArchive: metadata.archive,
     sourceArchiveSha256: metadata.sha256,
     target: metadata.target,
+    windowHelper: metadata.windowHelper ?? null,
     generatedAt: new Date().toISOString(),
     files: watcherFiles,
   };
 }
 
+export async function windowHelperMetadata(target) {
+  void target;
+  return null;
+}
+
+export async function buildMacOSWindowHelper(root, target) {
+  void root;
+  void target;
+  return null;
+}
+
 async function validateInstall(root, target) {
   const suffix = TARGETS[target].executableSuffix;
-  for (const watcher of WATCHERS) {
+  for (const watcher of watchersForTarget(target)) {
     const executable = path.join(root, watcher, `${watcher}${suffix}`);
     const executableStat = await stat(executable);
     if (!executableStat.isFile() || executableStat.size === 0) {
@@ -194,18 +229,34 @@ async function validateInstall(root, target) {
     }
     if (!suffix) await chmod(executable, 0o755);
   }
+  const helper = await windowHelperMetadata(target);
+  if (helper) {
+    for (const binaryPath of [helper.afkBinaryPath]) {
+      const executable = path.join(root, ...binaryPath.split("/"));
+      const executableStat = await stat(executable);
+      if (!executableStat.isFile() || executableStat.size === 0) {
+        throw new Error(`Helper Swift incompleto: ${executable}`);
+      }
+      await chmod(executable, 0o755);
+    }
+  }
 }
 
 async function currentInstallMatches(output, target) {
   try {
     const manifest = JSON.parse(await readFile(path.join(output, "manifest.json"), "utf8"));
+    const helper = await windowHelperMetadata(target);
     if (
+      manifest.schemaVersion !== 2 ||
       manifest.target !== target ||
       manifest.sourceArchiveSha256 !== TARGETS[target].sha256 ||
-      manifest.activitywatchVersion !== ACTIVITYWATCH_VERSION
+      manifest.activitywatchVersion !== ACTIVITYWATCH_VERSION ||
+      JSON.stringify(manifest.windowHelper ?? null) !== JSON.stringify(helper)
     ) return false;
     await validateInstall(output, target);
-    if (!Array.isArray(manifest.files) || manifest.files.length === 0) return false;
+    if (!Array.isArray(manifest.files)) return false;
+    if (watchersForTarget(target).length === 0 && manifest.files.length !== 0) return false;
+    if (watchersForTarget(target).length > 0 && manifest.files.length === 0) return false;
     for (const file of manifest.files) {
       if (
         typeof file.path !== "string" ||
@@ -245,8 +296,8 @@ async function assertSafeOutput(output) {
   }
 }
 
-async function extractWatchers(archive, stagingDirectory) {
-  const selectors = WATCHERS.map((watcher) => `activitywatch/${watcher}`);
+async function extractWatchers(archive, stagingDirectory, target) {
+  const selectors = watchersForTarget(target).map((watcher) => `activitywatch/${watcher}`);
   if (process.platform === "win32") {
     await run("tar", ["-xf", archive, "-C", stagingDirectory, ...selectors]);
     return;
@@ -279,9 +330,17 @@ export async function prepare(options) {
     ACTIVITYWATCH_VERSION,
     release.archive,
   );
+  const needsArchive = watchersForTarget(options.target).length > 0;
 
   if (options.dryRun) {
-    return { action: "dry-run", target: options.target, url, archive: sourceArchive, output: options.output };
+    return {
+      action: "dry-run",
+      target: options.target,
+      url,
+      archive: sourceArchive,
+      output: options.output,
+      windowHelper: await windowHelperMetadata(options.target),
+    };
   }
 
   await assertSafeOutput(options.output);
@@ -290,7 +349,7 @@ export async function prepare(options) {
     return { action: "unchanged", target: options.target, output: options.output };
   }
 
-  if (!options.archive) {
+  if (needsArchive && !options.archive) {
     await mkdir(path.dirname(sourceArchive), { recursive: true });
     if (!(await exists(sourceArchive)) || (await sha256(sourceArchive)) !== release.sha256) {
       await rm(sourceArchive, { force: true });
@@ -299,25 +358,30 @@ export async function prepare(options) {
     }
   }
 
-  const actualChecksum = await sha256(sourceArchive);
-  if (actualChecksum !== release.sha256) {
-    throw new Error(
-      `Checksum inválido para ${release.archive}: esperado ${release.sha256}, recibido ${actualChecksum}`,
-    );
+  if (needsArchive) {
+    const actualChecksum = await sha256(sourceArchive);
+    if (actualChecksum !== release.sha256) {
+      throw new Error(
+        `Checksum inválido para ${release.archive}: esperado ${release.sha256}, recibido ${actualChecksum}`,
+      );
+    }
   }
 
   const resourceParent = path.dirname(options.output);
   await mkdir(resourceParent, { recursive: true });
   const staging = await mkdtemp(path.join(resourceParent, ".activitywatch-stage-"));
   try {
-    await extractWatchers(sourceArchive, staging);
     const extractedRoot = path.join(staging, "activitywatch");
+    await mkdir(extractedRoot, { recursive: true });
+    if (needsArchive) await extractWatchers(sourceArchive, staging, options.target);
+    const windowHelper = await buildMacOSWindowHelper(extractedRoot, options.target);
     await validateInstall(extractedRoot, options.target);
     const manifest = await buildManifest(extractedRoot, {
       archive: release.archive,
       sha256: release.sha256,
       source: url,
       target: options.target,
+      windowHelper,
     });
     await writeFile(path.join(extractedRoot, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
 

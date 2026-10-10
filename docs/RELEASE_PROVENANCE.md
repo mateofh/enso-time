@@ -35,6 +35,14 @@ creation, update, and deletion of release tags matching `v*`; the environment do
 not prevent GitHub from running a historical workflow attached to an unprotected
 tag.
 
+The macOS matrix builds enter a second protected environment, `macos-signing`,
+which holds the only copies of the Apple Developer ID certificate, its password,
+the notary API key, and the temporary keychain password. Create those secrets as
+environment secrets, not repository secrets, and require an authorized reviewer
+on that environment too. The Windows build carries no signing secrets and runs
+without an environment. The temporary keychain and notary key file are deleted
+at the end of every macOS build, including failed ones.
+
 ## Signed attestations
 
 Each of the four installers is a subject of two GitHub/Sigstore attestations:
