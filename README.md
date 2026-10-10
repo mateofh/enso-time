@@ -6,7 +6,7 @@ asks only when a 15/30/60-minute interval cannot be classified, and turns the re
 evidence into a prioritized automation opportunity, a guided workflow intake, and a
 diagnostic prompt you can paste into ChatGPT or Claude.
 
-> **Public beta:** `v0.2.0-beta.1` is source-available, not open source. The beta is
+> **Public beta:** `v0.2.0-beta.2` is source-available, not open source. The beta is
 > free only for uses permitted by the
 > [PolyForm Noncommercial License 1.0.0](LICENSE). Commercial use requires a separate
 > written agreement; see [Commercial licensing](COMMERCIAL.md).
@@ -45,13 +45,13 @@ Download the installer for your computer from this repository's **Releases** pag
 Every release includes `SHA256SUMS`. Verify the downloaded installer before opening it:
 
 ```bash
-shasum -a 256 "enso-time-0.2.0-beta.1-macos-arm64.dmg"
+shasum -a 256 "enso-time-0.2.0-beta.2-macos-arm64.dmg"
 ```
 
 On Windows, use PowerShell:
 
 ```powershell
-Get-FileHash .\enso-time-0.2.0-beta.1-windows-x86_64.msi -Algorithm SHA256
+Get-FileHash .\enso-time-0.2.0-beta.2-windows-x86_64.msi -Algorithm SHA256
 ```
 
 Compare the hash with the matching line in `SHA256SUMS` from the same release. A
@@ -65,7 +65,7 @@ current GitHub CLI, replace `OWNER/REPOSITORY` with this repository and verify a
 installer online:
 
 ```bash
-gh attestation verify ./enso-time-0.2.0-beta.1-macos-arm64.dmg \
+gh attestation verify ./enso-time-0.2.0-beta.2-macos-arm64.dmg \
   --repo OWNER/REPOSITORY \
   --signer-workflow OWNER/REPOSITORY/.github/workflows/release.yml
 ```
@@ -73,9 +73,9 @@ gh attestation verify ./enso-time-0.2.0-beta.1-macos-arm64.dmg \
 To verify against the attached bundle instead of fetching the attestation from GitHub:
 
 ```bash
-gh attestation verify ./enso-time-0.2.0-beta.1-macos-arm64.dmg \
+gh attestation verify ./enso-time-0.2.0-beta.2-macos-arm64.dmg \
   --repo OWNER/REPOSITORY \
-  --bundle ./enso-time-0.2.0-beta.1-provenance.sigstore.json \
+  --bundle ./enso-time-0.2.0-beta.2-provenance.sigstore.json \
   --signer-workflow OWNER/REPOSITORY/.github/workflows/release.yml
 ```
 

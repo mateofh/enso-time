@@ -88,8 +88,8 @@ and must not rewrite those certificate fields; the separately checked-out
 Set the expected values and verify the standard provenance:
 
 ```bash
-INSTALLER="./enso-time-0.2.0-beta.1-macos-arm64.dmg"
-RELEASE_TAG="v0.2.0-beta.1"
+INSTALLER="./enso-time-0.2.0-beta.2-macos-arm64.dmg"
+RELEASE_TAG="v0.2.0-beta.2"
 WORKFLOW_COMMIT="REPLACE_WITH_AUDITED_40_HEX_WORKFLOW_SHA"
 SOURCE_COMMIT="REPLACE_WITH_AUDITED_40_HEX_SOURCE_SHA"
 OIDC_SOURCE_COMMIT="REPLACE_WITH_AUDITED_40_HEX_OIDC_SOURCE_SHA"
