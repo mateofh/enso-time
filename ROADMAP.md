@@ -63,7 +63,9 @@ every published installer. It ships only after these security findings are close
 
 - The payload sent to OpenRouter is byte-identical to the one previewed and authorized;
   consent binds to its hash, and scheduled runs cannot send content the person never saw.
-- The monthly budget cannot be bypassed by missing, zero, or negative model prices.
+- The monthly budget cannot be bypassed by missing, zero, or negative model prices, nor
+  reopened when retention prunes runs from the current month: cost accounting is kept
+  through the end of its budget month while payloads follow retention.
 - Redaction covers common credentials (cloud keys, API tokens, JWTs, private keys,
   passwords) before any text leaves the device.
 - OCR redacts whole lines before tokenizing, drops tokens with digits, and skips capture
