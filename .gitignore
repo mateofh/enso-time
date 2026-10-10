@@ -23,3 +23,6 @@ src-tauri/icons/*
 !src-tauri/icons/128x128@2x.png
 !src-tauri/icons/icon.icns
 !src-tauri/icons/icon.ico
+
+# Packaged connector extensions
+*.vsix
