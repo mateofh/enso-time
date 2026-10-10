@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-const workflow = readFileSync(new URL("../../.github/workflows/release.yml", import.meta.url), "utf8");
+// Windows checkouts may convert to CRLF; the job-splitting assertions expect LF.
+const workflow = readFileSync(new URL("../../.github/workflows/release.yml", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 const provenanceDocs = readFileSync(new URL("../../docs/RELEASE_PROVENANCE.md", import.meta.url), "utf8");
 const tauriConfig = JSON.parse(readFileSync(new URL("../../src-tauri/tauri.conf.json", import.meta.url), "utf8"));
 
