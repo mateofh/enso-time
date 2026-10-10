@@ -112,7 +112,9 @@ fn sqlite_snapshot(source: &Path, destination: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn cleanup_old_projection_backups(app_data_dir: &Path) -> Result<(), String> {
+/// Runs at startup and from the daily retention pass, so a long-running app
+/// does not keep full database snapshots past their seven days.
+pub fn cleanup_old_projection_backups(app_data_dir: &Path) -> Result<(), String> {
     let root = app_data_dir.join(MIGRATION_BACKUP_DIR);
     let Ok(entries) = std::fs::read_dir(&root) else {
         return Ok(());

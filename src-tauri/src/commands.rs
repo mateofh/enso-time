@@ -26,7 +26,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::thread::JoinHandle;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
@@ -1657,6 +1657,11 @@ fn scheduler_tick(
         store.prune_classification_overrides(settings.retention_days)?;
         store.prune_context_and_ai_runs(settings.retention_days)?;
         activity.prune_activity(settings.retention_days)?;
+        let app_data_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|error| format!("No se pudo resolver el directorio de datos: {error}"))?;
+        crate::storage::cleanup_old_projection_backups(&app_data_dir)?;
         store.set_value("last_retention_prune", &today)?;
     }
     schedule_weekly_ai_if_due(app, store, activity, capture_gate, &settings)?;

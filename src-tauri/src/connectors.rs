@@ -373,6 +373,11 @@ impl ConnectorGateway {
         identity: &ConnectorIdentity,
         observation: ContextObservationV2,
     ) -> Result<ContextObservationV2, GatewayError> {
+        // The token was checked before the body arrived; a client revoked while
+        // its body was in flight must not land that observation.
+        if !self.is_active(&identity.client_id).map_err(bad_request)? {
+            return Err((Status::Unauthorized, "Token inválido o revocado".into()));
+        }
         let settings = self.store.settings().map_err(bad_request)?;
         // Pausing or leaving the work schedule stops deep context exactly like
         // it stops screen OCR; connectors must not keep recording meanwhile.
@@ -386,6 +391,19 @@ impl ConnectorGateway {
         }
         self.store_observation(identity, observation, &settings)
             .map_err(bad_request)
+    }
+
+    fn is_active(&self, client_id: &str) -> Result<bool, String> {
+        self.store
+            .connection()?
+            .query_row(
+                "SELECT 1 FROM connector_clients WHERE id = ?1 AND revoked_at IS NULL",
+                [client_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|row| row.is_some())
+            .map_err(|error| error.to_string())
     }
 
     fn store_observation(
@@ -694,6 +712,14 @@ mod tests {
         (temp, store, gateway)
     }
 
+    fn paired_editor(gateway: &ConnectorGateway) -> ConnectorIdentity {
+        let pairing = gateway.create_pairing("editor", "VS Code", None).unwrap();
+        let paired = gateway
+            .pair(PairRequest { code: pairing.code }, None)
+            .unwrap();
+        gateway.authenticate(&paired.token).unwrap()
+    }
+
     #[test]
     fn repeated_wrong_codes_discard_pending_pairings_and_lock_out() {
         let (_temp, _store, gateway) = editor_gateway();
@@ -754,10 +780,7 @@ mod tests {
     #[test]
     fn connectors_cannot_record_while_tracking_is_not_running() {
         let (_temp, store, gateway) = editor_gateway();
-        let identity = ConnectorIdentity {
-            client_id: "browser-1".into(),
-            kind: "browser".into(),
-        };
+        let identity = paired_editor(&gateway);
         // Onboarding not completed means tracking is not running.
         let (status, _) = gateway
             .ingest(&identity, browser_observation("example.com", "text"))
@@ -784,6 +807,17 @@ mod tests {
             })
             .unwrap();
         assert_eq!(stored, 0);
+    }
+
+    #[test]
+    fn a_client_revoked_mid_request_cannot_store_its_observation() {
+        let (_temp, _store, gateway) = editor_gateway();
+        let identity = paired_editor(&gateway);
+        gateway.revoke_client(&identity.client_id).unwrap();
+        let (status, _) = gateway
+            .ingest(&identity, browser_observation("example.com", "text"))
+            .unwrap_err();
+        assert_eq!(status, Status::Unauthorized);
     }
 
     #[test]
