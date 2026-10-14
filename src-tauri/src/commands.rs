@@ -45,6 +45,7 @@ pub struct AppState {
 pub struct CaptureGate {
     access: RwLock<()>,
     exclusive_serial: Mutex<()>,
+    tracking_serial: Mutex<()>,
     generation: AtomicU64,
     cancelling: AtomicBool,
     #[cfg(test)]
@@ -55,6 +56,19 @@ pub(crate) struct CaptureOperation<'a> {
     gate: &'a CaptureGate,
     generation: u64,
     _access: RwLockReadGuard<'a, ()>,
+}
+
+// Acquire capture access first, then serialize lifecycle/paused-state changes.
+// Delete can cancel queued transitions without deadlocking on this mutex.
+pub(crate) struct CaptureTransition<'a> {
+    _serial: MutexGuard<'a, ()>,
+    operation: CaptureOperation<'a>,
+}
+
+impl CaptureTransition<'_> {
+    pub(crate) fn ensure_current(&self) -> Result<(), String> {
+        self.operation.ensure_current()
+    }
 }
 
 struct CaptureExclusive<'a> {
@@ -69,6 +83,7 @@ impl CaptureGate {
         Self {
             access: RwLock::new(()),
             exclusive_serial: Mutex::new(()),
+            tracking_serial: Mutex::new(()),
             generation: AtomicU64::new(0),
             cancelling: AtomicBool::new(false),
             #[cfg(test)]
@@ -91,6 +106,19 @@ impl CaptureGate {
             gate: self,
             generation: self.generation.load(Ordering::Acquire),
             _access: access,
+        })
+    }
+
+    pub(crate) fn tracking_operation(&self) -> Result<CaptureTransition<'_>, String> {
+        let operation = self.operation()?;
+        let serial = self
+            .tracking_serial
+            .lock()
+            .map_err(|_| "No se pudo coordinar el seguimiento".to_string())?;
+        operation.ensure_current()?;
+        Ok(CaptureTransition {
+            _serial: serial,
+            operation,
         })
     }
 
@@ -121,6 +149,10 @@ impl CaptureGate {
             _access: access,
             _serial: serial,
         })
+    }
+
+    pub(crate) fn current_generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
     }
 
     #[cfg(test)]
@@ -208,12 +240,13 @@ pub fn save_settings(
     state: State<'_, AppState>,
     settings: SettingsV1,
 ) -> Result<SettingsV1, String> {
-    let operation = state.capture_gate.operation()?;
+    let operation = state.capture_gate.tracking_operation()?;
     let previous = state.store.settings()?;
     let settings = crate::features::effective_settings(settings);
     settings.validate()?;
     configure_autostart(&app, settings.onboarding_completed && settings.autostart)?;
     state.store.save_settings(&settings)?;
+    crate::update_tray_locale(&app, &settings.locale)?;
     if previous.onboarding_completed && !settings.onboarding_completed {
         state.activity.stop_watchers()?;
     } else if !previous.onboarding_completed && settings.onboarding_completed {
@@ -254,7 +287,7 @@ pub fn get_tracking_status(state: State<'_, AppState>) -> Result<TrackingStatus,
 
 #[tauri::command]
 pub fn retry_capture(state: State<'_, AppState>) -> Result<TrackingStatus, String> {
-    let operation = state.capture_gate.operation()?;
+    let operation = state.capture_gate.tracking_operation()?;
     if is_running(&state.store)? {
         let settings = state.store.settings()?;
         operation.ensure_current()?;
@@ -313,6 +346,8 @@ pub fn answer_checkin(
     state: State<'_, AppState>,
     answer: CheckInAnswer,
 ) -> Result<CheckInV1, String> {
+    let operation = state.capture_gate.operation()?;
+    operation.ensure_current()?;
     state.store.answer_checkin(&answer)
 }
 
@@ -1364,9 +1399,29 @@ fn write_private_new_file(path: &std::path::Path, contents: &[u8]) -> Result<(),
         .map_err(|error| format!("No se pudo escribir la exportación: {error}"))
 }
 
+pub(crate) fn record_native_action_error(
+    store: &LocalStore,
+    gate: &CaptureGate,
+    generation: u64,
+) -> Result<(), String> {
+    let operation = gate.operation()?;
+    operation.ensure_current()?;
+    if operation.generation != generation {
+        return Err("Tracking action was superseded by deletion".into());
+    }
+    store.set_value("native_action_error", "tracking-action-failed")
+}
+
 #[tauri::command]
 pub fn pause_tracking(state: State<'_, AppState>, minutes: u16) -> Result<TrackingStatus, String> {
-    let operation = state.capture_gate.operation()?;
+    pause_tracking_inner(&state, minutes)
+}
+
+pub(crate) fn pause_tracking_inner(
+    state: &AppState,
+    minutes: u16,
+) -> Result<TrackingStatus, String> {
+    let operation = state.capture_gate.tracking_operation()?;
     if !(5..=1440).contains(&minutes) {
         return Err("La pausa debe durar entre 5 minutos y 24 horas".into());
     }
@@ -1375,13 +1430,18 @@ pub fn pause_tracking(state: State<'_, AppState>, minutes: u16) -> Result<Tracki
     state
         .store
         .set_paused_until(Some(&paused_until.to_rfc3339()))?;
+    state.store.set_value("native_action_error", "")?;
     drop(operation);
-    status(&state)
+    status(state)
 }
 
 #[tauri::command]
 pub fn resume_tracking(state: State<'_, AppState>) -> Result<TrackingStatus, String> {
-    let operation = state.capture_gate.operation()?;
+    resume_tracking_inner(&state)
+}
+
+pub(crate) fn resume_tracking_inner(state: &AppState) -> Result<TrackingStatus, String> {
+    let operation = state.capture_gate.tracking_operation()?;
     let settings = state.store.settings()?;
     if !settings.onboarding_completed {
         return Err("Completa la configuración inicial antes de iniciar el seguimiento".into());
@@ -1391,8 +1451,9 @@ pub fn resume_tracking(state: State<'_, AppState>) -> Result<TrackingStatus, Str
         .activity
         .start_watchers(settings.capture_window_titles)?;
     state.store.set_paused_until(None)?;
+    state.store.set_value("native_action_error", "")?;
     drop(operation);
-    status(&state)
+    status(state)
 }
 
 #[tauri::command]
@@ -1484,7 +1545,11 @@ fn json_export(
 }
 
 #[tauri::command]
-pub fn delete_all_data(state: State<'_, AppState>, confirmation: String) -> Result<(), String> {
+pub fn delete_all_data(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    confirmation: String,
+) -> Result<(), String> {
     if confirmation != "DELETE_ENSO_TIME_DATA" {
         return Err("La confirmación de borrado no coincide".into());
     }
@@ -1492,7 +1557,8 @@ pub fn delete_all_data(state: State<'_, AppState>, confirmation: String) -> Resu
     state.connector_gateway.clear_pending();
     crate::intelligence::delete_openrouter_key().map_err(|error| {
         format!("Los datos locales se borraron, pero la credencial de OpenRouter no: {error}")
-    })
+    })?;
+    crate::update_tray_locale(&app, &state.store.settings()?.locale)
 }
 
 fn delete_all_data_inner(
@@ -1594,9 +1660,10 @@ pub fn start_scheduler(
     store: Arc<LocalStore>,
     activity: Arc<ActivityWatchRuntime>,
     capture_gate: Arc<CaptureGate>,
+    app_data_dir: PathBuf,
 ) -> Result<SchedulerHandle, String> {
     spawn_scheduler(
-        move || scheduler_tick(&app, &store, &activity, &capture_gate),
+        move || scheduler_tick(&app, &store, &activity, &capture_gate, &app_data_dir),
         std::time::Duration::from_secs(30),
     )
 }
@@ -1606,7 +1673,7 @@ pub(crate) fn bootstrap_watchers_if_current(
     activity: &ActivityWatchRuntime,
     capture_gate: &CaptureGate,
 ) -> Result<(), String> {
-    let operation = capture_gate.operation()?;
+    let operation = capture_gate.tracking_operation()?;
     let settings = store.settings()?;
     if !settings.onboarding_completed || !is_running(store)? {
         return Ok(());
@@ -1648,8 +1715,9 @@ fn scheduler_tick(
     store: &Arc<LocalStore>,
     activity: &Arc<ActivityWatchRuntime>,
     capture_gate: &Arc<CaptureGate>,
+    app_data_dir: &std::path::Path,
 ) -> Result<(), String> {
-    let operation = capture_gate.operation()?;
+    let operation = capture_gate.tracking_operation()?;
     let settings = store.settings()?;
     let today = Utc::now().date_naive().to_string();
     if store.get_value("last_retention_prune")?.as_deref() != Some(&today) {
@@ -1657,11 +1725,7 @@ fn scheduler_tick(
         store.prune_classification_overrides(settings.retention_days)?;
         store.prune_context_and_ai_runs(settings.retention_days)?;
         activity.prune_activity(settings.retention_days)?;
-        let app_data_dir = app
-            .path()
-            .app_data_dir()
-            .map_err(|error| format!("No se pudo resolver el directorio de datos: {error}"))?;
-        crate::storage::cleanup_old_projection_backups(&app_data_dir)?;
+        crate::storage::cleanup_old_projection_backups(app_data_dir)?;
         store.set_value("last_retention_prune", &today)?;
     }
     schedule_weekly_ai_if_due(app, store, activity, capture_gate, &settings)?;
@@ -1704,12 +1768,13 @@ fn scheduler_tick(
         return Ok(());
     }
     if store.create_checkin(&checkin)? {
-        let _ = app
-            .notification()
+        let copy = crate::native_copy::native_copy(&settings.locale);
+        app.notification()
             .builder()
-            .title("Ensō Time · Falta contexto")
-            .body("¿Qué estabas haciendo en el último intervalo?")
-            .show();
+            .title(copy.missing_title)
+            .body(copy.missing_body)
+            .show()
+            .map_err(|error| format!("Check-in saved; notification failed: {error}"))?;
     }
     Ok(())
 }
@@ -1876,7 +1941,7 @@ fn schedule_weekly_ai_if_due(
 }
 
 fn status(state: &AppState) -> Result<TrackingStatus, String> {
-    let _operation = state.capture_gate.operation()?;
+    let _operation = state.capture_gate.tracking_operation()?;
     let should_run = is_running(&state.store)?;
     let paused_until = state.store.paused_until()?;
     let (window_watcher, afk_watcher) = state.activity.watcher_statuses();
@@ -1902,6 +1967,10 @@ fn status(state: &AppState) -> Result<TrackingStatus, String> {
         .into(),
         last_cloud_run_at: state.store.get_value("last_cloud_run_at")?,
         capture_issue: state.activity.capture_issue(),
+        native_action_error: state
+            .store
+            .get_value("native_action_error")?
+            .filter(|value| !value.is_empty()),
         experimental_intelligence: crate::features::EXPERIMENTAL_INTELLIGENCE,
     })
 }
@@ -2034,6 +2103,80 @@ mod tests {
         };
         let intake = store.save_workflow_intake(intake).unwrap();
         (directory, store, intake)
+    }
+
+    #[test]
+    fn concurrent_pause_and_resume_cannot_mix_watcher_and_pause_state() {
+        let directory = TempDir::new().unwrap();
+        let store = Arc::new(LocalStore::open(&directory.path().join("tracking.sqlite")).unwrap());
+        let gate = Arc::new(CaptureGate::new());
+        let capturing = Arc::new(AtomicBool::new(true));
+        let (pause_stopped, stopped) = mpsc::channel();
+        let (finish_pause, finish) = mpsc::channel();
+        let (resume_entered, entered) = mpsc::channel();
+        let pause = {
+            let gate = Arc::clone(&gate);
+            let store = Arc::clone(&store);
+            let capturing = Arc::clone(&capturing);
+            std::thread::spawn(move || {
+                let operation = gate.tracking_operation().unwrap();
+                capturing.store(false, Ordering::SeqCst);
+                pause_stopped.send(()).unwrap();
+                finish.recv().unwrap();
+                operation.ensure_current().unwrap();
+                store
+                    .set_paused_until(Some("2099-01-01T00:00:00Z"))
+                    .unwrap();
+            })
+        };
+        stopped
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        let resume = {
+            let gate = Arc::clone(&gate);
+            let store = Arc::clone(&store);
+            let capturing = Arc::clone(&capturing);
+            std::thread::spawn(move || {
+                let operation = gate.tracking_operation().unwrap();
+                resume_entered.send(()).unwrap();
+                operation.ensure_current().unwrap();
+                capturing.store(true, Ordering::SeqCst);
+                store.set_paused_until(None).unwrap();
+            })
+        };
+        assert!(entered
+            .recv_timeout(std::time::Duration::from_millis(50))
+            .is_err());
+        finish_pause.send(()).unwrap();
+        pause.join().unwrap();
+        resume.join().unwrap();
+        assert!(capturing.load(Ordering::SeqCst));
+        assert!(store.paused_until().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_queued_tracking_transition_is_cancelled_by_delete_generation() {
+        let gate = Arc::new(CaptureGate::new());
+        let first = gate.tracking_operation().unwrap();
+        let queued_gate = Arc::clone(&gate);
+        let queued = std::thread::spawn(move || queued_gate.tracking_operation().is_err());
+        gate.cancelling.store(true, Ordering::Release);
+        gate.generation.fetch_add(1, Ordering::AcqRel);
+        drop(first);
+        assert!(queued.join().unwrap());
+    }
+
+    #[test]
+    fn delayed_tray_failure_cannot_reintroduce_state_after_deletion() {
+        let directory = TempDir::new().unwrap();
+        let store = LocalStore::open(&directory.path().join("test.sqlite")).unwrap();
+        let gate = CaptureGate::new();
+        let original_generation = gate.current_generation();
+        record_native_action_error(&store, &gate, original_generation).unwrap();
+        store.delete_all().unwrap();
+        gate.generation.fetch_add(1, Ordering::AcqRel);
+        assert!(record_native_action_error(&store, &gate, original_generation).is_err());
+        assert!(store.get_value("native_action_error").unwrap().is_none());
     }
 
     #[test]

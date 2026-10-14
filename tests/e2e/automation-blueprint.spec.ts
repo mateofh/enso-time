@@ -202,6 +202,7 @@ async function seedDesktop(page: Page, options: {
       async invoke(command, args = {}) {
         state.calls.push({ command, args });
         switch (command) {
+          case "complete_installer_smoke_test": return null;
           case "get_settings": return scenario.settings;
           case "get_tracking_status": return { running: true, windowWatcher: "running", afkWatcher: "running", pendingCheckIns: 0, dataStaysLocal: true, processingMode: "local-only" };
           case "get_timeline": return [];

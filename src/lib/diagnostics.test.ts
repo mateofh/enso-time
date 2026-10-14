@@ -36,6 +36,21 @@ describe("automation diagnosis", () => {
     expect(prompt).toContain("Operaciones");
   });
 
+  it("renders English diagnosis without translating user content", () => {
+    const diagnostic = createDiagnostic(blocks, checkIns, 3, "Operaciones", ["Reducir trabajo manual"], "en");
+    expect(diagnostic.metrics[0]?.label).toBe("Active time");
+    expect(diagnostic.prompt).toContain("TOP CANDIDATE");
+    expect(diagnostic.prompt).toContain("Actualizar reporte");
+    expect(diagnostic.prompt).toContain("Reducir trabajo manual");
+    expect(diagnostic.candidates[0]?.evidence[0]).toBe("3 sessions: 0 corrections, 0 rules and 3 check-ins");
+    expect(diagnostic.recommendations.join(" ")).not.toContain("Valida “");
+  });
+
+  it("uses recorded durations instead of assuming every interval is 15 minutes", () => {
+    const longer = checkIns.map((item) => ({ ...item, intervalEnd: item.intervalEnd.replace("10:15", "10:30") }));
+    expect(scoreCandidate(longer, 3)[0]?.estimatedWeeklyHours).toBe(2.5);
+  });
+
   it("marks studies under seven days as preliminary", () => {
     const diagnostic = createDiagnostic(blocks, checkIns, 3);
     expect(diagnostic.preliminary).toBe(true);

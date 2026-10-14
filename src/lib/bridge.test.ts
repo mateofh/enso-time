@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
-import { previewBlueprintEvidence } from "./bridge";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { bridge, previewBlueprintEvidence } from "./bridge";
+import { candidateId } from "./candidateIdentity";
 import type { CheckInV1, WorkflowIntakeV1 } from "./types";
 
 const intake: WorkflowIntakeV1 = {
@@ -65,5 +66,24 @@ describe("preview blueprint evidence", () => {
     ], "es-419");
     expect(spanishEvidence.observed).toHaveLength(3);
     expect(spanishEvidence.declared).toContain("Frecuencia de repetición confirmada por ti: 2 confirmación(es) en 2 día(s) UTC declarados");
+  });
+});
+
+
+describe("preview persistence evidence guards", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  it("saving a complete draft cannot fabricate observations or enable export", async () => {
+    const source = { ...intake, candidateId: candidateId(intake.candidateLabel) };
+    let stored = JSON.stringify({ settings: { locale: "en" }, workflowIntakes: [source], checkIns: [answered("one", "2026-08-01T12:00:00.000Z", true, true)] });
+    vi.stubGlobal("window", {});
+    vi.stubGlobal("localStorage", { getItem: () => stored, setItem: (_key: string, value: string) => { stored = value; } });
+    const initial = await bridge.getAutomationBlueprint(source.candidateId, "en");
+    const draft = { ...initial!.draft, runsPerWeek: 5, dataSensitivity: "low" as const, sideEffectLevel: "none" as const,
+      verificationMode: "every-run" as const, verificationMinutesPerRun: 1, recoveryPlan: "Review manually",
+      stepBoundaries: initial!.draft.stepBoundaries.map((step) => ({ ...step, disposition: "automatable" as const, rationale: "Deterministic rules" })) };
+    const saved = await bridge.saveAutomationBlueprint({ draft, expectedRevision: 0 }, "en");
+    expect(saved.evidence.repeatedObservations).toBe(1);
+    expect(saved.status).toBe("draft");
+    await expect(bridge.exportAutomationBlueprint(source.candidateId, 1, "markdown", "en")).rejects.toThrow();
   });
 });

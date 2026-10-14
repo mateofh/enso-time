@@ -39,8 +39,9 @@ The macOS matrix builds enter a second protected environment, `macos-signing`,
 which holds the only copies of the Apple Developer ID certificate, its password,
 the notary API key, and the temporary keychain password. Create those secrets as
 environment secrets, not repository secrets, and require an authorized reviewer
-on that environment too. The Windows build carries no signing secrets and runs
-without an environment. The temporary keychain and notary key file are deleted
+on that environment too. Windows beta builds carry no signing secrets and run
+without an environment; stable Windows builds enter the separate protected
+`windows-signing` environment for Authenticode credentials. The temporary keychain and notary key file are deleted
 at the end of every macOS build, including failed ones.
 
 ## Signed attestations
@@ -161,8 +162,9 @@ checks. GitHub's CLI documentation makes the same distinction between certificat
 identity and user-controllable predicate contents.
 
 Provenance does not prove that the application is secure. It also does not replace
-Apple notarization, Windows Authenticode, or the paid signing identities that this
-public beta does not use.
+Apple notarization or Windows Authenticode. macOS beta and stable builds require
+Developer ID signing/notarization; Windows beta builds are unsigned and Windows
+stable builds require Authenticode signing.
 
 The Windows build uses the `windows-2022` hosted image. Before invoking WiX, it
 executes a temporary `.vbs` file with `cscript.exe`; merely finding the executable

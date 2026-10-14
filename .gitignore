@@ -14,6 +14,7 @@ src-tauri/resources/.activitywatch-*
 .playwright-cli/
 output/playwright/
 src-tauri/ci-signing.json
+src-tauri/ci-bundle.json
 coverage/
 *.tsbuildinfo
 src-tauri/icons/*

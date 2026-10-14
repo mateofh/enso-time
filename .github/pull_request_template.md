@@ -19,3 +19,7 @@ CLA.
 
 List the checks run and platforms tested. Do not attach timeline data, window titles,
 credentials, or other sensitive diagnostics.
+
+- [ ] `npm run qa` passes; attach the report and state whether the source tree was dirty.
+- [ ] Record native installer platforms tested separately from browser simulation.
+- [ ] Stable release evidence covers exact installer hashes, source, reviews, and pilot.

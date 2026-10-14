@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { releaseConfig, WINDOWS_UPGRADE_CODE } from "../../scripts/release-config.mjs";
 
 // Windows checkouts may convert to CRLF; the job-splitting assertions expect LF.
 const workflow = readFileSync(new URL("../../.github/workflows/release.yml", import.meta.url), "utf8").replace(/\r\n/g, "\n");
@@ -19,7 +20,7 @@ test("manual release is a fail-closed beta.2 backfill", () => {
 test("one resolved source SHA feeds and is verified by every job", () => {
   assert.match(workflow, /source_commit: \$\{\{ steps\.resolve\.outputs\.source_commit \}\}/);
   assert.match(workflow, /build:\s+name: Build \$\{\{ matrix\.label \}\}\s+needs: resolve/);
-  assert.match(workflow, /release:\s+name: Publish GitHub prerelease\s+needs: \[resolve, build\]/);
+  assert.match(workflow, /release:\s+name: Publish GitHub release\s+needs: \[resolve, build\]/);
 
   const sourceCheckouts = workflow.match(/ref: \$\{\{ (?:steps\.resolve|needs\.resolve)\.outputs\.source_commit \}\}/g) ?? [];
   assert.equal(sourceCheckouts.length, 3);
@@ -87,35 +88,44 @@ test("Windows uses a real VBScript smoke test without mutating optional features
   assert.doesNotMatch(workflow, /windows-2025/);
 });
 
-test("Windows packaging uses an ASCII product name without changing the macOS brand", () => {
-  const configureStart = workflow.indexOf("- name: Configure release packaging");
-  const buildStart = workflow.indexOf("- name: Build Tauri installers", configureStart);
-  assert.ok(configureStart > 0 && buildStart > configureStart);
-  const configure = workflow.slice(configureStart, buildStart);
-  const windowsStart = configure.indexOf('if (process.platform === "win32")');
-  assert.ok(windowsStart > 0);
-  const windows = configure.slice(windowsStart);
-  const windowsName = windows.match(/const windowsProductName = "([^"]+)"/)?.[1];
-  const windowsUpgradeCode = windows.match(/const windowsUpgradeCode = "([^"]+)"/)?.[1];
-
-  assert.equal(windowsName, "Enso Time");
-  assert.equal(windowsUpgradeCode, "b9b13e4b-5399-58c4-b563-de7a5e0c02a9");
-  assert.match(windowsName, /^[\x20-\x7E]+$/);
-  assert.match(windows, /config\.productName = windowsProductName/);
-  assert.match(windows, /config\.bundle = \{ windows: \{ wix: \{ upgradeCode: windowsUpgradeCode \} \} \}/);
-  assert.match(windows, /Windows productName must be printable ASCII/);
-
-  // macOS keeps the configured brand: only the Windows branch renames it.
-  assert.doesNotMatch(configure.slice(0, windowsStart), /productName/);
-  assert.doesNotMatch(configure, /signingIdentity: "-"/);
+test("Windows packaging preserves identity and orders beta and stable upgrades", () => {
+  const thumbprint = "a".repeat(40);
+  const beta = releaseConfig("0.2.0-beta.1", "win32");
+  const stable = releaseConfig("0.2.0", "win32", { windowsThumbprint: thumbprint });
+  const nextBeta = releaseConfig("0.2.1-beta.1", "win32");
+  assert.equal(stable.productName, "Enso Time");
+  assert.equal(stable.bundle.windows.wix.upgradeCode, WINDOWS_UPGRADE_CODE);
+  assert.equal(stable.bundle.windows.wix.version, "0.2.99");
+  assert.equal(beta.bundle.windows.wix.version, "0.2.1");
+  assert.equal(nextBeta.bundle.windows.wix.version, "0.2.101");
+  assert.equal(stable.version, "0.2.0-65535");
+  assert.equal(beta.version, "0.2.0-1");
+  assert.equal(stable.bundle.windows.certificateThumbprint, thumbprint);
   assert.equal(tauriConfig.productName, "Ensō Time");
+  assert.match(workflow, /run: node scripts\/release-config\.mjs/);
+});
+
+test("macOS signing always fails closed and stable Windows requires signing", () => {
+  assert.throws(() => releaseConfig("0.2.0", "darwin"), /Developer ID/);
+  assert.throws(() => releaseConfig("0.2.0", "win32"), /thumbprint/);
+  assert.throws(() => releaseConfig("0.2.0-beta.99", "win32"), /bounds/);
+  assert.throws(() => releaseConfig("0.2.0-rc.1", "darwin"), /supported/);
+  assert.throws(() => releaseConfig("0.2.0-beta.1", "darwin"), /Developer ID/);
+  assert.equal(releaseConfig("0.2.0", "darwin", { appleIdentity: "Developer ID Application: Test" }).bundle.macOS.signingIdentity, "Developer ID Application: Test");
+  assert.match(workflow, /environment: \$\{\{ matrix\.signing_environment/);
+  assert.match(workflow, /Require stable Windows signing credentials/);
+  assert.match(workflow, /Import Developer ID and prepare notary key/);
+  assert.match(workflow, /Import stable Windows signing certificate/);
+  assert.match(workflow, /Require Apple signing and notarization credentials/);
+  assert.match(workflow, /Remove temporary signing files and macOS keychain/);
+  assert.match(workflow, /prerelease: \$\{\{ contains\(env\.RELEASE_TAG, '-'\) \}\}/);
 });
 
 test("Apple signing secrets are reachable only through the protected macOS environment", () => {
   const buildStart = workflow.indexOf("\n  build:");
   const nextJob = workflow.slice(buildStart + 1).search(/\n  [a-z][a-z-]*:\n/) + buildStart + 1;
   const build = workflow.slice(buildStart, nextJob);
-  assert.match(build, /environment: \$\{\{ matrix\.signing_environment \}\}/);
+  assert.match(build, /environment: \$\{\{ matrix\.signing_environment \|\|/);
   assert.equal(build.match(/signing_environment: macos-signing/g)?.length, 2);
   assert.match(build, /os: windows-2022[\s\S]*?signing_environment: ''/);
   const secretJobs = workflow.split(/\n  (?=[a-z][a-z-]*:\n)/).filter((job) => /secrets\.APPLE_/.test(job));
@@ -144,4 +154,16 @@ test("every external action is pinned to a full commit SHA", () => {
     if (action.startsWith("./") || action.startsWith("docker://")) continue;
     assert.match(action, /^[^@]+@[0-9a-f]{40}$/, `${action} is not pinned to a full SHA`);
   }
+});
+
+
+test("native smoke and human acceptance run before stable publication", () => {
+  assert.match(workflow, /Install and launch Windows installers/);
+  assert.match(workflow, /xcrun stapler validate/);
+  assert.match(workflow, /Get-AuthenticodeSignature/);
+  assert.match(workflow, /node scripts\/installer-smoke\.mjs --app/);
+  const humanGate = workflow.indexOf("Require stable human QA evidence");
+  const publish = workflow.indexOf("Publish installers and checksums");
+  assert.ok(humanGate > 0 && humanGate < publish);
+  assert.match(workflow, /STABLE_QA_EVIDENCE: \$\{\{ vars\.STABLE_QA_EVIDENCE \}\}/);
 });

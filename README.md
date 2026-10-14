@@ -27,12 +27,14 @@ and server components under MPL-2.0; it is not an official ActivityWatch distrib
   recording while tracking is paused or outside the work schedule.
 - A bilingual, editable workflow intake for the top candidate: trigger, tools, ordered
   steps, human decisions, inputs, desired output, frequency, time, and pain points.
+- A local Automation Blueprint with step boundaries, estimates, visible assumptions,
+  risk/confidence, conflict handling, and explicit copy or Markdown/JSON export.
 - Local export and deletion controls. No account, telemetry, cloud sync, ads, or hidden
   updater.
 
-The beta helps identify and document the first opportunity. It does not create or run
+The beta helps identify, document, and specify the first automation opportunity. It does not create or run
 an automation in n8n, Make, Zapier, or any external system. See the [roadmap](ROADMAP.md)
-for the planned Automation Blueprint stage.
+and [quality/release checklist](docs/QUALITY.md) for stable release requirements.
 
 ## Install from GitHub Releases
 
@@ -168,18 +170,20 @@ gitignored.
 Useful checks:
 
 ```bash
-npm run check
+npm run qa
 npm run test:activitywatch
 node scripts/license-check.mjs
 node scripts/prepare-activitywatch.mjs --target windows-x86_64 --dry-run
 ```
 
-Pull requests and pushes to `main` run checks on macOS and Windows. Tags matching `v*`
+Pull requests and pushes to `main` run complete QA on macOS Apple Silicon, macOS Intel,
+and Windows x64. Reports and failure traces are retained as CI artifacts. Tags matching `v*`
 run the release workflow for macOS arm64, macOS x86_64, and Windows x64, generate
-`SHA256SUMS`, and publish a prerelease when the version contains a hyphen. Apple
-credentials are supplied only through GitHub Actions secrets; they are imported into a
-temporary keychain during the job and are never stored in this repository. macOS
-artifacts are signed and notarized; Windows artifacts remain unsigned.
+`SHA256SUMS`, and publish a prerelease when the version contains a hyphen. macOS
+artifacts remain Developer ID signed and notarized through the protected macos-signing
+environment. Stable Windows releases also require signing. Installed-app smoke tests
+and source/hash-bound human QA evidence gate stable publication; see
+[quality control](docs/QUALITY.md).
 
 ## License, contributions, and marks
 

@@ -551,6 +551,7 @@ pub struct TrackingStatus {
     pub processing_mode: String,
     pub last_cloud_run_at: Option<String>,
     pub capture_issue: Option<CaptureIssueCode>,
+    pub native_action_error: Option<String>,
     pub experimental_intelligence: bool,
 }
 

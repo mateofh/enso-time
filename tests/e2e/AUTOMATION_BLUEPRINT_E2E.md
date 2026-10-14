@@ -21,20 +21,18 @@ deterministic input/output set for completeness and estimates. Its effort,
 risk, and confidence values are explicit golden expectations until the Rust
 source-of-truth formula is wired into the frontend parity tests.
 
-## Validation status
+## Validation coverage
 
-- `npx playwright test --list`: passes; 26 tests are discovered across desktop and mobile projects.
-- `npx playwright test tests/e2e/app.spec.ts`: passes; 14 existing tests pass.
-- `npx playwright test tests/e2e/automation-blueprint.spec.ts --project=desktop-1280x800`: 1 fixture test passes; 5 journey tests fail at the expected missing v0.2 hooks because the blueprint frontend/backend integration is being implemented in another worktree. No test is skipped or marked as fixme.
+The suite now exercises integrated Blueprint UI contracts through a mocked Tauri
+transport, plus the existing preview journeys. It does not run a native webview or
+OS capture. Both desktop and mobile-width projects discover the same journeys.
 
-Run the complete matrix with:
+Coverage includes Spanish/English, keyboard/focus, loading/retry, native errors,
+stale source, save/refresh conflicts, weak evidence, and confirmed deletion.
+The base app suite also verifies periodic/focus refresh, retained unsaved edits,
+visible refresh failure/recovery, and delayed-response invalidation after a pause.
 
-```bash
-npx playwright test tests/e2e/automation-blueprint.spec.ts
-```
-
-The journeys assert that English translates interface chrome only, preserves
-Spanish user content, works at mobile width and with keyboard focus, exposes
-loading/error/stale/conflict states, blocks copy/export before `ready`, and
-does not expose vendor links, OAuth/token inputs, credentials, or execution
-controls.
+Run `npm run qa` for the complete application/Rust/packaging/release checks.
+Native installer checks and permission-dependent acceptance are described in
+[`docs/QUALITY.md`](../../docs/QUALITY.md). Record current results from the generated
+QA report rather than relying on historical counts in this document.
