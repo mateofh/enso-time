@@ -1,7 +1,9 @@
 # Quality control and stable release
 
-The current source remains `0.2.0-beta.1` until the stable release prerequisites are
-met. Automation Blueprint is implemented. A passing browser suite proves the UI and
+The current source targets the `0.2.0` stable candidate. It is not approved or published
+as stable; the latest published version remains `0.2.0-beta.1`. Follow
+[STABLE_CANDIDATE.md](STABLE_CANDIDATE.md) for the candidate acceptance plan.
+Automation Blueprint is implemented. A passing browser suite proves the UI and
 its bridge contracts; it does not prove that OS permissions or real capture work.
 
 ## Every change
@@ -106,9 +108,10 @@ new files and replace the evidence. Rebuilding signed files can change their has
 prefer completing acceptance while the publishing job awaits review rather than
 rebuilding a previously tested candidate.
 
-To prepare the stable candidate, first align package.json, package-lock.json, Cargo.toml/Cargo.lock,
-and tauri.conf.json to `0.2.0`, verify QA again, and tag
-that exact source. Its publishing job must wait for the evidence above. The
+The candidate's package.json, package-lock.json, Cargo.toml/Cargo.lock, and tauri.conf.json
+are aligned to `0.2.0`. Verify QA on the final source, configure signing credentials,
+and tag that exact source to build the installers. Its publishing job must wait for
+the evidence above. The
 **stable-version candidate must be built and retested**;
 approval of beta binaries cannot approve stable binaries.
 
