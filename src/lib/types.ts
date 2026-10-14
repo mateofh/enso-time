@@ -56,6 +56,7 @@ export interface TrackingStatus {
   pausedUntil?: string;
   serverPort?: number;
   captureIssue?: CaptureIssue | null;
+  nativeActionError?: string | null;
   windowWatcher: "running" | "missing" | "stopped" | "error";
   afkWatcher: "running" | "missing" | "stopped" | "error";
   lastEventAt?: string;

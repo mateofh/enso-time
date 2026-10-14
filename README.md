@@ -6,7 +6,7 @@ asks only when a 15/30/60-minute interval cannot be classified, and turns the re
 evidence into a prioritized automation opportunity, a guided workflow intake, and a
 diagnostic prompt you can paste into ChatGPT or Claude.
 
-> **Public beta:** `v0.1.0-beta.2` is source-available, not open source. The beta is
+> **Public beta:** `v0.2.0-beta.1` is source-available, not open source. The beta is
 > free only for uses permitted by the
 > [PolyForm Noncommercial License 1.0.0](LICENSE). Commercial use requires a separate
 > written agreement; see [Commercial licensing](COMMERCIAL.md).
@@ -24,12 +24,14 @@ and server components under MPL-2.0; it is not an official ActivityWatch distrib
   copyable AI prompt. Ensō Time does not send that prompt or your timeline to an AI.
 - A bilingual, editable workflow intake for the top candidate: trigger, tools, ordered
   steps, human decisions, inputs, desired output, frequency, time, and pain points.
+- A local Automation Blueprint with step boundaries, estimates, visible assumptions,
+  risk/confidence, conflict handling, and explicit copy or Markdown/JSON export.
 - Local export and deletion controls. No account, telemetry, cloud sync, ads, or hidden
   updater.
 
-The beta helps identify and document the first opportunity. It does not create or run
+The beta helps identify, document, and specify the first automation opportunity. It does not create or run
 an automation in n8n, Make, Zapier, or any external system. See the [roadmap](ROADMAP.md)
-for the planned Automation Blueprint stage.
+and [quality/release checklist](docs/QUALITY.md) for stable release requirements.
 
 ## Install from GitHub Releases
 
@@ -42,13 +44,13 @@ Download the installer for your computer from this repository's **Releases** pag
 Every release includes `SHA256SUMS`. Verify the downloaded installer before opening it:
 
 ```bash
-shasum -a 256 "enso-time-0.1.0-beta.2-macos-arm64.dmg"
+shasum -a 256 "enso-time-0.2.0-beta.1-macos-arm64.dmg"
 ```
 
 On Windows, use PowerShell:
 
 ```powershell
-Get-FileHash .\enso-time-0.1.0-beta.2-windows-x86_64.msi -Algorithm SHA256
+Get-FileHash .\enso-time-0.2.0-beta.1-windows-x86_64.msi -Algorithm SHA256
 ```
 
 Compare the hash with the matching line in `SHA256SUMS` from the same release. A
@@ -62,7 +64,7 @@ current GitHub CLI, replace `OWNER/REPOSITORY` with this repository and verify a
 installer online:
 
 ```bash
-gh attestation verify ./enso-time-0.1.0-beta.2-macos-arm64.dmg \
+gh attestation verify ./enso-time-0.2.0-beta.1-macos-arm64.dmg \
   --repo OWNER/REPOSITORY \
   --signer-workflow OWNER/REPOSITORY/.github/workflows/release.yml
 ```
@@ -70,9 +72,9 @@ gh attestation verify ./enso-time-0.1.0-beta.2-macos-arm64.dmg \
 To verify against the attached bundle instead of fetching the attestation from GitHub:
 
 ```bash
-gh attestation verify ./enso-time-0.1.0-beta.2-macos-arm64.dmg \
+gh attestation verify ./enso-time-0.2.0-beta.1-macos-arm64.dmg \
   --repo OWNER/REPOSITORY \
-  --bundle ./enso-time-0.1.0-beta.2-provenance.sigstore.json \
+  --bundle ./enso-time-0.2.0-beta.1-provenance.sigstore.json \
   --signer-workflow OWNER/REPOSITORY/.github/workflows/release.yml
 ```
 
@@ -143,16 +145,18 @@ gitignored.
 Useful checks:
 
 ```bash
-npm run check
+npm run qa
 npm run test:activitywatch
 node scripts/license-check.mjs
 node scripts/prepare-activitywatch.mjs --target windows-x86_64 --dry-run
 ```
 
-Pull requests and pushes to `main` run checks on macOS and Windows. Tags matching `v*`
+Pull requests and pushes to `main` run complete QA on macOS Apple Silicon, macOS Intel,
+and Windows x64. Reports and failure traces are retained as CI artifacts. Tags matching `v*`
 run the release workflow for macOS arm64, macOS x86_64, and Windows x64, generate
-`SHA256SUMS`, and publish a prerelease when the version contains a hyphen. The workflow
-contains no certificate secrets and deliberately produces ad-hoc/unsigned artifacts.
+`SHA256SUMS`, and publish a prerelease when the version contains a hyphen. Beta tags produce ad-hoc/unsigned artifacts. Stable tags require signing credentials,
+installed-app smoke tests, and human QA evidence tied to the exact source and installer
+hashes before publication; see [quality control](docs/QUALITY.md).
 
 ## License, contributions, and marks
 

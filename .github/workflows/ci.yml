@@ -25,6 +25,9 @@ jobs:
           - label: macOS arm64
             os: macos-15
             aw_target: macos-arm64
+          - label: macOS Intel
+            os: macos-15-intel
+            aw_target: macos-x86_64
           - label: Windows x64
             os: windows-2025
             aw_target: windows-x86_64
@@ -61,14 +64,21 @@ jobs:
           node scripts/license-check.mjs
           node scripts/license-check.mjs --simulate-crlf
 
-      - name: Validate application
-        run: npm run check
-
-      - name: Test ActivityWatch packaging rules
-        run: npm run test:activitywatch
+      - name: Validate application, Rust, packaging, and release contracts
+        run: npm run qa
 
       - name: Validate target selection without downloading
         run: node scripts/prepare-activitywatch.mjs --target ${{ matrix.aw_target }} --dry-run
 
-      - name: Test Rust workspace
-        run: cargo test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=1
+      - name: Upload QA evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: qa-${{ matrix.aw_target }}-${{ github.sha }}
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            node_modules/.cache/enso-time-qa/
+            node_modules/.cache/enso-time-playwright/
+            node_modules/.cache/enso-time-playwright-report/

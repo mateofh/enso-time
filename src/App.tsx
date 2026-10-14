@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type CSSProperties, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent } from "react";
 import {
   Activity,
   AlertCircle,
@@ -105,12 +105,14 @@ function Onboarding({ initial, onComplete }: { initial: SettingsV1; onComplete: 
   const [locale, setLocale] = useState(initial.locale);
   const [captureTitles, setCaptureTitles] = useState(initial.captureWindowTitles);
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string>();
   const copy = messages(locale).onboarding;
   const icons = [LockKeyhole, HelpCircle, Bot];
   const current = copy.steps[step] ?? copy.steps[0]!;
   const Icon = icons[step] ?? LockKeyhole;
 
   async function finish() {
+    setError(undefined);
     setSaving(true);
     try {
       await onComplete({
@@ -121,6 +123,8 @@ function Onboarding({ initial, onComplete }: { initial: SettingsV1; onComplete: 
         role: role.trim(),
         goals: goal.trim() ? [goal.trim()] : initial.goals,
       });
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : messages(locale).common.unexpectedError);
     } finally {
       setSaving(false);
     }
@@ -151,6 +155,7 @@ function Onboarding({ initial, onComplete }: { initial: SettingsV1; onComplete: 
             <label className="toggle-row onboarding-consent"><span><strong>{copy.titlesConsent}</strong><small>{copy.titlesConsentHint}</small></span><input type="checkbox" role="switch" checked={captureTitles} onChange={(event) => setCaptureTitles(event.target.checked)} /></label>
           </div>
         )}
+        {error && <p role="alert">{error}</p>}
         <div className="onboarding-actions">
           <div className="step-dots" aria-label={copy.progress(step + 1)}>
             {copy.steps.map((item, index) => <span key={item.label} className={index === step ? "active" : ""} aria-hidden="true" />)}
@@ -361,7 +366,7 @@ function SettingsView({ settings, status, onSave, onExport, onDelete }: { settin
     <>
       <header className="page-header"><div><p className="page-context">{messages(draft.locale).common.local}</p><h1>{copy.title}</h1><p className="page-intro">{copy.intro}</p></div><button type="button" className="primary-button" disabled={!dirty || saving} onClick={() => void save()}><Check size={16} aria-hidden="true" />{copy.save}</button></header>
       <section className="settings-group"><div className="settings-intro"><Clock3 size={19} aria-hidden="true" /><div><h2>{copy.tracking}</h2><p>{copy.trackingHint}</p></div></div><div className="settings-fields"><div className="two-columns"><label>{copy.cadence}<select value={draft.cadenceMinutes} onChange={(event) => set("cadenceMinutes", Number(event.target.value) as 15 | 30 | 60)}><option value={15}>{copy.cadenceOption(15)}</option><option value={30}>{copy.cadenceOption(30)}</option><option value={60}>{copy.cadenceOption(60)}</option></select></label><label>{copy.retention}<select value={draft.retentionDays ?? "forever"} onChange={(event) => set("retentionDays", event.target.value === "forever" ? null : Number(event.target.value) as 30 | 90 | 365)}><option value={30}>{copy.retention30}</option><option value={90}>{copy.retention90}</option><option value={365}>{copy.retention365}</option><option value="forever">{copy.retentionForever}</option></select></label></div><div><p className="field-group-title">{copy.schedule}</p><p className="field-group-help">{copy.scheduleHint}</p><div className="two-columns"><label>{copy.start}<input type="time" value={draft.workSchedule.start} onChange={(event) => set("workSchedule", { ...draft.workSchedule, start: event.target.value })} /></label><label>{copy.end}<input type="time" value={draft.workSchedule.end} onChange={(event) => set("workSchedule", { ...draft.workSchedule, end: event.target.value })} /></label></div></div><label className="toggle-row"><span><strong>{copy.autostart}</strong><small>{copy.autostartHint}</small></span><input type="checkbox" role="switch" checked={draft.autostart} onChange={(event) => set("autostart", event.target.checked)} /></label><label className="toggle-row"><span><strong>{copy.titles}</strong><small>{copy.titlesHint}</small></span><input type="checkbox" role="switch" checked={draft.captureWindowTitles} onChange={(event) => set("captureWindowTitles", event.target.checked)} /></label></div></section>
-      <section className="settings-group"><div className="settings-intro"><Languages size={19} aria-hidden="true" /><div><h2>{copy.appearance}</h2><p>{copy.appearanceHint}</p></div></div><div className="settings-fields"><div className="two-columns"><label>{copy.language}<select value={draft.locale} onChange={(event) => set("locale", event.target.value as Locale)}><option value="es-419">Español (Latinoamérica)</option><option value="en">English</option></select></label><label>{copy.theme}<select value={draft.theme} onChange={(event) => set("theme", event.target.value as SettingsV1["theme"])}><option value="ink">{copy.ink}</option><option value="paper">{copy.paper}</option><option value="system">{copy.system}</option></select></label></div><label className="toggle-row"><span><strong>{copy.updates}</strong><small>{copy.updatesHint}</small></span><input type="checkbox" role="switch" checked={draft.updateChecksEnabled} onChange={(event) => set("updateChecksEnabled", event.target.checked)} /></label></div></section>
+      <section className="settings-group"><div className="settings-intro"><Languages size={19} aria-hidden="true" /><div><h2>{copy.appearance}</h2><p>{copy.appearanceHint}</p></div></div><div className="settings-fields"><div className="two-columns"><label>{copy.language}<select value={draft.locale} onChange={(event) => set("locale", event.target.value as Locale)}><option value="es-419">Español (Latinoamérica)</option><option value="en">English</option></select></label><label>{copy.theme}<select value={draft.theme} onChange={(event) => set("theme", event.target.value as SettingsV1["theme"])}><option value="ink">{copy.ink}</option><option value="paper">{copy.paper}</option><option value="system">{copy.system}</option></select></label></div><p>{copy.updatesHint}</p></div></section>
       <section className="settings-group"><div className="settings-intro"><LockKeyhole size={19} aria-hidden="true" /><div><h2>{copy.data}</h2><p>{copy.localEngine(status.serverPort)}</p></div></div><div className="data-actions"><button type="button" className="secondary-button" onClick={() => void onExport("json")}><Download size={16} aria-hidden="true" />{copy.exportJson}</button><button type="button" className="secondary-button" onClick={() => void onExport("csv")}><Download size={16} aria-hidden="true" />{copy.exportCsv}</button><button type="button" className="danger-button" onClick={() => void onDelete()}><Trash2 size={16} aria-hidden="true" />{copy.delete}</button></div></section>
     </>
   );
@@ -378,11 +383,15 @@ export default function App() {
   const [study, setStudy] = useState<StudyProgress | null>(null);
   const [diagnostic, setDiagnostic] = useState<DiagnosticV1 | null>(null);
   const [notice, setNotice] = useState<Notice>();
+  const [refreshError, setRefreshError] = useState(false);
+  const refreshEpoch = useRef(0);
   const [diagnosticBusy, setDiagnosticBusy] = useState(false);
   const [workflowCandidate, setWorkflowCandidate] = useState<AutomationCandidateV1 | null>(null);
   const [workflowIntakes, setWorkflowIntakes] = useState<WorkflowIntakeV1[]>([]);
 
   async function load() {
+    const epoch = ++refreshEpoch.current;
+    setRefreshError(false);
     setLoading(true);
     setLoadError(undefined);
     try {
@@ -391,8 +400,10 @@ export default function App() {
       const [nextSettings, nextStatus, nextBlocks, nextCheckIns, nextStudy, nextWorkflowIntakes] = await Promise.all([
         bridge.getSettings(), bridge.getTrackingStatus(), bridge.getTimeline(from.toISOString(), to.toISOString()), bridge.listCheckIns(), bridge.getStudyProgress(), bridge.listWorkflowIntakes(),
       ]);
+      const nextDiagnostic = await bridge.generateDiagnostic(nextStudy.selectedDays);
+      if (epoch !== refreshEpoch.current) return;
       setSettings(nextSettings); setStatus(nextStatus); setBlocks(nextBlocks); setCheckIns(nextCheckIns); setStudy(nextStudy); setWorkflowIntakes(nextWorkflowIntakes);
-      setDiagnostic(await bridge.generateDiagnostic(nextStudy.selectedDays));
+      setDiagnostic(nextDiagnostic);
       if (bridge.shouldResumeAutomationBlueprint()) {
         const intake = nextWorkflowIntakes[0];
         if (intake) {
@@ -401,23 +412,69 @@ export default function App() {
         }
       }
     } catch (error) {
-      setLoadError(error instanceof Error ? error.message : "Unable to load Ensō Time");
+      if (epoch === refreshEpoch.current) setLoadError(error instanceof Error ? error.message : "Unable to load Ensō Time");
     } finally {
-      setLoading(false);
+      if (epoch === refreshEpoch.current) setLoading(false);
     }
   }
 
   async function action(run: () => Promise<void>, success?: string) {
+    refreshEpoch.current += 1;
     const fallback = settings ? messages(settings.locale).common.unexpectedError : "No pudimos completar la acción.";
     try {
       await run();
       if (success) setNotice({ kind: "success", message: success });
     } catch (error) {
       setNotice({ kind: "error", message: error instanceof Error ? error.message : fallback });
-    }
+    } finally { refreshEpoch.current += 1; }
   }
 
   useEffect(() => { void load(); }, []);
+  useEffect(() => {
+    if (loading || loadError || !settings || !diagnostic) return;
+    void bridge.completeInstallerSmokeTest().catch((error) => {
+      setLoadError(error instanceof Error ? error.message : messages(settings.locale).common.unexpectedError);
+    });
+  }, [loading]);
+  useEffect(() => {
+    if (!settings?.onboardingCompleted || loading) return;
+    let active = true;
+    let pending = false;
+    const selectedDays = study?.selectedDays ?? 7;
+    async function refresh() {
+      if (!active || pending || document.visibilityState !== "visible") return;
+      pending = true;
+      const epoch = refreshEpoch.current;
+      const from = new Date(); from.setHours(0, 0, 0, 0);
+      const to = new Date(); to.setHours(23, 59, 59, 999);
+      let timeout: number | undefined;
+      try {
+        const [nextStatus, nextBlocks, nextCheckIns, nextStudy, nextDiagnostic] = await Promise.race([Promise.all([
+          bridge.getTrackingStatus(), bridge.getTimeline(from.toISOString(), to.toISOString()),
+          bridge.listCheckIns(), bridge.getStudyProgress(), bridge.generateDiagnostic(selectedDays),
+        ]), new Promise<never>((_resolve, reject) => {
+          timeout = window.setTimeout(() => reject(new Error("Refresh timed out")), 10_000);
+        })]);
+        if (!active || epoch !== refreshEpoch.current) return;
+        setStatus(nextStatus); setBlocks(nextBlocks); setCheckIns(nextCheckIns);
+        setStudy({ ...nextStudy, selectedDays }); setDiagnostic(nextDiagnostic);
+        setRefreshError(false);
+      } catch {
+        if (active && epoch === refreshEpoch.current) setRefreshError(true);
+      } finally { if (timeout !== undefined) window.clearTimeout(timeout); pending = false; }
+    }
+    const timer = window.setInterval(() => void refresh(), 15_000);
+    const onVisible = () => { void refresh(); };
+    window.addEventListener("focus", onVisible);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", onVisible);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [settings?.onboardingCompleted, settings?.locale, study?.selectedDays, loading]);
+
   useEffect(() => {
     if (!settings) return;
     const media = matchMedia("(prefers-color-scheme: light)");
@@ -438,9 +495,10 @@ export default function App() {
   const loadingCopy = settings ? messages(settings.locale).common : messages("es-419").common;
   if (loading) return <main className="loading-screen" aria-busy="true"><BrandMark /><span className="loading-line" /><p>{loadingCopy.loading}</p></main>;
   if (loadError || !settings || !study || !diagnostic) return <main className="error-screen"><AlertCircle size={30} aria-hidden="true" /><h1>Ensō Time</h1><p>{loadError || loadingCopy.unexpectedError}</p><button type="button" className="primary-button" onClick={() => void load()}>{loadingCopy.retry}</button></main>;
-  if (!settings.onboardingCompleted) return <Onboarding initial={settings} onComplete={async (value) => { setSettings(await bridge.saveSettings(value)); }} />;
+  if (!settings.onboardingCompleted) return <Onboarding initial={settings} onComplete={async (value) => { refreshEpoch.current += 1; await bridge.saveSettings(value); await load(); }} />;
 
   const copy = messages(settings.locale);
+  const visibleStatus: TrackingStatus = refreshError ? { ...status, captureIssue: "server-unavailable" } : status;
   const items: { id: View; label: string; icon: typeof Activity }[] = [
     { id: "today", label: copy.nav.today, icon: Activity },
     { id: "checkins", label: copy.nav.checkins, icon: HelpCircle },
@@ -448,19 +506,23 @@ export default function App() {
     { id: "automate", label: copy.nav.automate, icon: Sparkles },
     { id: "settings", label: copy.nav.settings, icon: SettingsIcon },
   ];
-  const saveSettings = async (value: SettingsV1) => action(async () => { setSettings(await bridge.saveSettings(value)); }, messages(value.locale).notices.settingsSaved);
+  const saveSettings = async (value: SettingsV1) => action(async () => { setSettings(await bridge.saveSettings(value)); setDiagnostic(await bridge.generateDiagnostic(study.selectedDays)); }, messages(value.locale).notices.settingsSaved);
   const answer = async (value: CheckInAnswer) => action(async () => { await bridge.answerCheckIn(value); setCheckIns(await bridge.listCheckIns()); setStatus(await bridge.getTrackingStatus()); }, copy.notices.contextSaved);
   const selectDays = (days: 7 | 14 | 28) => {
+    refreshEpoch.current += 1;
     setStudy({ ...study, selectedDays: days });
     setDiagnosticBusy(true);
     void action(async () => { setDiagnostic(await bridge.generateDiagnostic(days)); }).finally(() => setDiagnosticBusy(false));
   };
   const saveWorkflowIntake = async (intake: WorkflowIntakeV1) => {
-    const saved = await bridge.saveWorkflowIntake(intake);
-    setWorkflowIntakes(await bridge.listWorkflowIntakes());
-    setDiagnostic(await bridge.generateDiagnostic(study.selectedDays));
-    setNotice({ kind: "success", message: copy.workflow.savedTitle });
-    return saved;
+    refreshEpoch.current += 1;
+    try {
+      const saved = await bridge.saveWorkflowIntake(intake);
+      setWorkflowIntakes(await bridge.listWorkflowIntakes());
+      setDiagnostic(await bridge.generateDiagnostic(study.selectedDays));
+      setNotice({ kind: "success", message: copy.workflow.savedTitle });
+      return saved;
+    } finally { refreshEpoch.current += 1; }
   };
   const blueprintCandidate = workflowIntakes[0];
   const blueprintEntry: AutomationCandidateV1 | null = blueprintCandidate ? { id: blueprintCandidate.candidateId, activityLabel: blueprintCandidate.candidateLabel, estimatedWeeklyHours: 0, weeklyFrequency: 0, impactScore: 0, feasibilityScore: 0, riskScore: 0, priorityScore: 0, evidence: [] } : null;
@@ -470,12 +532,14 @@ export default function App() {
       <a className="skip-link" href="#main-content">{copy.nav.today}</a>
       <aside className="sidebar">
         <BrandMark />
-        <nav aria-label="Principal">{items.map(({ id, label, icon: Icon }) => <button type="button" key={id} className={view === id ? "active" : ""} aria-current={view === id ? "page" : undefined} aria-label={label} title={label} onClick={() => setView(id)}><Icon size={18} aria-hidden="true" /><span>{label}</span>{id === "checkins" && status.pendingCheckIns > 0 && <b aria-label={`${status.pendingCheckIns}`}>{status.pendingCheckIns}</b>}</button>)}</nav>
-        <div className="sidebar-footer"><StatusPill status={status} locale={settings.locale} /><p><LockKeyhole size={13} aria-hidden="true" />{copy.common.local}</p><small>Ensō Time v0.2 beta</small></div>
+        <nav aria-label={settings.locale === "en" ? "Main" : "Principal"}>{items.map(({ id, label, icon: Icon }) => <button type="button" key={id} className={view === id ? "active" : ""} aria-current={view === id ? "page" : undefined} aria-label={label} title={label} onClick={() => setView(id)}><Icon size={18} aria-hidden="true" /><span>{label}</span>{id === "checkins" && status.pendingCheckIns > 0 && <b aria-label={`${status.pendingCheckIns}`}>{status.pendingCheckIns}</b>}</button>)}</nav>
+        <div className="sidebar-footer"><StatusPill status={visibleStatus} locale={settings.locale} /><p><LockKeyhole size={13} aria-hidden="true" />{copy.common.local}</p><small>Ensō Time v{__APP_VERSION__}</small></div>
       </aside>
       <main className="content" id="main-content" tabIndex={-1}>
+        {status.nativeActionError && <section className="capture-issue" role="alert"><AlertCircle size={20} aria-hidden="true" /><p>{copy.common.trackingActionError}</p></section>}
+        {refreshError && <section className="capture-issue" role="alert"><AlertCircle size={20} aria-hidden="true" /><p>{copy.common.refreshError}</p></section>}
         {status.captureIssue && <CaptureIssueBanner issue={status.captureIssue} locale={settings.locale} onRetry={() => action(async () => { setStatus(await bridge.getTrackingStatus()); })} />}
-        {view === "today" && <TodayView settings={settings} status={status} blocks={blocks} checkIns={checkIns} onNavigate={setView} onPause={() => action(async () => { setStatus(await bridge.pauseTracking(30)); }, copy.notices.paused)} onResume={() => action(async () => { setStatus(await bridge.resumeTracking()); }, copy.notices.resumed)} />}
+        {view === "today" && <TodayView settings={settings} status={visibleStatus} blocks={blocks} checkIns={checkIns} onNavigate={setView} onPause={() => action(async () => { setStatus(await bridge.pauseTracking(30)); }, copy.notices.paused)} onResume={() => action(async () => { setStatus(await bridge.resumeTracking()); }, copy.notices.resumed)} />}
         {view === "checkins" && <CheckInsView checkIns={checkIns} settings={settings} onAnswer={answer} />}
         {view === "study" && <StudyView progress={study} locale={settings.locale} onDays={selectDays} />}
         {view === "automate" && <AutomateView diagnostic={diagnostic} locale={settings.locale} busy={diagnosticBusy} onGenerate={async () => { setDiagnosticBusy(true); await action(async () => { setDiagnostic(await bridge.generateDiagnostic(study.selectedDays)); }, copy.notices.diagnosticUpdated); setDiagnosticBusy(false); }} onCopy={() => action(async () => { await navigator.clipboard.writeText(diagnostic.prompt); }, copy.notices.promptCopied)} onOpen={(url) => action(() => bridge.openExternal(url))} onMapWorkflow={(candidate) => { setWorkflowCandidate(candidate); setView("workflow"); }} onOpenBlueprint={(candidate) => { setWorkflowCandidate(candidate); setView("blueprint"); }} blueprintCandidate={blueprintEntry} />}

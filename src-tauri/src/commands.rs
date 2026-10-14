@@ -114,6 +114,10 @@ impl CaptureGate {
         })
     }
 
+    pub(crate) fn current_generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
     #[cfg(test)]
     fn exclusive_request_count(&self) -> u64 {
         self.exclusive_requests.load(Ordering::Acquire)
@@ -201,6 +205,7 @@ pub fn save_settings(
     settings.validate()?;
     configure_autostart(&app, settings.onboarding_completed && settings.autostart)?;
     state.store.save_settings(&settings)?;
+    crate::update_tray_locale(&app, &settings.locale)?;
     if previous.onboarding_completed && !settings.onboarding_completed {
         state.activity.stop_watchers()?;
     } else if !previous.onboarding_completed && settings.onboarding_completed {
@@ -630,8 +635,28 @@ fn write_private_new_file(path: &std::path::Path, contents: &[u8]) -> Result<(),
         .map_err(|error| format!("No se pudo escribir la exportación: {error}"))
 }
 
+pub(crate) fn record_native_action_error(
+    store: &LocalStore,
+    gate: &CaptureGate,
+    generation: u64,
+) -> Result<(), String> {
+    let operation = gate.operation()?;
+    operation.ensure_current()?;
+    if operation.generation != generation {
+        return Err("Tracking action was superseded by deletion".into());
+    }
+    store.set_value("native_action_error", "tracking-action-failed")
+}
+
 #[tauri::command]
 pub fn pause_tracking(state: State<'_, AppState>, minutes: u16) -> Result<TrackingStatus, String> {
+    pause_tracking_inner(&state, minutes)
+}
+
+pub(crate) fn pause_tracking_inner(
+    state: &AppState,
+    minutes: u16,
+) -> Result<TrackingStatus, String> {
     let operation = state.capture_gate.operation()?;
     if !(5..=1440).contains(&minutes) {
         return Err("La pausa debe durar entre 5 minutos y 24 horas".into());
@@ -641,12 +666,17 @@ pub fn pause_tracking(state: State<'_, AppState>, minutes: u16) -> Result<Tracki
     state
         .store
         .set_paused_until(Some(&paused_until.to_rfc3339()))?;
+    state.store.set_value("native_action_error", "")?;
     drop(operation);
-    status(&state)
+    status(state)
 }
 
 #[tauri::command]
 pub fn resume_tracking(state: State<'_, AppState>) -> Result<TrackingStatus, String> {
+    resume_tracking_inner(&state)
+}
+
+pub(crate) fn resume_tracking_inner(state: &AppState) -> Result<TrackingStatus, String> {
     let operation = state.capture_gate.operation()?;
     let settings = state.store.settings()?;
     if !settings.onboarding_completed {
@@ -657,8 +687,9 @@ pub fn resume_tracking(state: State<'_, AppState>) -> Result<TrackingStatus, Str
         .activity
         .start_watchers(settings.capture_window_titles)?;
     state.store.set_paused_until(None)?;
+    state.store.set_value("native_action_error", "")?;
     drop(operation);
-    status(&state)
+    status(state)
 }
 
 #[tauri::command]
@@ -735,11 +766,16 @@ fn json_export(
 }
 
 #[tauri::command]
-pub fn delete_all_data(state: State<'_, AppState>, confirmation: String) -> Result<(), String> {
+pub fn delete_all_data(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    confirmation: String,
+) -> Result<(), String> {
     if confirmation != "DELETE_ENSO_TIME_DATA" {
         return Err("La confirmación de borrado no coincide".into());
     }
-    delete_all_data_inner(&state.store, &state.activity, &state.capture_gate)
+    delete_all_data_inner(&state.store, &state.activity, &state.capture_gate)?;
+    crate::update_tray_locale(&app, &state.store.settings()?.locale)
 }
 
 fn delete_all_data_inner(
@@ -939,12 +975,13 @@ fn scheduler_tick(
         return Ok(());
     }
     if store.create_checkin(&checkin)? {
-        let _ = app
-            .notification()
+        let copy = crate::native_copy::native_copy(&settings.locale);
+        app.notification()
             .builder()
-            .title("Ensō Time · Falta contexto")
-            .body("¿Qué estabas haciendo en el último intervalo?")
-            .show();
+            .title(copy.missing_title)
+            .body(copy.missing_body)
+            .show()
+            .map_err(|error| format!("Check-in saved; notification failed: {error}"))?;
     }
     Ok(())
 }
@@ -979,6 +1016,10 @@ fn status(state: &AppState) -> Result<TrackingStatus, String> {
         pending_check_ins: state.store.pending_count()?,
         data_stays_local: true,
         capture_issue: state.activity.capture_issue(),
+        native_action_error: state
+            .store
+            .get_value("native_action_error")?
+            .filter(|value| !value.is_empty()),
     })
 }
 
@@ -1110,6 +1151,19 @@ mod tests {
         };
         let intake = store.save_workflow_intake(intake).unwrap();
         (directory, store, intake)
+    }
+
+    #[test]
+    fn delayed_tray_failure_cannot_reintroduce_state_after_deletion() {
+        let directory = TempDir::new().unwrap();
+        let store = LocalStore::open(&directory.path().join("test.sqlite")).unwrap();
+        let gate = CaptureGate::new();
+        let original_generation = gate.current_generation();
+        record_native_action_error(&store, &gate, original_generation).unwrap();
+        store.delete_all().unwrap();
+        gate.generation.fetch_add(1, Ordering::AcqRel);
+        assert!(record_native_action_error(&store, &gate, original_generation).is_err());
+        assert!(store.get_value("native_action_error").unwrap().is_none());
     }
 
     #[test]

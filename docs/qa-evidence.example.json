@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "sourceCommit": "REPLACE_WITH_FULL_SOURCE_SHA",
+  "reviewedBy": "",
+  "artifacts": [
+    {
+      "name": "REPLACE_WITH_INSTALLER_NAME",
+      "sha256": "REPLACE_WITH_SHA256"
+    }
+  ],
+  "reviews": {
+    "code": {
+      "status": "pending",
+      "unresolved": {
+        "critical": null,
+        "high": null,
+        "medium": null
+      }
+    },
+    "security": {
+      "status": "pending",
+      "unresolved": {
+        "critical": null,
+        "high": null,
+        "medium": null
+      }
+    }
+  },
+  "pilot": {
+    "participants": 0,
+    "days": 0,
+    "blockingIssues": null
+  },
+  "platforms": [
+    {
+      "target": "macos-arm64",
+      "osVersion": "",
+      "checks": {
+        "cleanInstall": "pending",
+        "upgradeFromBeta": "pending",
+        "signatures": "pending",
+        "captureAndAfk": "pending",
+        "permissionsDenied": "pending",
+        "pauseResume": "pending",
+        "suspendRestart": "pending",
+        "autostart": "pending",
+        "fullBlueprintJourney": "pending",
+        "exportRetentionDeletion": "pending",
+        "localPrivacy": "pending",
+        "languagesKeyboardContrast": "pending"
+      }
+    },
+    {
+      "target": "macos-x86_64",
+      "osVersion": "",
+      "checks": {
+        "cleanInstall": "pending",
+        "upgradeFromBeta": "pending",
+        "signatures": "pending",
+        "captureAndAfk": "pending",
+        "permissionsDenied": "pending",
+        "pauseResume": "pending",
+        "suspendRestart": "pending",
+        "autostart": "pending",
+        "fullBlueprintJourney": "pending",
+        "exportRetentionDeletion": "pending",
+        "localPrivacy": "pending",
+        "languagesKeyboardContrast": "pending"
+      }
+    },
+    {
+      "target": "windows-x86_64",
+      "osVersion": "",
+      "checks": {
+        "cleanInstall": "pending",
+        "upgradeFromBeta": "pending",
+        "signatures": "pending",
+        "captureAndAfk": "pending",
+        "permissionsDenied": "pending",
+        "pauseResume": "pending",
+        "suspendRestart": "pending",
+        "autostart": "pending",
+        "fullBlueprintJourney": "pending",
+        "exportRetentionDeletion": "pending",
+        "localPrivacy": "pending",
+        "languagesKeyboardContrast": "pending"
+      }
+    }
+  ]
+}

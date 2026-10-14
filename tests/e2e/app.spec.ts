@@ -275,7 +275,7 @@ test("maps, saves, resumes, and enriches the top candidate workflow", async ({ p
   await page.reload();
   await expect(page.locator("html")).toHaveAttribute("lang", "en");
   await page.getByRole("button", { name: "Automate" }).click();
-  await expect(page.locator(".prompt-section pre")).toContainText("INTAKE DECLARADO POR LA PERSONA");
+  await expect(page.locator(".prompt-section pre")).toContainText("USER-DECLARED INTAKE");
   await page.getByRole("button", { name: "Map workflow" }).click();
   await expect(page.getByRole("heading", { name: "Describe how it works today." })).toBeVisible();
   await expect(page.getByLabel("What triggers this workflow?")).toHaveValue("Llega el cierre semanal de ventas");
@@ -316,5 +316,113 @@ test("supports keyboard navigation and basic landmarks", async ({ page, browserE
   await page.getByRole("button", { name: "Configuración" }).focus();
   await page.keyboard.press("Enter");
   await expect(page.getByRole("heading", { name: "Configuración." })).toBeVisible();
-  await expect(page.getByRole("switch")).toHaveCount(3);
+  await expect(page.getByRole("switch")).toHaveCount(2);
+});
+
+
+test("refreshes live state every 15 seconds without discarding settings edits", async ({ page, browserErrors: _browserErrors }) => {
+  await page.clock.install();
+  await seedBridge(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Configuración" }).click();
+  await page.getByLabel("Cadencia").selectOption("30");
+  await page.evaluate((key) => {
+    const state = JSON.parse(localStorage.getItem(key)!);
+    state.checkIns.push({ ...state.checkIns[0], id: "new-checkin" });
+    state.captureIssue = "afk-watcher-unavailable";
+    localStorage.setItem(key, JSON.stringify(state));
+  }, STORAGE_KEY);
+  await page.clock.fastForward(15_000);
+  await expect(page.getByRole("button", { name: "Check-ins", exact: true }).locator("b")).toHaveText("2");
+  await expect(page.getByText(/No podemos distinguir cuándo te ausentas/)).toBeVisible();
+  await expect(page.getByLabel("Cadencia")).toHaveValue("30");
+  await expect(page.getByRole("heading", { name: "Configuración." })).toBeVisible();
+  await expect(page.getByRole("switch", { name: "Buscar nuevas versiones" })).toHaveCount(0);
+});
+
+test("refresh failure is visible, retains edits, and recovers on focus", async ({ page, browserErrors: _browserErrors }) => {
+  await page.clock.install();
+  await seedBridge(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Configuración" }).click();
+  await page.getByLabel("Cadencia").selectOption("60");
+  const stored = await page.evaluate((key) => localStorage.getItem(key)!, STORAGE_KEY);
+  await page.evaluate((key) => {
+    const state = JSON.parse(localStorage.getItem(key)!);
+    state.checkIns = null;
+    localStorage.setItem(key, JSON.stringify(state));
+  }, STORAGE_KEY);
+  await page.clock.fastForward(15_000);
+  await expect(page.getByRole("alert")).toContainText("No pudimos actualizar");
+  await expect(page.locator(".sidebar .status-pill")).toContainText("Registro incompleto");
+  await expect(page.getByLabel("Cadencia")).toHaveValue("60");
+  await page.evaluate(({ key, stored }) => {
+    localStorage.setItem(key, stored);
+    window.dispatchEvent(new Event("focus"));
+  }, { key: STORAGE_KEY, stored });
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(page.locator(".sidebar .status-pill")).toContainText("Registrando");
+  await expect(page.getByLabel("Cadencia")).toHaveValue("60");
+});
+
+test("a delayed background response cannot undo a pause", async ({ page, browserErrors: _browserErrors }) => {
+  await page.clock.install();
+  await seedBridge(page);
+  await page.goto("/");
+  await expect(page.locator(".sidebar .status-pill")).toContainText("Registrando");
+  await page.evaluate(async () => {
+    const { bridge } = await import("/src/lib/bridge.ts" as string);
+    const original = bridge.getTrackingStatus;
+    let first = true;
+    bridge.getTrackingStatus = async () => {
+      if (!first) return original();
+      first = false;
+      const oldStatus = await original();
+      (window as unknown as { refreshPending: boolean }).refreshPending = true;
+      await new Promise<void>((resolve) => { (window as unknown as { releaseRefresh: () => void }).releaseRefresh = resolve; });
+      (window as unknown as { refreshCompleted: boolean }).refreshCompleted = true;
+      return oldStatus;
+    };
+  });
+  await page.clock.fastForward(15_000);
+  await expect.poll(() => page.evaluate(() => (window as unknown as { refreshPending: boolean }).refreshPending)).toBe(true);
+  await page.getByRole("button", { name: "Pausar 30 min" }).click();
+  await expect(page.locator(".sidebar .status-pill")).toContainText("En pausa");
+  await page.evaluate(() => (window as unknown as { releaseRefresh: () => void }).releaseRefresh());
+  await expect.poll(() => page.evaluate(() => (window as unknown as { refreshCompleted: boolean }).refreshCompleted)).toBe(true);
+  await expect(page.locator(".sidebar .status-pill")).toContainText("En pausa");
+});
+
+
+test("tray failure is explicit and minimum native window retains the workflow", async ({ page, browserErrors: _browserErrors }) => {
+  await page.setViewportSize({ width: 760, height: 600 });
+  await seedBridge(page, { locale: "en" });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByLabel("Cadence").selectOption("30");
+  await page.evaluate(async () => {
+    const { bridge } = await import("/src/lib/bridge.ts" as string);
+    const original = bridge.getTrackingStatus;
+    bridge.getTrackingStatus = async () => ({ ...await original(), nativeActionError: "tracking-action-failed" });
+    window.dispatchEvent(new Event("focus"));
+  });
+  await expect(page.getByRole("alert")).toContainText("Could not change tracking from the tray");
+  await expect(page.getByLabel("Cadence")).toHaveValue("30");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+});
+
+
+test("a hung refresh reports unknown status instead of remaining healthy", async ({ page, browserErrors: _browserErrors }) => {
+  await page.clock.install();
+  await seedBridge(page);
+  await page.goto("/");
+  await expect(page.locator(".sidebar .status-pill")).toContainText("Registrando");
+  await page.evaluate(async () => {
+    const { bridge } = await import("/src/lib/bridge.ts" as string);
+    bridge.getTrackingStatus = () => new Promise(() => undefined);
+  });
+  await page.clock.fastForward(15_000);
+  await page.clock.fastForward(10_000);
+  await expect(page.getByRole("alert")).toContainText("No pudimos actualizar");
+  await expect(page.locator(".sidebar .status-pill")).toContainText("Registro incompleto");
 });

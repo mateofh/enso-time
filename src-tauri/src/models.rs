@@ -164,6 +164,7 @@ pub struct TrackingStatus {
     pub pending_check_ins: usize,
     pub data_stays_local: bool,
     pub capture_issue: Option<CaptureIssueCode>,
+    pub native_action_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
