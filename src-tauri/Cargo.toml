@@ -45,7 +45,7 @@ url = "2"
 uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.30", features = ["signal"] }
+nix = { version = "0.31", features = ["signal"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"
