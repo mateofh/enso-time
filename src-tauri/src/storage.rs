@@ -2,9 +2,10 @@ use crate::blueprint::{
     refresh_draft, validate_draft, AutomationBlueprintDraftV1, BLUEPRINT_SCHEMA_VERSION,
 };
 use crate::models::{
-    automation_candidate_id, iso_now, parse_utc, CheckInAnswer, CheckInV1, SettingsV1,
-    WorkflowIntakeV1,
+    automation_candidate_id, iso_now, parse_utc, CheckInAnswer, CheckInV1,
+    ClassificationOverrideV1, ClassificationRuleV1, SettingsV1, WorkflowIntakeV1,
 };
+use chrono::Utc;
 use rusqlite::types::Type;
 use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
 use std::collections::HashSet;
@@ -14,6 +15,129 @@ use std::sync::Mutex;
 pub struct LocalStore {
     connection: Mutex<Connection>,
     database_path: PathBuf,
+}
+
+const PROJECTION_V2_MARKER: &str = "projection-v2.complete";
+const MIGRATION_BACKUP_DIR: &str = "migration-backups";
+
+pub fn prepare_projection_v2(app_data_dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(app_data_dir)
+        .map_err(|error| format!("No se pudo preparar la migración local: {error}"))?;
+    cleanup_old_projection_backups(app_data_dir)?;
+    let marker = app_data_dir.join(PROJECTION_V2_MARKER);
+    if marker.is_file() {
+        return Ok(());
+    }
+
+    let sources = [
+        (app_data_dir.join("enso-time.sqlite"), "enso-time.sqlite"),
+        (
+            app_data_dir.join("activitywatch/activitywatch.sqlite"),
+            "activitywatch.sqlite",
+        ),
+    ];
+    let existing = sources
+        .iter()
+        .filter(|(source, _)| source.is_file())
+        .collect::<Vec<_>>();
+    if !existing.is_empty() {
+        let timestamp = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+        let backup_dir = app_data_dir
+            .join(MIGRATION_BACKUP_DIR)
+            .join(format!("projection-v2-{timestamp}"));
+        std::fs::create_dir_all(&backup_dir)
+            .map_err(|error| format!("No se pudo crear el respaldo de migración: {error}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&backup_dir, std::fs::Permissions::from_mode(0o700))
+                .map_err(|error| format!("No se pudo proteger el respaldo: {error}"))?;
+        }
+        for (source, name) in existing {
+            sqlite_snapshot(source, &backup_dir.join(name))?;
+        }
+        let report = serde_json::json!({
+            "projectionVersion": 2,
+            "createdAt": iso_now(),
+            "rawHistoryPreserved": true,
+            "zeroDurationAfkIgnoredByProjection": true,
+            "backupRetentionDays": 7
+        });
+        std::fs::write(
+            backup_dir.join("migration-report.json"),
+            serde_json::to_vec_pretty(&report).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| format!("No se pudo escribir el reporte de migración: {error}"))?;
+    }
+
+    let temporary = app_data_dir.join(format!("{PROJECTION_V2_MARKER}.tmp"));
+    std::fs::write(&temporary, format!("2\n{}\n", iso_now()))
+        .map_err(|error| format!("No se pudo registrar la migración: {error}"))?;
+    std::fs::rename(&temporary, marker)
+        .map_err(|error| format!("No se pudo completar la migración: {error}"))
+}
+
+fn sqlite_snapshot(source: &Path, destination: &Path) -> Result<(), String> {
+    let connection = Connection::open(source)
+        .map_err(|error| format!("No se pudo abrir {}: {error}", source.display()))?;
+    connection
+        .busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(|error| error.to_string())?;
+    let integrity: String = connection
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .map_err(|error| format!("No se pudo verificar {}: {error}", source.display()))?;
+    if integrity != "ok" {
+        return Err(format!(
+            "La base {} no superó integrity_check: {integrity}",
+            source.display()
+        ));
+    }
+    connection
+        .execute("VACUUM INTO ?1", [destination.to_string_lossy().as_ref()])
+        .map_err(|error| format!("No se pudo respaldar {}: {error}", source.display()))?;
+    let backup = Connection::open(destination)
+        .map_err(|error| format!("No se pudo abrir el respaldo: {error}"))?;
+    let backup_integrity: String = backup
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .map_err(|error| format!("No se pudo verificar el respaldo: {error}"))?;
+    if backup_integrity != "ok" {
+        return Err("El respaldo de migración no superó integrity_check".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("No se pudo proteger el respaldo: {error}"))?;
+    }
+    Ok(())
+}
+
+/// Runs at startup and from the daily retention pass, so a long-running app
+/// does not keep full database snapshots past their seven days.
+pub fn cleanup_old_projection_backups(app_data_dir: &Path) -> Result<(), String> {
+    let root = app_data_dir.join(MIGRATION_BACKUP_DIR);
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return Ok(());
+    };
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(7 * 24 * 60 * 60))
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    for entry in entries {
+        let entry = entry.map_err(|error| error.to_string())?;
+        if entry
+            .file_type()
+            .map_err(|error| error.to_string())?
+            .is_dir()
+            && entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .is_ok_and(|modified| modified < cutoff)
+        {
+            std::fs::remove_dir_all(entry.path())
+                .map_err(|error| format!("No se pudo retirar un respaldo vencido: {error}"))?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +196,98 @@ impl LocalStore {
                    UNIQUE(interval_start, interval_end)
                  );
                  CREATE INDEX IF NOT EXISTS checkins_status_idx ON checkins(status);
+                 CREATE TABLE IF NOT EXISTS classification_rules (
+                   id TEXT PRIMARY KEY,
+                   scope TEXT NOT NULL,
+                   app TEXT NOT NULL,
+                   title_pattern TEXT,
+                   category TEXT NOT NULL,
+                   activity_label TEXT,
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL
+                 );
+                 CREATE INDEX IF NOT EXISTS classification_rules_app_idx
+                   ON classification_rules(app, scope, updated_at DESC);
+                 CREATE TABLE IF NOT EXISTS classification_overrides (
+                   block_id TEXT PRIMARY KEY,
+                   event_start TEXT NOT NULL,
+                   event_end TEXT NOT NULL,
+                   category TEXT NOT NULL,
+                   activity_label TEXT,
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL
+                 );
+                 CREATE INDEX IF NOT EXISTS classification_overrides_range_idx
+                   ON classification_overrides(event_start, event_end);
+                 CREATE TABLE IF NOT EXISTS context_observations (
+                   id TEXT PRIMARY KEY,
+                   source TEXT NOT NULL,
+                   observed_at TEXT NOT NULL,
+                   duration_seconds INTEGER NOT NULL DEFAULT 0,
+                   app TEXT,
+                   title TEXT,
+                   domain TEXT,
+                   project TEXT,
+                   repository TEXT,
+                   branch TEXT,
+                   file_type TEXT,
+                   text_excerpt TEXT,
+                   ocr_terms_json TEXT NOT NULL DEFAULT '[]',
+                   sensitivity TEXT NOT NULL DEFAULT 'normal',
+                   client_id TEXT,
+                   created_at TEXT NOT NULL
+                 );
+                 CREATE INDEX IF NOT EXISTS context_observations_time_idx
+                   ON context_observations(observed_at DESC);
+                 CREATE INDEX IF NOT EXISTS context_observations_source_idx
+                   ON context_observations(source, observed_at DESC);
+                 CREATE TABLE IF NOT EXISTS connector_clients (
+                   id TEXT PRIMARY KEY,
+                   kind TEXT NOT NULL,
+                   name TEXT NOT NULL,
+                   token_hash TEXT NOT NULL,
+                   origin TEXT,
+                   created_at TEXT NOT NULL,
+                   last_seen_at TEXT,
+                   revoked_at TEXT
+                 );
+                 CREATE TABLE IF NOT EXISTS cloud_consents (
+                   id TEXT PRIMARY KEY,
+                   policy_fingerprint TEXT NOT NULL UNIQUE,
+                   source_summary_json TEXT NOT NULL,
+                   analyst_model TEXT NOT NULL,
+                   evaluator_model TEXT NOT NULL,
+                   created_at TEXT NOT NULL,
+                   revoked_at TEXT
+                 );
+                 CREATE TABLE IF NOT EXISTS ai_evaluation_runs (
+                   id TEXT PRIMARY KEY,
+                   trigger TEXT NOT NULL,
+                   status TEXT NOT NULL,
+                   created_at TEXT NOT NULL,
+                   completed_at TEXT,
+                   analyst_model TEXT NOT NULL,
+                   evaluator_model TEXT NOT NULL,
+                   payload_json TEXT NOT NULL,
+                   analysis_json TEXT,
+                   evaluation_json TEXT,
+                   report_json TEXT,
+                   input_tokens INTEGER NOT NULL DEFAULT 0,
+                   output_tokens INTEGER NOT NULL DEFAULT 0,
+                   cost_usd REAL NOT NULL DEFAULT 0,
+                   error TEXT
+                 );
+                 CREATE INDEX IF NOT EXISTS ai_evaluation_runs_created_idx
+                   ON ai_evaluation_runs(created_at DESC);
+                 CREATE TABLE IF NOT EXISTS ai_feedback (
+                   id TEXT PRIMARY KEY,
+                   run_id TEXT NOT NULL REFERENCES ai_evaluation_runs(id) ON DELETE CASCADE,
+                   opportunity_id TEXT NOT NULL,
+                   rating TEXT NOT NULL,
+                   note TEXT,
+                   created_at TEXT NOT NULL,
+                   UNIQUE(run_id, opportunity_id)
+                 );
                  CREATE TABLE IF NOT EXISTS workflow_intakes (
                    id TEXT PRIMARY KEY,
                    candidate_id TEXT NOT NULL,
@@ -112,10 +328,50 @@ impl LocalStore {
             store.set_value("study_started_at", &iso_now())?;
             store.set_value("selected_days", "7")?;
         }
+        store.migrate_legacy_app_rules()?;
         Ok(store)
     }
 
-    fn connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>, String> {
+    fn migrate_legacy_app_rules(&self) -> Result<(), String> {
+        if self.get_value("classification_rules_migrated")?.as_deref() == Some("1") {
+            return Ok(());
+        }
+        let mut settings = self.settings()?;
+        let now = iso_now();
+        let connection = self.connection()?;
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|error| error.to_string())?;
+        for rule in &settings.app_rules {
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO classification_rules
+                     (id, scope, app, title_pattern, category, activity_label, created_at, updated_at)
+                     VALUES(?1, 'legacy', ?2, NULL, ?3, ?4, ?5, ?5)",
+                    params![rule.id, rule.pattern, rule.category, rule.activity_label, now],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        settings.app_rules.clear();
+        let raw = serde_json::to_string(&settings).map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "INSERT INTO app_state(key, value) VALUES('settings', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [raw],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "INSERT INTO app_state(key, value) VALUES('classification_rules_migrated', '1')
+                 ON CONFLICT(key) DO UPDATE SET value = '1'",
+                [],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>, String> {
         self.connection
             .lock()
             .map_err(|_| "No se pudo abrir la base local".into())
@@ -143,8 +399,14 @@ impl LocalStore {
 
     pub fn settings(&self) -> Result<SettingsV1, String> {
         let raw = self.get_value("settings")?.unwrap_or_else(|| "{}".into());
-        serde_json::from_str(&raw)
-            .map_err(|error| format!("La configuración local está dañada: {error}"))
+        let mut settings: SettingsV1 = serde_json::from_str(&raw)
+            .map_err(|error| format!("La configuración local está dañada: {error}"))?;
+        if settings.schema_version == 1 {
+            settings.schema_version = 2;
+            self.save_settings(&settings)?;
+        }
+        settings.validate()?;
+        Ok(settings)
     }
 
     pub fn save_settings(&self, settings: &SettingsV1) -> Result<(), String> {
@@ -300,6 +562,306 @@ impl LocalStore {
                 [cutoff.to_rfc3339()],
             )
             .map_err(|error| error.to_string())
+    }
+
+    pub fn classification_rules(&self) -> Result<Vec<ClassificationRuleV1>, String> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT id, scope, app, title_pattern, category, activity_label, created_at, updated_at
+                 FROM classification_rules
+                 ORDER BY updated_at DESC, id ASC",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(ClassificationRuleV1 {
+                    id: row.get(0)?,
+                    scope: row.get(1)?,
+                    app: row.get(2)?,
+                    title_pattern: row.get(3)?,
+                    category: row.get(4)?,
+                    activity_label: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        let rules = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        for rule in &rules {
+            rule.validate()
+                .map_err(|error| format!("Una regla local está dañada: {error}"))?;
+        }
+        Ok(rules)
+    }
+
+    pub fn save_classification_rule(
+        &self,
+        rule: &ClassificationRuleV1,
+    ) -> Result<ClassificationRuleV1, String> {
+        rule.validate()?;
+        let connection = self.connection()?;
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM classification_rules", [], |row| {
+                row.get(0)
+            })
+            .map_err(|error| error.to_string())?;
+        let exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM classification_rules WHERE id = ?1)",
+                [&rule.id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if !exists && count >= 500 {
+            return Err("Hay demasiadas reglas de clasificación".into());
+        }
+        connection
+            .execute(
+                "INSERT INTO classification_rules
+                 (id, scope, app, title_pattern, category, activity_label, created_at, updated_at)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(id) DO UPDATE SET
+                   scope = excluded.scope,
+                   app = excluded.app,
+                   title_pattern = excluded.title_pattern,
+                   category = excluded.category,
+                   activity_label = excluded.activity_label,
+                   updated_at = excluded.updated_at",
+                params![
+                    rule.id,
+                    rule.scope,
+                    rule.app,
+                    rule.title_pattern,
+                    rule.category,
+                    rule.activity_label,
+                    rule.created_at,
+                    rule.updated_at
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(rule.clone())
+    }
+
+    pub fn delete_classification_rule(&self, id: &str) -> Result<(), String> {
+        let changed = self
+            .connection()?
+            .execute("DELETE FROM classification_rules WHERE id = ?1", [id])
+            .map_err(|error| error.to_string())?;
+        if changed == 0 {
+            return Err("La regla ya no existe".into());
+        }
+        Ok(())
+    }
+
+    pub fn classification_overrides_between(
+        &self,
+        from: &str,
+        to: &str,
+    ) -> Result<Vec<ClassificationOverrideV1>, String> {
+        parse_utc(from)?;
+        parse_utc(to)?;
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT block_id, event_start, event_end, category, activity_label, created_at, updated_at
+                 FROM classification_overrides
+                 WHERE event_end > ?1 AND event_start < ?2
+                 ORDER BY event_start ASC",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![from, to], classification_override_from_row)
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn classification_overrides(&self) -> Result<Vec<ClassificationOverrideV1>, String> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT block_id, event_start, event_end, category, activity_label, created_at, updated_at
+                 FROM classification_overrides ORDER BY event_start ASC",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], classification_override_from_row)
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn save_classification_override(
+        &self,
+        item: &ClassificationOverrideV1,
+    ) -> Result<ClassificationOverrideV1, String> {
+        if item.block_id.is_empty() || item.block_id.chars().count() > 512 {
+            return Err("La sesión no es válida".into());
+        }
+        crate::models::validate_session_category(&item.category)?;
+        let start = parse_utc(&item.event_start)?;
+        let end = parse_utc(&item.event_end)?;
+        if end <= start {
+            return Err("El intervalo de clasificación no es válido".into());
+        }
+        self.connection()?
+            .execute(
+                "INSERT INTO classification_overrides
+                 (block_id, event_start, event_end, category, activity_label, created_at, updated_at)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(block_id) DO UPDATE SET
+                   event_start = excluded.event_start,
+                   event_end = excluded.event_end,
+                   category = excluded.category,
+                   activity_label = excluded.activity_label,
+                   updated_at = excluded.updated_at",
+                params![
+                    item.block_id,
+                    item.event_start,
+                    item.event_end,
+                    item.category,
+                    item.activity_label,
+                    item.created_at,
+                    item.updated_at
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(item.clone())
+    }
+
+    pub fn save_classification_overrides(
+        &self,
+        items: &[ClassificationOverrideV1],
+    ) -> Result<(), String> {
+        if items.is_empty() || items.len() > 20_000 {
+            return Err("El grupo de sesiones no es válido".into());
+        }
+        for item in items {
+            if item.block_id.is_empty() || item.block_id.chars().count() > 512 {
+                return Err("Una sesión no es válida".into());
+            }
+            crate::models::validate_session_category(&item.category)?;
+            let start = parse_utc(&item.event_start)?;
+            let end = parse_utc(&item.event_end)?;
+            if end <= start {
+                return Err("Un intervalo de clasificación no es válido".into());
+            }
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        for item in items {
+            transaction
+                .execute(
+                    "INSERT INTO classification_overrides
+                     (block_id, event_start, event_end, category, activity_label, created_at, updated_at)
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT(block_id) DO UPDATE SET
+                       event_start = excluded.event_start,
+                       event_end = excluded.event_end,
+                       category = excluded.category,
+                       activity_label = excluded.activity_label,
+                       updated_at = excluded.updated_at",
+                    params![
+                        item.block_id,
+                        item.event_start,
+                        item.event_end,
+                        item.category,
+                        item.activity_label,
+                        item.created_at,
+                        item.updated_at
+                    ],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        transaction.commit().map_err(|error| error.to_string())
+    }
+
+    pub fn delete_classification_overrides(&self, block_ids: &[String]) -> Result<(), String> {
+        if block_ids.is_empty() || block_ids.len() > 20_000 {
+            return Err("El grupo de sesiones no es válido".into());
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        for block_id in block_ids {
+            if block_id.is_empty() || block_id.chars().count() > 512 {
+                return Err("Una sesión no es válida".into());
+            }
+            transaction
+                .execute(
+                    "DELETE FROM classification_overrides WHERE block_id = ?1",
+                    [block_id],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        transaction.commit().map_err(|error| error.to_string())
+    }
+
+    pub fn delete_classification_override(&self, block_id: &str) -> Result<(), String> {
+        self.connection()?
+            .execute(
+                "DELETE FROM classification_overrides WHERE block_id = ?1",
+                [block_id],
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn prune_classification_overrides(
+        &self,
+        retention_days: Option<u16>,
+    ) -> Result<usize, String> {
+        let Some(days) = retention_days else {
+            return Ok(0);
+        };
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(i64::from(days));
+        self.connection()?
+            .execute(
+                "DELETE FROM classification_overrides WHERE event_end < ?1",
+                [cutoff.to_rfc3339()],
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    /// Context excerpts and AI payloads follow the same retention window as the
+    /// timeline. `created_at` is written by the app with `iso_now`, so it compares
+    /// lexically even when a connector reported a non-canonical `observed_at`.
+    pub fn prune_context_and_ai_runs(&self, retention_days: Option<u16>) -> Result<usize, String> {
+        let Some(days) = retention_days else {
+            return Ok(0);
+        };
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(i64::from(days))).to_rfc3339();
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        let observations = transaction
+            .execute(
+                "DELETE FROM context_observations WHERE created_at < ?1",
+                [&cutoff],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "DELETE FROM ai_feedback WHERE run_id IN
+                   (SELECT id FROM ai_evaluation_runs WHERE created_at < ?1)",
+                [&cutoff],
+            )
+            .map_err(|error| error.to_string())?;
+        let runs = transaction
+            .execute(
+                "DELETE FROM ai_evaluation_runs WHERE created_at < ?1",
+                [&cutoff],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(observations + runs)
     }
 
     pub fn list_workflow_intakes(&self) -> Result<Vec<WorkflowIntakeV1>, String> {
@@ -685,6 +1247,27 @@ impl LocalStore {
                 .execute("DELETE FROM checkins", [])
                 .map_err(|error| error.to_string())?;
             transaction
+                .execute("DELETE FROM classification_overrides", [])
+                .map_err(|error| error.to_string())?;
+            transaction
+                .execute("DELETE FROM classification_rules", [])
+                .map_err(|error| error.to_string())?;
+            transaction
+                .execute("DELETE FROM ai_feedback", [])
+                .map_err(|error| error.to_string())?;
+            transaction
+                .execute("DELETE FROM ai_evaluation_runs", [])
+                .map_err(|error| error.to_string())?;
+            transaction
+                .execute("DELETE FROM cloud_consents", [])
+                .map_err(|error| error.to_string())?;
+            transaction
+                .execute("DELETE FROM context_observations", [])
+                .map_err(|error| error.to_string())?;
+            transaction
+                .execute("DELETE FROM connector_clients", [])
+                .map_err(|error| error.to_string())?;
+            transaction
                 .execute("DELETE FROM automation_blueprints", [])
                 .map_err(|error| error.to_string())?;
             transaction
@@ -702,11 +1285,13 @@ impl LocalStore {
 
     fn purge_managed_exports(&self) -> Result<(), String> {
         if let Some(parent) = self.database_path.parent() {
-            let exports = parent.join("exports");
-            if exports.exists() {
-                std::fs::remove_dir_all(&exports).map_err(|error| {
-                    format!("No se pudieron borrar las exportaciones administradas: {error}")
-                })?;
+            for directory in ["exports", MIGRATION_BACKUP_DIR] {
+                let managed = parent.join(directory);
+                if managed.exists() {
+                    std::fs::remove_dir_all(&managed).map_err(|error| {
+                        format!("No se pudieron borrar los datos administrados: {error}")
+                    })?;
+                }
             }
         }
         Ok(())
@@ -722,6 +1307,18 @@ impl LocalStore {
             )
             .map_err(|error| format!("Los datos se borraron, pero la compactación falló: {error}"))
     }
+}
+
+fn classification_override_from_row(row: &Row<'_>) -> rusqlite::Result<ClassificationOverrideV1> {
+    Ok(ClassificationOverrideV1 {
+        block_id: row.get(0)?,
+        event_start: row.get(1)?,
+        event_end: row.get(2)?,
+        category: row.get(3)?,
+        activity_label: row.get(4)?,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
+    })
 }
 
 #[derive(Debug)]
@@ -959,6 +1556,46 @@ mod tests {
     use crate::models::{CheckInAnswer, CheckInV1, SettingsV1, WorkflowIntakeV1};
     use std::sync::{Arc, Barrier};
 
+    #[test]
+    fn projection_v2_backup_is_consistent_idempotent_and_managed() {
+        let temp = tempfile::tempdir().unwrap();
+        let app_data = temp.path().join("app-data");
+        std::fs::create_dir_all(app_data.join("activitywatch")).unwrap();
+        for path in [
+            app_data.join("enso-time.sqlite"),
+            app_data.join("activitywatch/activitywatch.sqlite"),
+        ] {
+            let connection = Connection::open(path).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE evidence(value TEXT);
+                     INSERT INTO evidence VALUES('preserved');",
+                )
+                .unwrap();
+        }
+
+        prepare_projection_v2(&app_data).unwrap();
+        prepare_projection_v2(&app_data).unwrap();
+        let backups = std::fs::read_dir(app_data.join(MIGRATION_BACKUP_DIR))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(backups.len(), 1);
+        let backup = backups[0].path();
+        for name in ["enso-time.sqlite", "activitywatch.sqlite"] {
+            let connection = Connection::open(backup.join(name)).unwrap();
+            let value: String = connection
+                .query_row("SELECT value FROM evidence", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(value, "preserved");
+        }
+        assert!(backup.join("migration-report.json").is_file());
+
+        let store = LocalStore::open(&app_data.join("enso-time.sqlite")).unwrap();
+        store.delete_all().unwrap();
+        assert!(!app_data.join(MIGRATION_BACKUP_DIR).exists());
+    }
+
     fn store() -> LocalStore {
         let directory = tempfile::tempdir().unwrap();
         // Keep the directory for the duration of the process; the connection owns the file.
@@ -1043,6 +1680,54 @@ mod tests {
         let mut settings = store.settings().unwrap();
         settings.cadence_minutes = 12;
         assert!(store.save_settings(&settings).is_err());
+    }
+
+    #[test]
+    fn retention_prunes_context_observations_and_ai_payloads() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = LocalStore::open(&temp.path().join("enso.sqlite")).unwrap();
+        let old = (chrono::Utc::now() - chrono::Duration::days(40)).to_rfc3339();
+        let recent = chrono::Utc::now().to_rfc3339();
+        {
+            let connection = store.connection().unwrap();
+            for (id, created_at) in [("old", &old), ("recent", &recent)] {
+                connection
+                    .execute(
+                        "INSERT INTO context_observations (id, source, observed_at, created_at)
+                         VALUES (?1, 'editor', ?2, ?2)",
+                        params![id, created_at],
+                    )
+                    .unwrap();
+                connection
+                    .execute(
+                        "INSERT INTO ai_evaluation_runs
+                         (id, trigger, status, created_at, analyst_model, evaluator_model, payload_json)
+                         VALUES (?1, 'manual', 'completed', ?2, 'a', 'e', '{\"secret\":1}')",
+                        params![id, created_at],
+                    )
+                    .unwrap();
+                connection
+                    .execute(
+                        "INSERT INTO ai_feedback (id, run_id, opportunity_id, rating, created_at)
+                         VALUES (?1, ?1, 'o', 'up', ?2)",
+                        params![id, created_at],
+                    )
+                    .unwrap();
+            }
+        }
+        assert_eq!(store.prune_context_and_ai_runs(None).unwrap(), 0);
+        assert_eq!(store.prune_context_and_ai_runs(Some(30)).unwrap(), 2);
+        let connection = store.connection().unwrap();
+        for table in ["context_observations", "ai_evaluation_runs", "ai_feedback"] {
+            let ids: Vec<String> = connection
+                .prepare(&format!("SELECT id FROM {table}"))
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            assert_eq!(ids, vec!["recent".to_string()], "{table}");
+        }
     }
 
     #[test]
@@ -1420,6 +2105,40 @@ mod tests {
         assert_eq!(items[0].candidate_label, "Reporte concurrente");
         assert_eq!(items[0].pain_points, "Versión final");
         assert_eq!(items[0].updated_at, "2025-01-03T10:00:00+00:00");
+    }
+
+    #[test]
+    fn classification_rules_and_overrides_round_trip_and_delete_all_clears_them() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = LocalStore::open(&directory.path().join("enso-time.sqlite")).unwrap();
+        let rule = ClassificationRuleV1 {
+            id: "rule-1".into(),
+            scope: "app-title".into(),
+            app: "Google Chrome".into(),
+            title_pattern: Some("Client Portal".into()),
+            category: "focus".into(),
+            activity_label: Some("Trabajo de cliente".into()),
+            created_at: "2026-08-22T10:00:00Z".into(),
+            updated_at: "2026-08-22T10:00:00Z".into(),
+        };
+        store.save_classification_rule(&rule).unwrap();
+        assert_eq!(store.classification_rules().unwrap(), [rule]);
+
+        let item = ClassificationOverrideV1 {
+            block_id: "bucket-42".into(),
+            event_start: "2026-08-22T10:00:00Z".into(),
+            event_end: "2026-08-22T10:15:00Z".into(),
+            category: "admin".into(),
+            activity_label: None,
+            created_at: "2026-08-22T10:16:00Z".into(),
+            updated_at: "2026-08-22T10:16:00Z".into(),
+        };
+        store.save_classification_override(&item).unwrap();
+        assert_eq!(store.classification_overrides().unwrap(), [item]);
+
+        store.delete_all().unwrap();
+        assert!(store.classification_rules().unwrap().is_empty());
+        assert!(store.classification_overrides().unwrap().is_empty());
     }
 
     #[test]

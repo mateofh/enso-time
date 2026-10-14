@@ -10,29 +10,60 @@ function round(value: number, digits = 1): number {
   return Math.round(value * factor) / factor;
 }
 
-export function scoreCandidate(checkIns: CheckInV1[], daysObserved: number, locale: Locale = "es-419"): AutomationCandidateV1[] {
-  const groups = new Map<string, CheckInV1[]>();
+interface CandidateObservation {
+  label: string;
+  durationSeconds: number;
+  rulesClear: boolean;
+  source: "corrección" | "regla" | "check-in";
+}
+
+function fallbackActivityLabel(category: string, app: string): string {
+  const labels: Record<string, string> = {
+    focus: "Foco", communication: "Comunicación", meetings: "Reuniones", admin: "Administración",
+    learning: "Aprendizaje", creation: "Creación", personal: "Personal",
+  };
+  return `${labels[category] ?? "Actividad"} · ${app.trim()}`;
+}
+
+export function scoreCandidate(checkIns: CheckInV1[], daysObserved: number, blocks: TimelineBlockV1[] = [], locale: Locale = "es-419"): AutomationCandidateV1[] {
+  const groups = new Map<string, CandidateObservation[]>();
+  const representedCheckIns = new Set(blocks.flatMap((block) => block.checkInId ? [block.checkInId] : []));
+  for (const block of blocks) {
+    if (block.afk || block.category === "unknown" || block.category === "break") continue;
+    if (!block.classificationSource || !["override", "rule", "checkin"].includes(block.classificationSource)) continue;
+    const label = block.activityLabel?.trim() || fallbackActivityLabel(block.category, block.app);
+    const key = canonicalCandidateLabel(label);
+    const source = block.classificationSource === "override" ? "corrección" : block.classificationSource === "rule" ? "regla" : "check-in";
+    groups.set(key, [...(groups.get(key) ?? []), {
+      label,
+      durationSeconds: Math.max(0, block.durationSeconds),
+      rulesClear: block.classificationSource === "rule",
+      source,
+    }]);
+  }
   for (const checkIn of checkIns) {
-    if (checkIn.status !== "answered" || !checkIn.activityLabel || !checkIn.repetitive) continue;
+    if (checkIn.status !== "answered" || !checkIn.activityLabel || !checkIn.repetitive || representedCheckIns.has(checkIn.id)) continue;
     const key = canonicalCandidateLabel(checkIn.activityLabel);
     if (!key) continue;
-    groups.set(key, [...(groups.get(key) ?? []), checkIn]);
+    const durationSeconds = Math.max(0, (Date.parse(checkIn.intervalEnd) - Date.parse(checkIn.intervalStart)) / 1000) || 0;
+    groups.set(key, [...(groups.get(key) ?? []), {
+      label: checkIn.activityLabel.trim(), durationSeconds, rulesClear: checkIn.rulesClear === true, source: "check-in",
+    }]);
   }
 
   return [...groups.entries()]
     .filter(([, values]) => values.length >= 2)
     .map(([key, values]) => {
       const weeklyFrequency = round((values.length / Math.max(daysObserved, 1)) * WEEK_DAYS);
-      const observedHours = values.reduce((sum, value) => {
-        const duration = Date.parse(value.intervalEnd) - Date.parse(value.intervalStart);
-        return sum + (Number.isFinite(duration) ? Math.max(0, duration) / 3_600_000 : 0);
-      }, 0);
-      const estimatedWeeklyHours = round(observedHours / Math.max(daysObserved, 1) * WEEK_DAYS);
+      const estimatedWeeklyHours = round((values.reduce((sum, value) => sum + value.durationSeconds, 0) / 3600 / Math.max(daysObserved, 1)) * WEEK_DAYS);
       const impactScore = Math.min(40, Math.round(estimatedWeeklyHours * 5 + weeklyFrequency * 1.5));
       const clearRatio = values.filter((value) => value.rulesClear).length / values.length;
       const feasibilityScore = Math.round(18 + clearRatio * 17);
       const riskScore = clearRatio > 0.6 ? 6 : 14;
-      const activityLabel = values.map((value) => value.activityLabel!.trim()).sort(compareUtf8)[0] ?? key;
+      const activityLabel = values.map((value) => value.label).sort(compareUtf8)[0] ?? key;
+      const corrections = values.filter((value) => value.source === "corrección").length;
+      const rules = values.filter((value) => value.source === "regla").length;
+      const checkInCount = values.filter((value) => value.source === "check-in").length;
       return {
         id: candidateId(key),
         activityLabel,
@@ -43,8 +74,9 @@ export function scoreCandidate(checkIns: CheckInV1[], daysObserved: number, loca
         riskScore,
         priorityScore: Math.max(0, Math.min(100, impactScore + feasibilityScore - riskScore)),
         evidence: [
-          locale === "en" ? `${values.length} records during the period` : `${values.length} registros durante el periodo`,
+          locale === "en" ? `${values.length} sessions: ${corrections} corrections, ${rules} rules and ${checkInCount} check-ins` : `${values.length} sesiones: ${corrections} correcciones, ${rules} reglas y ${checkInCount} check-ins`,
           locale === "en" ? `${weeklyFrequency} estimated repetitions per week` : `${weeklyFrequency} repeticiones estimadas por semana`,
+          locale === "en" ? `${estimatedWeeklyHours} estimated hours per week` : `${estimatedWeeklyHours} horas estimadas por semana`,
           locale === "en" ? (clearRatio > 0.6 ? "Most repetitions follow clear rules" : "Clarify rules before automating") : (clearRatio > 0.6 ? "La mayoría sigue reglas claras" : "Necesita aclarar reglas antes de automatizar"),
         ],
       };
@@ -90,7 +122,7 @@ export function createDiagnostic(
     return count + (previous && previous.app !== block.app ? 1 : 0);
   }, 0);
   const answered = checkIns.filter((checkIn) => checkIn.status === "answered").length;
-  const candidates = scoreCandidate(checkIns, daysObserved, locale);
+  const candidates = scoreCandidate(checkIns, daysObserved, blocks, locale);
   const recommendations: string[] = [];
 
   if (activeSeconds > 0 && focusSeconds / activeSeconds < 0.35) recommendations.push((locale === "en" ? "Protect a 45-minute focus block before opening communication apps." : "Reserva un bloque protegido de 45 minutos antes de abrir comunicación."));

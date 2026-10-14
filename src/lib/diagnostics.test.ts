@@ -42,7 +42,7 @@ describe("automation diagnosis", () => {
     expect(diagnostic.prompt).toContain("TOP CANDIDATE");
     expect(diagnostic.prompt).toContain("Actualizar reporte");
     expect(diagnostic.prompt).toContain("Reducir trabajo manual");
-    expect(diagnostic.candidates[0]?.evidence[0]).toBe("3 records during the period");
+    expect(diagnostic.candidates[0]?.evidence[0]).toBe("3 sessions: 0 corrections, 0 rules and 3 check-ins");
     expect(diagnostic.recommendations.join(" ")).not.toContain("Valida “");
   });
 

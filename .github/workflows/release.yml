@@ -138,9 +138,9 @@ jobs:
 
   build:
     name: Build ${{ matrix.label }}
-    environment: signing
     needs: resolve
     runs-on: ${{ matrix.os }}
+    environment: ${{ matrix.signing_environment || (!contains(needs.resolve.outputs.release_tag, '-') && 'windows-signing' || '') }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -151,16 +151,19 @@ jobs:
             rust_target: aarch64-apple-darwin
             aw_target: macos-arm64
             bundles: dmg
+            signing_environment: macos-signing
           - label: macOS Intel
             os: macos-15-intel
             rust_target: x86_64-apple-darwin
             aw_target: macos-x86_64
             bundles: dmg
+            signing_environment: macos-signing
           - label: Windows x64
             os: windows-2022
             rust_target: x86_64-pc-windows-msvc
             aw_target: windows-x86_64
             bundles: msi,nsis
+            signing_environment: ''
     env:
       RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
       SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
@@ -245,55 +248,64 @@ jobs:
             Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
           }
 
-      - name: Require stable signing credentials
-        if: ${{ !contains(env.RELEASE_TAG, '-') }}
+      - name: Require Apple signing and notarization credentials
+        if: runner.os == 'macOS'
         shell: bash
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          : "${APPLE_CERTIFICATE:?APPLE_CERTIFICATE is required}"
+          : "${APPLE_CERTIFICATE_PASSWORD:?APPLE_CERTIFICATE_PASSWORD is required}"
+          : "${APPLE_SIGNING_IDENTITY:?APPLE_SIGNING_IDENTITY is required}"
+          : "${APPLE_API_ISSUER:?APPLE_API_ISSUER is required}"
+          : "${APPLE_API_KEY:?APPLE_API_KEY is required}"
+          : "${APPLE_API_KEY_CONTENT:?APPLE_API_KEY_CONTENT is required}"
+          : "${KEYCHAIN_PASSWORD:?KEYCHAIN_PASSWORD is required}"
+
+      - name: Import Developer ID and prepare notary key
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          certificate_path="$RUNNER_TEMP/enso-developer-id.p12"
+          keychain_path="$RUNNER_TEMP/enso-signing.keychain-db"
+          api_key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 -D > "$certificate_path"
+          printf '%s' "$APPLE_API_KEY_CONTENT" > "$api_key_path"
+          chmod 600 "$certificate_path" "$api_key_path"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security import "$certificate_path" -k "$keychain_path" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+          security find-identity -v -p codesigning "$keychain_path"
+          echo "APPLE_API_KEY_PATH=$api_key_path" >> "$GITHUB_ENV"
+
+      - name: Require stable Windows signing credentials
+        if: ${{ runner.os == 'Windows' && !contains(env.RELEASE_TAG, '-') }}
+        shell: pwsh
+        env:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
           WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
         run: |
-          node <<'NODE'
-          const names = process.platform === 'darwin'
-            ? ['APPLE_CERTIFICATE', 'APPLE_CERTIFICATE_PASSWORD', 'APPLE_SIGNING_IDENTITY', 'APPLE_ID', 'APPLE_PASSWORD', 'APPLE_TEAM_ID']
-            : ['WINDOWS_CERTIFICATE', 'WINDOWS_CERTIFICATE_PASSWORD', 'WINDOWS_CERTIFICATE_THUMBPRINT'];
-          for (const name of names) {
-            if (!process.env[name]) throw new Error(`Missing stable signing credential: ${name}`);
+          foreach ($name in @('WINDOWS_CERTIFICATE', 'WINDOWS_CERTIFICATE_PASSWORD', 'WINDOWS_CERTIFICATE_THUMBPRINT')) {
+            if (-not [Environment]::GetEnvironmentVariable($name)) { throw "Missing stable signing credential: $name" }
           }
-          NODE
-
-      - name: Import stable macOS signing certificate
-        if: ${{ runner.os == 'macOS' && !contains(env.RELEASE_TAG, '-') }}
-        shell: bash
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-        run: |
-          set -euo pipefail
-          certificate="$RUNNER_TEMP/enso-signing.p12"
-          keychain="$RUNNER_TEMP/enso-signing.keychain-db"
-          keychain_password="$(openssl rand -hex 32)"
-          echo "::add-mask::$keychain_password"
-          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$certificate"
-          security create-keychain -p "$keychain_password" "$keychain"
-          security unlock-keychain -p "$keychain_password" "$keychain"
-          security set-keychain-settings -lut 7200 "$keychain"
-          security import "$certificate" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" >/dev/null
-          security list-keychains -d user -s "$keychain" login.keychain-db
-          rm -f "$certificate"
-
-      - name: Sign macOS capture runtime and refresh integrity manifest
-        if: ${{ runner.os == 'macOS' && !contains(env.RELEASE_TAG, '-') }}
-        env:
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-        run: node scripts/sign-macos-resources.mjs
 
       - name: Import stable Windows signing certificate
         if: ${{ runner.os == 'Windows' && !contains(env.RELEASE_TAG, '-') }}
@@ -314,7 +326,7 @@ jobs:
 
       - name: Configure release packaging
         env:
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && secrets.APPLE_SIGNING_IDENTITY || '' }}
           WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
         run: node scripts/release-config.mjs
 
@@ -324,11 +336,12 @@ jobs:
         run: echo 'TAURI_CLI_VERBOSITY=1' >> "$GITHUB_ENV"
 
       - name: Build Tauri installers
-        env:
-          APPLE_ID: ${{ !contains(env.RELEASE_TAG, '-') && secrets.APPLE_ID || '' }}
-          APPLE_PASSWORD: ${{ !contains(env.RELEASE_TAG, '-') && secrets.APPLE_PASSWORD || '' }}
-          APPLE_TEAM_ID: ${{ !contains(env.RELEASE_TAG, '-') && secrets.APPLE_TEAM_ID || '' }}
         uses: tauri-apps/tauri-action@fce9c6108b31ea247710505d3aaaa893ee6768d4 # v0
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_API_ISSUER: ${{ runner.os == 'macOS' && secrets.APPLE_API_ISSUER || '' }}
+          APPLE_API_KEY: ${{ runner.os == 'macOS' && secrets.APPLE_API_KEY || '' }}
+          APPLE_API_KEY_PATH: ${{ env.APPLE_API_KEY_PATH }}
         with:
           tauriScript: npm run tauri
           args: --target ${{ matrix.rust_target }} --bundles ${{ matrix.bundles }} --config src-tauri/ci-bundle.json
@@ -348,21 +361,30 @@ jobs:
           trap cleanup EXIT
           hdiutil attach -readonly -nobrowse -mountpoint "$mount_dir" "$dmg_file"
           test -n "$(find "$mount_dir" -type d -name '*.app' -print -quit)"
+          for required in POLYFORM-NONCOMMERCIAL-1.0.0.txt MPL-2.0.txt THIRD_PARTY_NOTICES.md; do
+            test -n "$(find "$mount_dir" -type f -name "$required" -print -quit)"
+          done
+          test -z "$(find "$mount_dir" -type d -name 'aw-watcher-window' -print -quit)"
+          test -z "$(find "$mount_dir" -type d -name 'aw-watcher-afk' -print -quit)"
           app_bundle="$(find "$mount_dir" -type d -name '*.app' -print -quit)"
-          if [[ "$RELEASE_TAG" != *-* ]]; then
-            codesign --verify --deep --strict --verbose=2 "$app_bundle"
-            xcrun stapler validate "$app_bundle"
-            spctl --assess --type execute --verbose=2 "$app_bundle"
-          fi
+          codesign --verify --strict --verbose=4 "$app_bundle"
+          designated_requirement="$(codesign -d -r- "$app_bundle" 2>&1)"
+          grep -Fq 'identifier "os.enso.time"' <<< "$designated_requirement"
+          ! grep -Fq 'cdhash H"' <<< "$designated_requirement"
+          spctl --assess --type execute --verbose=4 "$app_bundle"
+          xcrun stapler validate "$dmg_file"
           installed="$RUNNER_TEMP/enso-installed-smoke"
           mkdir -p "$installed"
           ditto "$app_bundle" "$installed/Ensō Time.app"
           executable="$(find "$installed/Ensō Time.app/Contents/MacOS" -type f -print -quit)"
           node scripts/installer-smoke.mjs --app "$executable" --report "node_modules/.cache/enso-time-qa/installed-app.json"
 
-          for required in POLYFORM-NONCOMMERCIAL-1.0.0.txt MPL-2.0.txt THIRD_PARTY_NOTICES.md aw-watcher-window aw-watcher-afk; do
-            test -n "$(find "$mount_dir" -type f -name "$required" -print -quit)"
-          done
+      - name: Remove signing keychain and notary key
+        if: always() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          security delete-keychain "$RUNNER_TEMP/enso-signing.keychain-db" || true
+          rm -f "$RUNNER_TEMP"/AuthKey_*.p8 "$RUNNER_TEMP/enso-developer-id.p12"
 
       - name: Smoke-test Windows installer resources
         if: runner.os == 'Windows'
@@ -720,7 +742,7 @@ jobs:
           body: |
             Source-available release. Use is limited by PolyForm Noncommercial 1.0.0.
 
-            ${{ contains(env.RELEASE_TAG, '-') && 'Beta installers are ad-hoc signed on macOS and unsigned on Windows.' || 'Stable installers require Developer ID signing and notarization on macOS and Authenticode signing on Windows.' }} Verify downloads against SHA256SUMS.
+            ${{ contains(env.RELEASE_TAG, '-') && 'macOS installers are signed and notarized. Beta Windows installers remain unsigned.' || 'Stable installers require Developer ID signing and notarization on macOS and Authenticode signing on Windows.' }} Verify downloads against SHA256SUMS.
 
             GitHub SLSA provenance is available through the attestations API and the attached standard Sigstore bundle. It identifies the release workflow invocation that collected and signed the installer hashes; it does not independently identify each matrix build job. Verify an installer with `gh attestation verify INSTALLER --repo ${{ github.repository }} --signer-workflow ${{ github.repository }}/.github/workflows/release.yml --signer-digest ${{ needs.resolve.outputs.workflow_commit }} --source-digest ${{ github.sha }}`.
 

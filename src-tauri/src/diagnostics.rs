@@ -3,7 +3,7 @@ use crate::models::{
     DiagnosticV1, MetricValue, SettingsV1, TimelineBlockV1, WorkflowIntakeV1,
 };
 use chrono::Utc;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub fn create_diagnostic(
     blocks: &[TimelineBlockV1],
@@ -31,7 +31,7 @@ pub fn create_diagnostic(
         .iter()
         .filter(|item| item.status == "answered")
         .count();
-    let candidates = score_candidates(checkins, days_observed, &settings.locale);
+    let candidates = score_candidates(blocks, checkins, days_observed, &settings.locale);
     let top_intake = candidates.first().and_then(|candidate| {
         workflow_intakes
             .iter()
@@ -161,17 +161,68 @@ pub fn create_diagnostic(
     }
 }
 
+#[derive(Clone)]
+struct CandidateObservation {
+    label: String,
+    duration_seconds: i64,
+    rules_clear: bool,
+    source: &'static str,
+}
+
 fn score_candidates(
+    blocks: &[TimelineBlockV1],
     checkins: &[CheckInV1],
     days_observed: f64,
     locale: &str,
 ) -> Vec<AutomationCandidateV1> {
     let english = locale == "en";
-    let mut groups: HashMap<String, Vec<&CheckInV1>> = HashMap::new();
-    for item in checkins
+    let mut groups: HashMap<String, Vec<CandidateObservation>> = HashMap::new();
+    let represented_checkins = blocks
         .iter()
-        .filter(|item| item.status == "answered" && item.repetitive == Some(true))
-    {
+        .filter_map(|block| block.check_in_id.clone())
+        .collect::<HashSet<_>>();
+
+    // Human corrections and explicit rules are already stronger evidence than an
+    // extra questionnaire. Treat them as first-class observations so the review
+    // workflow directly improves automation discovery.
+    for block in blocks.iter().filter(|block| {
+        !block.afk
+            && !matches!(block.category.as_str(), "unknown" | "break")
+            && matches!(
+                block.classification_source.as_str(),
+                "override" | "rule" | "checkin"
+            )
+    }) {
+        let label = block
+            .activity_label
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| fallback_activity_label(&block.category, &block.app));
+        let source = match block.classification_source.as_str() {
+            "override" => "corrección",
+            "rule" => "regla",
+            _ => "check-in",
+        };
+        groups
+            .entry(canonicalize_candidate_label(&label))
+            .or_default()
+            .push(CandidateObservation {
+                label,
+                duration_seconds: block.duration_seconds.max(0),
+                rules_clear: block.classification_source == "rule",
+                source,
+            });
+    }
+
+    // Keep answered repetitive check-ins that are not already represented by a
+    // projected timeline block (for example, manually entered offline context).
+    for item in checkins.iter().filter(|item| {
+        item.status == "answered"
+            && item.repetitive == Some(true)
+            && !represented_checkins.contains(&item.id)
+    }) {
         let Some(label) = item
             .activity_label
             .as_ref()
@@ -180,10 +231,20 @@ fn score_candidates(
         else {
             continue;
         };
+        let duration_seconds = crate::models::parse_utc(&item.interval_start)
+            .ok()
+            .zip(crate::models::parse_utc(&item.interval_end).ok())
+            .map(|(start, end)| (end - start).num_seconds().max(0))
+            .unwrap_or_default();
         groups
             .entry(canonicalize_candidate_label(label))
             .or_default()
-            .push(item);
+            .push(CandidateObservation {
+                label: label.to_owned(),
+                duration_seconds,
+                rules_clear: item.rules_clear == Some(true),
+                source: "check-in",
+            });
     }
     let mut candidates: Vec<_> = groups
         .into_iter()
@@ -191,18 +252,14 @@ fn score_candidates(
         .map(|(key, items)| {
             let activity_label = items
                 .iter()
-                .filter_map(|item| item.activity_label.as_deref().map(str::trim))
+                .map(|item| item.label.as_str())
                 .min()
                 .unwrap_or(&key)
                 .to_owned();
             let weekly_frequency = round(items.len() as f64 / days_observed.max(1.0) * 5.0, 1);
             let observed_hours: f64 = items
                 .iter()
-                .filter_map(|item| {
-                    let start = crate::models::parse_utc(&item.interval_start).ok()?;
-                    let end = crate::models::parse_utc(&item.interval_end).ok()?;
-                    Some((end - start).num_seconds().max(0) as f64 / 3600.0)
-                })
+                .map(|item| item.duration_seconds as f64 / 3600.0)
                 .sum();
             let estimated_weekly_hours = round(observed_hours / days_observed.max(1.0) * 5.0, 1);
             let impact_score = (estimated_weekly_hours * 5.0 + weekly_frequency * 1.5)
@@ -210,9 +267,18 @@ fn score_candidates(
                 .min(40.0) as i32;
             let clear_ratio = items
                 .iter()
-                .filter(|item| item.rules_clear == Some(true))
+                .filter(|item| item.rules_clear)
                 .count() as f64
                 / items.len() as f64;
+            let corrections = items
+                .iter()
+                .filter(|item| item.source == "corrección")
+                .count();
+            let rules = items.iter().filter(|item| item.source == "regla").count();
+            let checkins = items
+                .iter()
+                .filter(|item| item.source == "check-in")
+                .count();
             let feasibility_score = (18.0 + clear_ratio * 17.0).round() as i32;
             let risk_score = if clear_ratio > 0.6 { 6 } else { 14 };
             AutomationCandidateV1 {
@@ -225,27 +291,31 @@ fn score_candidates(
                 risk_score,
                 priority_score: (impact_score + feasibility_score - risk_score).clamp(0, 100),
                 evidence: vec![
-                    if english {
-                        format!("{} records during the period", items.len())
+                    if english { format!("{} sessions: {corrections} corrections, {rules} rules and {checkins} check-ins", items.len()) }
+                    else { format!("{} sesiones: {corrections} correcciones, {rules} reglas y {checkins} check-ins", items.len()) },
+                    if english { format!("{weekly_frequency} estimated repetitions per week") } else { format!("{weekly_frequency} repeticiones estimadas por semana") },
+                    if english { format!("{estimated_weekly_hours} estimated hours per week") } else { format!("{estimated_weekly_hours} horas estimadas por semana") },
+                    if clear_ratio > 0.6 {
+                        (if english { "Most repetitions follow clear rules" } else { "La mayoría sigue reglas claras" }).into()
                     } else {
                         format!("{} registros durante el periodo", items.len())
                     },
                     if english {
                         format!("{weekly_frequency} estimated repetitions per week")
                     } else {
-                        format!("{weekly_frequency} repeticiones estimadas por semana")
+                        if english { format!("{weekly_frequency} estimated repetitions per week") } else { format!("{weekly_frequency} repeticiones estimadas por semana") }
                     },
                     if clear_ratio > 0.6 {
                         if english {
                             "Most repetitions follow clear rules"
                         } else {
-                            "La mayoría sigue reglas claras"
+                            (if english { "Most repetitions follow clear rules" } else { "La mayoría sigue reglas claras" }).into()
                         }
                     } else {
                         if english {
                             "Clarify rules before automating"
                         } else {
-                            "Necesita aclarar reglas antes de automatizar"
+                            if english { "Clarify rules before automating" } else { "Necesita aclarar reglas antes de automatizar" }
                         }
                     }
                     .into(),
@@ -261,6 +331,20 @@ fn score_candidates(
             .then_with(|| left.activity_label.cmp(&right.activity_label))
     });
     candidates
+}
+
+fn fallback_activity_label(category: &str, app: &str) -> String {
+    let category = match category {
+        "focus" => "Foco",
+        "communication" => "Comunicación",
+        "meetings" => "Reuniones",
+        "admin" => "Administración",
+        "learning" => "Aprendizaje",
+        "creation" => "Creación",
+        "personal" => "Personal",
+        _ => "Actividad",
+    };
+    format!("{category} · {}", app.trim())
 }
 
 fn build_prompt(
@@ -423,15 +507,15 @@ mod tests {
         assert!(diagnostic.prompt.contains("Operaciones"));
         assert_eq!(
             diagnostic.candidates[0].evidence[0],
-            "2 records during the period"
+            "2 sessions: 0 corrections, 0 rules and 2 check-ins"
         );
         assert!(diagnostic.recommendations[0].starts_with("Validate"));
     }
 
     #[test]
     fn needs_repeated_evidence_for_candidate() {
-        assert!(score_candidates(&[answered("1")], 7.0, "es-419").is_empty());
-        let candidates = score_candidates(&[answered("1"), answered("2")], 7.0, "es-419");
+        assert!(score_candidates(&[], &[answered("1")], 7.0, "es-419").is_empty());
+        let candidates = score_candidates(&[], &[answered("1"), answered("2")], 7.0, "es-419");
         assert_eq!(candidates.len(), 1);
         assert!(candidates[0].priority_score > 0);
     }
@@ -443,7 +527,7 @@ mod tests {
             answered_with_label("2", "Preparar reporte"),
         ];
         for _ in 0..2 {
-            let candidates = score_candidates(&checkins, 7.0, "es-419");
+            let candidates = score_candidates(&[], &checkins, 7.0, "es-419");
             assert_eq!(candidates.len(), 1);
             assert_eq!(candidates[0].activity_label, "Preparar reporte");
             assert_eq!(
@@ -475,13 +559,45 @@ mod tests {
         .unwrap();
 
         for _ in 0..16 {
-            let candidates = score_candidates(&checkins, 7.0, "es-419");
+            let candidates = score_candidates(&[], &checkins, 7.0, "es-419");
             assert_eq!(candidates.len(), 2);
             assert_eq!(candidates[0].priority_score, candidates[1].priority_score);
             assert_eq!(candidates[0].id, expected_top);
             assert!(candidates[0].id < candidates[1].id);
             checkins.rotate_left(1);
         }
+    }
+
+    #[test]
+    fn corrections_and_rules_become_candidate_evidence_without_checkins() {
+        let block = |id: &str, source: &str| TimelineBlockV1 {
+            id: id.into(),
+            start: "2026-08-01T10:00:00Z".into(),
+            end: "2026-08-01T10:30:00Z".into(),
+            duration_seconds: 1_800,
+            app: "Chrome".into(),
+            title: None,
+            activity_label: Some("Preparar propuesta".into()),
+            category: "admin".into(),
+            confidence: 1.0,
+            afk: false,
+            source: "window".into(),
+            check_in_id: None,
+            classification_source: source.into(),
+            rule_id: (source == "rule").then(|| "rule-1".into()),
+            correctable: true,
+        };
+        let candidates = score_candidates(
+            &[block("one", "override"), block("two", "rule")],
+            &[],
+            5.0,
+            "es-419",
+        );
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].activity_label, "Preparar propuesta");
+        assert_eq!(candidates[0].estimated_weekly_hours, 1.0);
+        assert!(candidates[0].evidence[0].contains("1 correcciones"));
+        assert!(candidates[0].evidence[0].contains("1 reglas"));
     }
 
     #[test]

@@ -33,6 +33,9 @@ the user in control.
 5. Generate a vendor-neutral automation blueprint and a copyable prompt suitable for
    starting implementation in n8n, Make, Zapier, or custom code.
 6. Keep every draft local and require an explicit copy/export action.
+7. Accept optional local context from paired Chromium, VS Code/Cursor, and terminal
+   connectors. Each source is opt-in, uses a revocable per-client token, stops while
+   tracking is paused, and follows the timeline retention period.
 
 ### Out of scope
 
@@ -40,6 +43,7 @@ the user in control.
 - Creating, enabling, or changing a workflow in an external platform.
 - Claiming guaranteed savings or presenting weak evidence as fact.
 - Choosing a vendor without showing the assumptions and tradeoffs.
+- Sending activity data to an AI service or capturing the screen (see v0.3).
 
 ### Definition of done
 
@@ -48,6 +52,24 @@ evidence-backed automation with a complete current-state map, human/automation
 boundary, risk assessment, and build-ready blueprint. Desktop and mobile-width UI,
 local persistence, export, deletion, bilingual copy, and failure states are covered by
 automated tests.
+
+## v0.3 — Optional AI evaluation and screen context
+
+Goal: let a person who explicitly opts in get an independent AI evaluation of their
+evidence, and enrich ambiguous periods with local screen OCR.
+
+The code exists behind the `experimental-intelligence` build feature and is disabled in
+every published installer. It ships only after these security findings are closed:
+
+- The payload sent to OpenRouter is byte-identical to the one previewed and authorized;
+  consent binds to its hash, and scheduled runs cannot send content the person never saw.
+- The monthly budget cannot be bypassed by missing, zero, or negative model prices, nor
+  reopened when retention prunes runs from the current month: cost accounting is kept
+  through the end of its budget month while payloads follow retention.
+- Redaction covers common credentials (cloud keys, API tokens, JWTs, private keys,
+  passwords) before any text leaves the device.
+- OCR redacts whole lines before tokenizing, drops tokens with digits, and skips capture
+  while an excluded app is visible, matched by bundle identifier.
 
 ## Later — Calendar context
 

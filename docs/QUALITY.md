@@ -71,26 +71,27 @@ and security reviews with no unresolved critical, high, or medium findings.
 
 ## Signing and publication gate
 
-Create a protected GitHub environment named `signing` for build certificate access,
-and retain the protected `release` environment for publication. Limit both to trusted
+Retain the protected `macos-signing` environment for Apple certificate access and
+API-key notarization. Use a separate protected `windows-signing` environment for
+stable Windows certificate access, and retain `release` for publication. Limit both to trusted
 release tags/main backfill and require a reviewer. No credential belongs in Git or a
 QA artifact.
 
-The `signing` environment needs these secrets for a stable build:
+The platform signing environments need these secrets:
 
 - macOS: `APPLE_CERTIFICATE` (base64 Developer ID Application P12),
-  `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`,
-  `APPLE_PASSWORD` (app-specific password), `APPLE_TEAM_ID`.
+  `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_API_ISSUER`,
+  `APPLE_API_KEY`, `APPLE_API_KEY_CONTENT` (P8 contents), `KEYCHAIN_PASSWORD`.
 - Windows: `WINDOWS_CERTIFICATE` (base64 PFX),
   `WINDOWS_CERTIFICATE_PASSWORD`, `WINDOWS_CERTIFICATE_THUMBPRINT`.
 
 Use a signing provider/certificate that permits CI signing. See the official
 [Tauri macOS signing](https://v2.tauri.app/distribute/sign/macos/) and
 [Windows signing](https://v2.tauri.app/distribute/sign/windows/) instructions.
-The workflow signs bundled Mach-O capture resources before notarization and
-recomputes their local integrity manifest while preserving upstream archive
-provenance. A missing certificate or failed verification blocks a stable build. Beta builds
-retain their ad-hoc/unsigned policy.
+macOS capture is native and does not package Python watcher runtimes. Apple
+signing and notarization remain required for beta and stable releases. A missing
+certificate or failed verification blocks the build. Windows beta installers remain
+unsigned; stable installers require Authenticode signing.
 
 Before approving the stable publishing job, set the `release` environment variable
 `STABLE_QA_EVIDENCE` to the completed JSON based on

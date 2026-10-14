@@ -19,7 +19,7 @@ const report = {
 const npm = process.env.npm_execpath;
 if (!npm) throw new Error("Run this command through npm run qa.");
 const steps = [
-  ["Application", [npm, "run", "check"]],
+  ["Application", [npm, "run", "check:web"]],
   ["ActivityWatch packaging", [npm, "run", "test:activitywatch"]],
   ["Release contracts", [npm, "run", "test:release"]],
   ["License boundaries", ["scripts/license-check.mjs", "--strict-manifests"]],

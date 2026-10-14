@@ -2,12 +2,13 @@
 
 This record covers the modified local workspace for the stable-release preparation.
 The application remains `0.2.0-beta.1`; this record is not approval to publish a stable
-release. The working tree is uncommitted, which the generated QA report marks explicitly.
+release. Validation below ran on the integrated working tree before the merge commit;
+the generated report records that tree as dirty. CI validates the pushed commit separately.
 
 ## Completed checks
 
-- `npm run qa`: passed, with 23 Vitest tests, 50 browser journeys, 9 ActivityWatch
-  packaging tests, 13 release/gate tests, and 63 Rust tests (158 total).
+- `npm run qa`: passed, with 23 Vitest tests, 58 browser journeys, 10 ActivityWatch
+  packaging tests, 14 release/gate tests, and 94 Rust tests (199 total).
 - TypeScript, frontend production build, strict license boundaries, and CRLF checks:
   passed as part of QA.
 - GitHub workflows: parsed successfully and checked with actionlint.
@@ -17,7 +18,7 @@ release. The working tree is uncommitted, which the generated QA report marks ex
   write/read passed in an isolated temporary profile.
 
 Local reports are generated in `node_modules/.cache/enso-time-qa/`, including
-`report.json`, `checks.log`, and `native-local-final.json`. These files are ignored by
+`report.json`, `checks.log`, and native smoke reports. These files are ignored by
 Git; CI uploads its own reports for its exact source and platform.
 
 ## Code and failure-path review
@@ -38,10 +39,19 @@ Resolved during implementation:
   capture gate prevent that write.
 - Windows installer fields could compare a stable release incorrectly against beta:
   bounded numeric ordering and the existing UpgradeCode are tested explicitly.
-- Signing bundled macOS resources changes integrity hashes: signing refreshes the
-  per-file manifest while preserving verified upstream archive provenance.
+- Integrated the current native macOS capture and protected Apple API-key signing
+  flow from main; obsolete Python-runtime signing is not used.
 - Rust PATH discovery must preserve Windows's `Path` casing and existing tool paths:
   the wrapper updates the existing environment key.
+- Concurrent pause/resume could mix the persisted pause state and active watchers:
+  tracking transitions now serialize, with deletion generation checked after queuing.
+  Regression tests exercise both ordering and cancellation.
+- Smoke scheduler maintenance could prune backups in the normal user profile:
+  the scheduler now receives the chosen application data directory explicitly.
+
+An independent read-only code/security review approved the integrated tree with no
+confirmed critical, high, medium, or low findings remaining. The reviewer independently
+ran all 14 release-contract tests. See [CODE_REVIEW.md](CODE_REVIEW.md) for scope and limits.
 
 ## Still required before stable publication
 
@@ -51,8 +61,8 @@ provided. Windows MSI/NSIS installation and Mac Intel runtime checks are impleme
 in the release workflow but have not been executed from this checkout.
 
 Complete real OS capture/permission, upgrade, privacy, accessibility, and retention
-acceptance on the supported platforms; run the five-person, seven-day pilot; obtain
-independent code/security review. Record the final stable candidate's actual installer
+acceptance on the supported platforms; run the five-person, seven-day pilot. The stable
+candidate needs review evidence matching its final source. Record its actual installer
 hashes and source in the protected release environment's QA evidence. The publisher
 rejects missing or mismatched evidence rather than declaring these checks complete.
 

@@ -3,7 +3,8 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { releaseConfig, WINDOWS_UPGRADE_CODE } from "../../scripts/release-config.mjs";
 
-const workflow = readFileSync(new URL("../../.github/workflows/release.yml", import.meta.url), "utf8");
+// Windows checkouts may convert to CRLF; the job-splitting assertions expect LF.
+const workflow = readFileSync(new URL("../../.github/workflows/release.yml", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 const provenanceDocs = readFileSync(new URL("../../docs/RELEASE_PROVENANCE.md", import.meta.url), "utf8");
 const tauriConfig = JSON.parse(readFileSync(new URL("../../src-tauri/tauri.conf.json", import.meta.url), "utf8"));
 
@@ -18,7 +19,7 @@ test("manual release is a fail-closed beta.2 backfill", () => {
 
 test("one resolved source SHA feeds and is verified by every job", () => {
   assert.match(workflow, /source_commit: \$\{\{ steps\.resolve\.outputs\.source_commit \}\}/);
-  assert.match(workflow, /build:\s+name: Build \$\{\{ matrix\.label \}\}\s+environment: signing\s+needs: resolve/);
+  assert.match(workflow, /build:\s+name: Build \$\{\{ matrix\.label \}\}\s+needs: resolve/);
   assert.match(workflow, /release:\s+name: Publish GitHub release\s+needs: \[resolve, build\]/);
 
   const sourceCheckouts = workflow.match(/ref: \$\{\{ (?:steps\.resolve|needs\.resolve)\.outputs\.source_commit \}\}/g) ?? [];
@@ -104,20 +105,33 @@ test("Windows packaging preserves identity and orders beta and stable upgrades",
   assert.match(workflow, /run: node scripts\/release-config\.mjs/);
 });
 
-test("stable signing fails closed and beta signing remains optional", () => {
+test("macOS signing always fails closed and stable Windows requires signing", () => {
   assert.throws(() => releaseConfig("0.2.0", "darwin"), /Developer ID/);
   assert.throws(() => releaseConfig("0.2.0", "win32"), /thumbprint/);
   assert.throws(() => releaseConfig("0.2.0-beta.99", "win32"), /bounds/);
   assert.throws(() => releaseConfig("0.2.0-rc.1", "darwin"), /supported/);
-  assert.equal(releaseConfig("0.2.0-beta.1", "darwin").bundle.macOS.signingIdentity, "-");
+  assert.throws(() => releaseConfig("0.2.0-beta.1", "darwin"), /Developer ID/);
   assert.equal(releaseConfig("0.2.0", "darwin", { appleIdentity: "Developer ID Application: Test" }).bundle.macOS.signingIdentity, "Developer ID Application: Test");
-  assert.match(workflow, /environment: signing/);
-  assert.match(workflow, /Require stable signing credentials/);
-  assert.match(workflow, /Import stable macOS signing certificate/);
+  assert.match(workflow, /environment: \$\{\{ matrix\.signing_environment/);
+  assert.match(workflow, /Require stable Windows signing credentials/);
+  assert.match(workflow, /Import Developer ID and prepare notary key/);
   assert.match(workflow, /Import stable Windows signing certificate/);
-  assert.match(workflow, /Sign macOS capture runtime and refresh integrity manifest/);
+  assert.match(workflow, /Require Apple signing and notarization credentials/);
   assert.match(workflow, /Remove temporary signing files and macOS keychain/);
   assert.match(workflow, /prerelease: \$\{\{ contains\(env\.RELEASE_TAG, '-'\) \}\}/);
+});
+
+test("Apple signing secrets are reachable only through the protected macOS environment", () => {
+  const buildStart = workflow.indexOf("\n  build:");
+  const nextJob = workflow.slice(buildStart + 1).search(/\n  [a-z][a-z-]*:\n/) + buildStart + 1;
+  const build = workflow.slice(buildStart, nextJob);
+  assert.match(build, /environment: \$\{\{ matrix\.signing_environment \|\|/);
+  assert.equal(build.match(/signing_environment: macos-signing/g)?.length, 2);
+  assert.match(build, /os: windows-2022[\s\S]*?signing_environment: ''/);
+  const secretJobs = workflow.split(/\n  (?=[a-z][a-z-]*:\n)/).filter((job) => /secrets\.APPLE_/.test(job));
+  assert.equal(secretJobs.length, 1);
+  assert.ok(secretJobs[0].startsWith("build:"));
+  assert.match(build, /if: always\(\) && runner\.os == 'macOS'[\s\S]*?security delete-keychain/);
 });
 
 test("Windows verifies MSI identity through COM and enables verbose Tauri diagnostics", () => {

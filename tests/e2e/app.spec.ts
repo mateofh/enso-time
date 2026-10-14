@@ -6,10 +6,11 @@ type CaptureIssue =
   | "server-unavailable"
   | "window-watcher-unavailable"
   | "afk-watcher-unavailable"
-  | "watcher-conflict";
+  | "watcher-conflict"
+  | "accessibility-permission-required";
 
 const settings = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   onboardingCompleted: true,
   locale: "es-419",
   theme: "ink",
@@ -23,6 +24,12 @@ const settings = {
   role: "Operador de negocio digital",
   workSchedule: { start: "08:30", end: "18:00", days: [1, 2, 3, 4, 5] },
   appRules: [],
+  deepCapture: {
+    browser: { enabled: false, cloudAllowed: false }, editor: { enabled: false, cloudAllowed: false },
+    shell: { enabled: false, cloudAllowed: false }, screenshots: { enabled: false, cloudAllowed: false },
+    screenshotIntervalMinutes: 15, browserTextAllowlist: [], excludedApps: ["1Password"], excludedSites: [],
+  },
+  ai: { enabled: false, weeklyEnabled: false, weeklyDay: 1, weeklyHour: 8 },
 } as const;
 
 const pendingCheckIn = {
@@ -40,6 +47,7 @@ interface SeedOverrides {
   captureWindowTitles?: boolean;
   captureIssue?: CaptureIssue | null;
   checkIns?: unknown[];
+  experimentalIntelligence?: boolean;
 }
 
 async function seedBridge(page: Page, overrides: SeedOverrides = {}) {
@@ -57,6 +65,7 @@ async function seedBridge(page: Page, overrides: SeedOverrides = {}) {
       settings: seededSettings,
       checkIns: overrides.checkIns ?? [pendingCheckIn],
       captureIssue: overrides.captureIssue,
+      experimentalIntelligence: overrides.experimentalIntelligence,
     },
   });
 }
@@ -106,6 +115,7 @@ test("surfaces every degraded capture state without exposing an engine dashboard
     ["window-watcher-unavailable", /qué aplicación está activa/i],
     ["afk-watcher-unavailable", /cuándo te ausentas/i],
     ["watcher-conflict", /otra sesión/i],
+    ["accessibility-permission-required", /sigue registrando qué aplicación está activa/i],
   ]);
 
   for (const [captureIssue, detail] of expected) {
@@ -118,6 +128,11 @@ test("surfaces every degraded capture state without exposing an engine dashboard
     await expect(page.getByText(detail)).toBeVisible();
     await expect(page.locator(".content .status-pill")).toHaveText("Registro incompleto");
     await expect(page.getByRole("button", { name: "Volver a comprobar" })).toBeEnabled();
+    if (captureIssue === "accessibility-permission-required") {
+      await expect(page.getByRole("button", { name: "Abrir Accesibilidad" })).toBeEnabled();
+    } else {
+      await expect(page.getByRole("button", { name: "Abrir Accesibilidad" })).toHaveCount(0);
+    }
     await expect(page.locator("body")).not.toContainText("ActivityWatch");
   }
 
@@ -159,6 +174,56 @@ test("answers a check-in and clears its pending count", async ({ page, browserEr
   await expect(page.getByRole("heading", { name: "Todo tiene contexto." })).toBeVisible();
   await expect(page.getByText("Contexto guardado")).toBeVisible();
   await expect(page.getByText("Preparar el reporte mensual")).toBeVisible();
+});
+
+test("corrects an unknown session and turns the correction into a reusable rule", async ({ page, browserErrors: _browserErrors }) => {
+  await seedBridge(page, { checkIns: [] });
+  await page.goto("/");
+
+  const unknownSession = page.locator(".timeline-row").filter({ hasText: "Untitled" });
+  await unknownSession.getByRole("button", { name: "Corregir clasificación: Sin clasificar" }).click();
+  await unknownSession.getByLabel("Categoría").selectOption("learning");
+  await unknownSession.getByLabel("Nombre de actividad, opcional").fill("Investigar referencias");
+  await unknownSession.getByRole("button", { name: "Guardar esta sesión" }).click();
+
+  const correctedSession = page.locator(".timeline-row").filter({ hasText: "Investigar referencias" });
+  await expect(correctedSession.getByText("¿Aplicar también a sesiones similares?")).toBeVisible();
+  await expect(correctedSession.getByLabel("Coincidencia")).toHaveValue("app-title");
+  await expect(correctedSession.getByLabel("El título contiene")).toHaveValue("Untitled");
+  await correctedSession.getByRole("button", { name: "Crear regla" }).click();
+
+  await expect(correctedSession.getByRole("button", { name: "Corregir clasificación: Aprendizaje" })).toBeVisible();
+  const savedState = await page.evaluate((key) => JSON.parse(localStorage.getItem(key)!), STORAGE_KEY);
+  expect(savedState.classificationOverrides.b7).toMatchObject({ category: "learning", activityLabel: "Investigar referencias" });
+  expect(savedState.classificationRules).toHaveLength(1);
+  expect(savedState.classificationRules[0]).toMatchObject({
+    scope: "app-title",
+    app: "Google Chrome",
+    titlePattern: "Untitled",
+    category: "learning",
+    activityLabel: "Investigar referencias",
+  });
+
+  await page.getByRole("button", { name: "Configuración" }).click();
+  await expect(page.getByRole("heading", { name: "Reglas de clasificación" })).toBeVisible();
+  await expect(page.locator(".rule-settings-row").filter({ hasText: "Google Chrome" })).toBeVisible();
+});
+
+test("reviews an unknown group in bulk and can undo the operation", async ({ page, browserErrors: _browserErrors }) => {
+  await seedBridge(page, { checkIns: [] });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Por revisar" }).click();
+
+  const group = page.locator(".review-card").filter({ hasText: "Google Chrome" });
+  await expect(group.getByText("Untitled")).toBeVisible();
+  await group.getByLabel("Categoría").selectOption("learning");
+  await group.getByLabel("Actividad").fill("Investigar referencias");
+  await group.getByRole("button", { name: "Aplicar" }).click();
+
+  await expect(page.getByText("Se actualizó 1 sesión.")).toBeVisible();
+  await expect(page.getByText("No quedan sesiones sin clasificar en este periodo.")).toBeVisible();
+  await page.getByRole("button", { name: "Deshacer" }).click();
+  await expect(page.locator(".review-card").filter({ hasText: "Untitled" })).toBeVisible();
 });
 
 test("maps, saves, resumes, and enriches the top candidate workflow", async ({ page, browserErrors: _browserErrors }) => {
@@ -425,4 +490,38 @@ test("a hung refresh reports unknown status instead of remaining healthy", async
   await page.clock.fastForward(10_000);
   await expect(page.getByRole("alert")).toContainText("No pudimos actualizar");
   await expect(page.locator(".sidebar .status-pill")).toContainText("Registro incompleto");
+});
+
+test("release builds hide cloud evaluation and screen OCR but keep local connectors", async ({ page, browserErrors: _browserErrors }) => {
+  await seedBridge(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Configuración" }).click();
+  await expect(page.getByRole("heading", { name: "Conectores de contexto local" })).toBeVisible();
+  await expect(page.getByText("Proyecto de VS Code / Cursor")).toBeVisible();
+  await expect(page.getByText("OCR local de pantalla")).toHaveCount(0);
+  await expect(page.getByText("Permitir en resúmenes de nube aprobados")).toHaveCount(0);
+  await expect(page.getByLabel("API key de OpenRouter")).toHaveCount(0);
+  await page.getByRole("button", { name: "Automatizar" }).click();
+  await expect(page.getByRole("button", { name: "Revisar payload" })).toHaveCount(0);
+});
+
+test("previews, authorizes, and runs the independent AI evaluation", async ({ page, browserErrors: _browserErrors }) => {
+  await seedBridge(page, { experimentalIntelligence: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Configuración" }).click();
+
+  await page.getByLabel("API key de OpenRouter").fill("sk-or-v1-demo-key-for-browser-tests");
+  await page.getByRole("button", { name: "Guardar de forma segura" }).click();
+  await page.getByLabel("Modelo analista").selectOption("demo/fast-structured");
+  await page.getByLabel("Modelo evaluador").selectOption("demo/strong-structured");
+  await page.getByLabel("Límite mensual estricto (USD)").fill("5");
+  await page.getByRole("switch", { name: /Activar analista/ }).check();
+  await page.getByRole("button", { name: "Guardar cambios" }).click();
+
+  await page.getByRole("button", { name: "Automatizar" }).click();
+  await page.getByRole("button", { name: "Revisar payload" }).click();
+  await expect(page.locator(".ai-payload-preview pre")).toContainText('"schemaVersion": 1');
+  await page.getByRole("button", { name: "Autorizar esta política" }).click();
+  await page.getByRole("button", { name: "Ejecutar evaluación" }).click();
+  await expect(page.locator(".ai-report")).toContainText(/evaluador|oportunidad/i);
 });

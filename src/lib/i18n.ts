@@ -1,7 +1,7 @@
 import type { CaptureIssue, CategoryId, Locale } from "./types";
 
 interface UiCopy {
-  nav: Record<"today" | "checkins" | "study" | "automate" | "settings", string>;
+  nav: Record<"today" | "review" | "checkins" | "study" | "automate" | "settings", string>;
   common: {
     local: string;
     loading: string;
@@ -18,6 +18,7 @@ interface UiCopy {
     label: string;
     title: string;
     retry: string;
+    accessibilityAction: string;
     details: Record<CaptureIssue, string>;
   };
   onboarding: {
@@ -48,6 +49,53 @@ interface UiCopy {
     distributionHint: string;
     privateTitle: string;
     privateCopy: string;
+  };
+  review: {
+    context: string;
+    title: string;
+    intro: string;
+    range: string;
+    ranges: Record<"1" | "7" | "30" | "all", string>;
+    loading: string;
+    empty: string;
+    sessions: (count: number) => string;
+    period: (start: string, end: string) => string;
+    pattern: string;
+    noTitle: string;
+    category: string;
+    activity: string;
+    activityPlaceholder: string;
+    sessionsOnly: string;
+    createRule: string;
+    apply: string;
+    fallbackWarning: string;
+    undo: string;
+    applied: (count: number) => string;
+  };
+  classification: {
+    edit: string;
+    editorTitle: string;
+    category: string;
+    activityLabel: string;
+    activityPlaceholder: string;
+    saveSession: string;
+    restore: string;
+    cancel: string;
+    suggestionTitle: string;
+    suggestionCopy: string;
+    scope: string;
+    appScope: string;
+    titleScope: string;
+    pattern: string;
+    impact: (sessions: number, duration: string) => string;
+    createRule: string;
+    skipRule: string;
+    rulesTitle: string;
+    rulesHint: string;
+    noRules: string;
+    saveRule: string;
+    deleteRule: string;
+    legacyScope: string;
   };
   checkins: {
     title: string;
@@ -252,17 +300,19 @@ const categories = {
 
 const copy: Record<Locale, UiCopy> = {
   "es-419": {
-    nav: { today: "Hoy", checkins: "Check-ins", study: "Estudio", automate: "Automatizar", settings: "Configuración" },
+    nav: { today: "Hoy", review: "Por revisar", checkins: "Check-ins", study: "Estudio", automate: "Automatizar", settings: "Configuración" },
     common: { local: "Solo en este equipo", loading: "Organizando tu tiempo…", retry: "Intentar de nuevo", running: "Registrando", paused: "En pausa", degraded: "Registro incompleto", saved: "Guardado", trackingActionError: "No pudimos cambiar el seguimiento desde la bandeja. Revisa el estado actual e intenta de nuevo.", refreshError: "No pudimos actualizar los datos ni confirmar el estado actual. Volveremos a intentar; tus cambios siguen en pantalla.", unexpectedError: "No pudimos completar la acción. Intenta de nuevo." },
     captureIssue: {
       label: "Atención del registro",
       title: "Ensō Time no está registrando todo.",
       retry: "Volver a comprobar",
+      accessibilityAction: "Abrir Accesibilidad",
       details: {
         "server-unavailable": "El motor local no responde. Reinicia Ensō Time y vuelve a comprobar; tu información guardada permanece en este equipo.",
         "window-watcher-unavailable": "No podemos ver qué aplicación está activa. Revisa los permisos de Ensō Time en el sistema y vuelve a comprobar.",
         "afk-watcher-unavailable": "No podemos distinguir cuándo te ausentas. Mantén Ensō Time abierto y vuelve a comprobar para recuperar ese contexto.",
         "watcher-conflict": "Hay otra sesión intentando registrar este equipo. Cierra la sesión duplicada y vuelve a comprobar.",
+        "accessibility-permission-required": "Ensō Time sigue registrando qué aplicación está activa, pero omite los títulos. Pulsa Abrir Accesibilidad, activa Ensō Time y vuelve a la aplicación; la captura completa se recuperará automáticamente.",
       },
     },
     onboarding: {
@@ -276,6 +326,53 @@ const copy: Record<Locale, UiCopy> = {
     },
     today: {
       dateLabel: "Resumen de hoy", title: "Así se ve tu día.", observed: (duration) => `${duration} observados · la información sigue en este equipo.`, pause: "Pausar 30 min", resume: "Reanudar", missingTitle: "Falta contexto en un intervalo", missingCopy: (start, end) => `${start}–${end} · responder toma menos de 20 segundos`, timeline: "Línea de tiempo", timelineHint: "Registro continuo", emptyTimeline: "Aún no hay actividad registrada hoy.", distribution: "En qué se fue", distributionHint: "Distribución", privateTitle: "Privado por diseño", privateCopy: "Aplicaciones y títulos de ventana permanecen locales.",
+    },
+    review: {
+      context: "Calidad del registro",
+      title: "Por revisar",
+      intro: "Agrupa el tiempo sin clasificar para corregir varias sesiones sin revisar cada fila.",
+      range: "Periodo",
+      ranges: { "1": "Hoy", "7": "7 días", "30": "30 días", all: "Todo lo retenido" },
+      loading: "Buscando sesiones sin clasificar…",
+      empty: "No quedan sesiones sin clasificar en este periodo.",
+      sessions: (count) => `${count} ${count === 1 ? "sesión" : "sesiones"}`,
+      period: (start, end) => `${start} – ${end}`,
+      pattern: "Patrón de título",
+      noTitle: "Sin título disponible",
+      category: "Categoría",
+      activity: "Actividad",
+      activityPlaceholder: "Ej. Investigación de clientes",
+      sessionsOnly: "Sólo estas sesiones",
+      createRule: "Crear regla para similares",
+      apply: "Aplicar",
+      fallbackWarning: "Esta regla se aplicará a todo el uso de este navegador cuando no haya un título más específico. ¿Quieres continuar?",
+      undo: "Deshacer",
+      applied: (count) => count === 1 ? "Se actualizó 1 sesión." : `Se actualizaron ${count} sesiones.`,
+    },
+    classification: {
+      edit: "Corregir clasificación",
+      editorTitle: "Corregir esta sesión",
+      category: "Categoría",
+      activityLabel: "Nombre de actividad, opcional",
+      activityPlaceholder: "Ej. Preparar propuesta",
+      saveSession: "Guardar esta sesión",
+      restore: "Restaurar clasificación automática",
+      cancel: "Cancelar",
+      suggestionTitle: "¿Aplicar también a sesiones similares?",
+      suggestionCopy: "La corrección ya quedó guardada. Esta regla solo se creará si la confirmas.",
+      scope: "Coincidencia",
+      appScope: "Toda la aplicación",
+      titleScope: "Aplicación y título",
+      pattern: "El título contiene",
+      impact: (sessions, duration) => `${sessions} sesiones · ${duration} retenidos`,
+      createRule: "Crear regla",
+      skipRule: "Solo esta sesión",
+      rulesTitle: "Reglas de clasificación",
+      rulesHint: "Tus reglas locales ganan sobre las categorías sugeridas por Ensō Time.",
+      noRules: "Aún no has confirmado reglas de clasificación.",
+      saveRule: "Guardar regla",
+      deleteRule: "Eliminar regla",
+      legacyScope: "Regla migrada",
     },
     checkins: {
       title: "Completa los huecos.", intro: "Ensō Time pregunta solo cuando las aplicaciones no cuentan toda la historia.", pending: (count) => count === 1 ? "1 intervalo pendiente" : `${count} intervalos pendientes`, afk: "No detectamos actividad", ambiguous: "No pudimos clasificar este intervalo", activity: "¿Qué estabas haciendo?", activityPlaceholder: "Ej. Actualizar el reporte semanal", category: "Categoría", project: "Proyecto, opcional", projectPlaceholder: "Ej. Operación", repetitive: "Es una tarea repetitiva", repetitiveHint: "Ayuda a encontrar candidatos para automatizar.", rules: "Sigue reglas claras", rulesHint: "Hay poca decisión subjetiva en el proceso.", save: "Guardar contexto", allDone: "Todo tiene contexto.", allDoneCopy: "No hay preguntas pendientes. Puedes seguir con tu día.", history: "Respondidos recientemente",
@@ -352,17 +449,19 @@ const copy: Record<Locale, UiCopy> = {
     notices: { settingsSaved: "Configuración guardada", contextSaved: "Contexto guardado", paused: "Registro pausado por 30 minutos", resumed: "Registro reanudado", diagnosticUpdated: "Diagnóstico actualizado", promptCopied: "Prompt copiado", exported: (path) => `Exportado en ${path}`, deleted: "Datos eliminados" },
   },
   en: {
-    nav: { today: "Today", checkins: "Check-ins", study: "Study", automate: "Automate", settings: "Settings" },
+    nav: { today: "Today", review: "To review", checkins: "Check-ins", study: "Study", automate: "Automate", settings: "Settings" },
     common: { local: "Only on this device", loading: "Organizing your time…", retry: "Try again", running: "Tracking", paused: "Paused", degraded: "Incomplete tracking", saved: "Saved", trackingActionError: "Could not change tracking from the tray. Check the current status and try again.", refreshError: "We could not refresh the data or confirm the current status. We will retry; your edits remain on screen.", unexpectedError: "We couldn't complete that action. Try again." },
     captureIssue: {
       label: "Tracking needs attention",
       title: "Ensō Time is not capturing everything.",
       retry: "Check again",
+      accessibilityAction: "Open Accessibility",
       details: {
         "server-unavailable": "The local engine is not responding. Restart Ensō Time and check again; your saved information stays on this device.",
         "window-watcher-unavailable": "We cannot see which app is active. Review Ensō Time's system permissions, then check again.",
         "afk-watcher-unavailable": "We cannot tell when you are away. Keep Ensō Time open and check again to restore that context.",
         "watcher-conflict": "Another session is trying to track this device. Close the duplicate session, then check again.",
+        "accessibility-permission-required": "Ensō Time is still recording the active application, but omits window titles. Open Accessibility, enable Ensō Time, and return to the app; full capture will recover automatically.",
       },
     },
     onboarding: {
@@ -376,6 +475,53 @@ const copy: Record<Locale, UiCopy> = {
     },
     today: {
       dateLabel: "Today's summary", title: "This is how your day looks.", observed: (duration) => `${duration} observed · the information stays on this device.`, pause: "Pause for 30 min", resume: "Resume", missingTitle: "One interval needs context", missingCopy: (start, end) => `${start}–${end} · answering takes less than 20 seconds`, timeline: "Timeline", timelineHint: "Continuous record", emptyTimeline: "No activity has been recorded today yet.", distribution: "Where it went", distributionHint: "Distribution", privateTitle: "Private by design", privateCopy: "App names and window titles remain local.",
+    },
+    review: {
+      context: "Tracking quality",
+      title: "To review",
+      intro: "Groups unclassified time so you can correct many sessions without reviewing every row.",
+      range: "Period",
+      ranges: { "1": "Today", "7": "7 days", "30": "30 days", all: "All retained data" },
+      loading: "Finding unclassified sessions…",
+      empty: "There are no unclassified sessions left in this period.",
+      sessions: (count) => `${count} ${count === 1 ? "session" : "sessions"}`,
+      period: (start, end) => `${start} – ${end}`,
+      pattern: "Title pattern",
+      noTitle: "No title available",
+      category: "Category",
+      activity: "Activity",
+      activityPlaceholder: "E.g. Customer research",
+      sessionsOnly: "Only these sessions",
+      createRule: "Create rule for similar sessions",
+      apply: "Apply",
+      fallbackWarning: "This rule will apply to all use of this browser whenever no more specific title is available. Continue?",
+      undo: "Undo",
+      applied: (count) => count === 1 ? "1 session was updated." : `${count} sessions were updated.`,
+    },
+    classification: {
+      edit: "Correct classification",
+      editorTitle: "Correct this session",
+      category: "Category",
+      activityLabel: "Activity name, optional",
+      activityPlaceholder: "E.g. Preparing a proposal",
+      saveSession: "Save this session",
+      restore: "Restore automatic classification",
+      cancel: "Cancel",
+      suggestionTitle: "Apply this to similar sessions too?",
+      suggestionCopy: "The session correction is already saved. The rule is created only if you confirm it.",
+      scope: "Match",
+      appScope: "Entire app",
+      titleScope: "App and title",
+      pattern: "Title contains",
+      impact: (sessions, duration) => `${sessions} sessions · ${duration} retained`,
+      createRule: "Create rule",
+      skipRule: "Only this session",
+      rulesTitle: "Classification rules",
+      rulesHint: "Your local rules take priority over categories suggested by Ensō Time.",
+      noRules: "You have not confirmed any classification rules yet.",
+      saveRule: "Save rule",
+      deleteRule: "Delete rule",
+      legacyScope: "Migrated rule",
     },
     checkins: {
       title: "Fill in the gaps.", intro: "Ensō Time only asks when apps don't tell the whole story.", pending: (count) => count === 1 ? "1 pending interval" : `${count} pending intervals`, afk: "No activity was detected", ambiguous: "We couldn't classify this interval", activity: "What were you doing?", activityPlaceholder: "E.g. Updating the weekly report", category: "Category", project: "Project, optional", projectPlaceholder: "E.g. Operations", repetitive: "This is a repetitive task", repetitiveHint: "Helps identify automation candidates.", rules: "It follows clear rules", rulesHint: "There is little subjective judgment in the process.", save: "Save context", allDone: "Everything has context.", allDoneCopy: "There are no pending questions. You can get back to your day.", history: "Recently answered",

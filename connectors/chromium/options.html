@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="es">
+  <head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Ensō Time Context</title><link rel="stylesheet" href="options.css"></head>
+  <body>
+    <main>
+      <h1>Ensō Time Context</h1>
+      <p>Abre Ensō Time, habilita Navegador y genera un código de emparejamiento.</p>
+      <label>Código de ocho dígitos <input id="code" inputmode="numeric" maxlength="8" autocomplete="one-time-code"></label>
+      <label>Puerto mostrado por Ensō <input id="port" type="number" min="5610" max="5699" placeholder="Se detecta automáticamente"></label>
+      <button id="pair">Emparejar</button>
+      <hr>
+      <label>Sitios donde puede leer texto visible <textarea id="sites" rows="6" placeholder="notion.so&#10;docs.google.com"></textarea></label>
+      <small>En los demás sitios solo se guardan el título y el dominio. Incógnito nunca se registra.</small>
+      <label class="toggle"><input id="enabled" type="checkbox"> Seguimiento habilitado</label>
+      <button id="save">Guardar política</button>
+      <p id="status" role="status"></p>
+    </main>
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

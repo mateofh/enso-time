@@ -32,6 +32,297 @@ pub struct AppRule {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SourcePolicyV2 {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub cloud_allowed: bool,
+}
+
+impl Default for SourcePolicyV2 {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            cloud_allowed: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeepCaptureSettingsV2 {
+    #[serde(default)]
+    pub browser: SourcePolicyV2,
+    #[serde(default)]
+    pub editor: SourcePolicyV2,
+    #[serde(default)]
+    pub shell: SourcePolicyV2,
+    #[serde(default)]
+    pub screenshots: SourcePolicyV2,
+    #[serde(default = "default_screenshot_interval")]
+    pub screenshot_interval_minutes: u16,
+    #[serde(default)]
+    pub browser_text_allowlist: Vec<String>,
+    #[serde(default)]
+    pub excluded_apps: Vec<String>,
+    #[serde(default)]
+    pub excluded_sites: Vec<String>,
+}
+
+fn default_screenshot_interval() -> u16 {
+    15
+}
+
+impl Default for DeepCaptureSettingsV2 {
+    fn default() -> Self {
+        Self {
+            browser: SourcePolicyV2::default(),
+            editor: SourcePolicyV2::default(),
+            shell: SourcePolicyV2::default(),
+            screenshots: SourcePolicyV2::default(),
+            screenshot_interval_minutes: default_screenshot_interval(),
+            browser_text_allowlist: Vec::new(),
+            excluded_apps: vec![
+                "1Password".into(),
+                "Bitwarden".into(),
+                "Passwords".into(),
+                "Keychain Access".into(),
+            ],
+            excluded_sites: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiSettingsV2 {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub analyst_model: Option<String>,
+    #[serde(default)]
+    pub evaluator_model: Option<String>,
+    #[serde(default)]
+    pub monthly_budget_usd: Option<f64>,
+    #[serde(default)]
+    pub weekly_enabled: bool,
+    #[serde(default = "default_weekly_day")]
+    pub weekly_day: u8,
+    #[serde(default = "default_weekly_hour")]
+    pub weekly_hour: u8,
+}
+
+fn default_weekly_day() -> u8 {
+    1
+}
+
+fn default_weekly_hour() -> u8 {
+    8
+}
+
+impl Default for AiSettingsV2 {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            analyst_model: None,
+            evaluator_model: None,
+            monthly_budget_usd: None,
+            weekly_enabled: false,
+            weekly_day: default_weekly_day(),
+            weekly_hour: default_weekly_hour(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClassificationRuleV1 {
+    pub id: String,
+    pub scope: String,
+    pub app: String,
+    pub title_pattern: Option<String>,
+    pub category: String,
+    pub activity_label: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl ClassificationRuleV1 {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_identifier(&self.id, "El id de la regla")?;
+        if !matches!(self.scope.as_str(), "app" | "app-title" | "legacy") {
+            return Err("El alcance de la regla no es válido".into());
+        }
+        validate_required_text(&self.app, 256, "La aplicación de la regla")?;
+        match (self.scope.as_str(), self.title_pattern.as_deref()) {
+            ("app", None) => {}
+            ("legacy", None) => {}
+            ("app-title", Some(pattern)) => {
+                validate_required_text(pattern, 256, "El patrón de título")?;
+            }
+            ("app", Some(_)) | ("legacy", Some(_)) => {
+                return Err("Una regla de aplicación no debe incluir título".into())
+            }
+            ("app-title", None) => {
+                return Err("Una regla de aplicación y título requiere un patrón".into())
+            }
+            _ => unreachable!(),
+        }
+        validate_rule_category(&self.category)?;
+        if let Some(label) = self.activity_label.as_deref() {
+            validate_required_text(label, 200, "La etiqueta de actividad")?;
+        }
+        let created_at = parse_utc(&self.created_at)?;
+        let updated_at = parse_utc(&self.updated_at)?;
+        if updated_at < created_at {
+            return Err("updatedAt no puede ser anterior a createdAt".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClassificationOverrideV1 {
+    pub block_id: String,
+    pub event_start: String,
+    pub event_end: String,
+    pub category: String,
+    pub activity_label: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionClassificationInputV1 {
+    pub block_id: String,
+    pub category: String,
+    pub activity_label: Option<String>,
+}
+
+impl SessionClassificationInputV1 {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.block_id.is_empty()
+            || self.block_id.chars().count() > 512
+            || self.block_id.chars().any(char::is_control)
+        {
+            return Err("La sesión no es válida".into());
+        }
+        validate_session_category(&self.category)?;
+        if let Some(label) = self.activity_label.as_deref() {
+            validate_required_text(label, 200, "La etiqueta de actividad")?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleImpactV1 {
+    pub sessions: usize,
+    pub duration_seconds: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleSuggestionV1 {
+    pub rule: ClassificationRuleV1,
+    pub impact: RuleImpactV1,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionClassificationResultV1 {
+    pub block: TimelineBlockV1,
+    pub suggestion: Option<RuleSuggestionV1>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewGroupV1 {
+    pub id: String,
+    pub app: String,
+    pub title_pattern: Option<String>,
+    pub sample_title: Option<String>,
+    pub sessions: usize,
+    pub duration_seconds: i64,
+    pub first_seen: String,
+    pub last_seen: String,
+    pub browser_fallback: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyReviewGroupInputV1 {
+    pub from: String,
+    pub to: String,
+    pub app: String,
+    pub title_pattern: Option<String>,
+    pub category: String,
+    pub activity_label: Option<String>,
+    pub mode: String,
+}
+
+impl ApplyReviewGroupInputV1 {
+    pub fn validate(&self) -> Result<(), String> {
+        let from = parse_utc(&self.from)?;
+        let to = parse_utc(&self.to)?;
+        if to <= from || to - from > chrono::Duration::days(366) {
+            return Err("El periodo de revisión no es válido".into());
+        }
+        validate_required_text(&self.app, 256, "La aplicación")?;
+        if let Some(pattern) = self.title_pattern.as_deref() {
+            validate_required_text(pattern, 256, "El patrón de título")?;
+        }
+        if !matches!(self.mode.as_str(), "sessions" | "rule") {
+            return Err("La acción de revisión no es válida".into());
+        }
+        if self.mode == "rule" {
+            validate_rule_category(&self.category)?;
+        } else {
+            validate_session_category(&self.category)?;
+        }
+        if let Some(label) = self.activity_label.as_deref() {
+            validate_required_text(label, 200, "La etiqueta de actividad")?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewOperationV1 {
+    pub id: String,
+    pub mode: String,
+    pub affected_sessions: usize,
+    pub block_ids: Vec<String>,
+    pub rule_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UndoReviewOperationInputV1 {
+    pub block_ids: Vec<String>,
+    pub rule_id: Option<String>,
+}
+
+pub fn validate_session_category(value: &str) -> Result<(), String> {
+    if !is_category(value) || value == "unknown" {
+        return Err("La categoría de clasificación no es válida".into());
+    }
+    Ok(())
+}
+
+pub fn validate_rule_category(value: &str) -> Result<(), String> {
+    if !is_category(value) || matches!(value, "unknown" | "break") {
+        return Err("La categoría de clasificación no es válida".into());
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SettingsV1 {
     pub schema_version: u8,
     pub onboarding_completed: bool,
@@ -47,12 +338,16 @@ pub struct SettingsV1 {
     pub role: String,
     pub work_schedule: WorkSchedule,
     pub app_rules: Vec<AppRule>,
+    #[serde(default)]
+    pub deep_capture: DeepCaptureSettingsV2,
+    #[serde(default)]
+    pub ai: AiSettingsV2,
 }
 
 impl Default for SettingsV1 {
     fn default() -> Self {
         Self {
-            schema_version: 1,
+            schema_version: 2,
             onboarding_completed: false,
             locale: "es-419".into(),
             theme: "ink".into(),
@@ -70,13 +365,15 @@ impl Default for SettingsV1 {
                 days: vec![1, 2, 3, 4, 5],
             },
             app_rules: vec![],
+            deep_capture: DeepCaptureSettingsV2::default(),
+            ai: AiSettingsV2::default(),
         }
     }
 }
 
 impl SettingsV1 {
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema_version != 1 {
+        if self.schema_version != 2 {
             return Err("La versión de configuración no es compatible".into());
         }
         if !matches!(self.cadence_minutes, 15 | 30 | 60) {
@@ -123,8 +420,95 @@ impl SettingsV1 {
                 return Err("Hay una regla de aplicación inválida".into());
             }
         }
+        if !matches!(
+            self.deep_capture.screenshot_interval_minutes,
+            5 | 15 | 30 | 60
+        ) {
+            return Err("El intervalo de capturas debe ser 5, 15, 30 o 60 minutos".into());
+        }
+        if self.deep_capture.browser_text_allowlist.len() > 250
+            || self.deep_capture.excluded_sites.len() > 250
+        {
+            return Err("La política contiene demasiados sitios".into());
+        }
+        for value in self
+            .deep_capture
+            .browser_text_allowlist
+            .iter()
+            .chain(self.deep_capture.excluded_sites.iter())
+        {
+            if value.trim().is_empty()
+                || value.chars().count() > 253
+                || value.chars().any(char::is_control)
+            {
+                return Err("La política de sitios contiene un dominio inválido".into());
+            }
+        }
+        if self.deep_capture.excluded_apps.len() > 250
+            || self
+                .deep_capture
+                .excluded_apps
+                .iter()
+                .any(|value| value.trim().is_empty() || value.chars().count() > 256)
+        {
+            return Err("La política de aplicaciones excluidas no es válida".into());
+        }
+        if self.ai.weekly_day > 6 || self.ai.weekly_hour > 23 {
+            return Err("La agenda semanal de IA no es válida".into());
+        }
+        if self
+            .ai
+            .analyst_model
+            .as_ref()
+            .is_some_and(|value| !valid_model_slug(value))
+            || self
+                .ai
+                .evaluator_model
+                .as_ref()
+                .is_some_and(|value| !valid_model_slug(value))
+        {
+            return Err("El identificador de modelo de OpenRouter no es válido".into());
+        }
+        if self.ai.enabled {
+            let analyst = self
+                .ai
+                .analyst_model
+                .as_deref()
+                .ok_or("Selecciona un modelo analista")?;
+            let evaluator = self
+                .ai
+                .evaluator_model
+                .as_deref()
+                .ok_or("Selecciona un modelo evaluador")?;
+            if analyst == evaluator {
+                return Err("El analista y el evaluador deben ser modelos distintos".into());
+            }
+            if !self
+                .ai
+                .monthly_budget_usd
+                .is_some_and(|value| value.is_finite() && value > 0.0 && value <= 10_000.0)
+            {
+                return Err("Define un presupuesto mensual de IA mayor que cero".into());
+            }
+        } else if self
+            .ai
+            .monthly_budget_usd
+            .is_some_and(|value| !value.is_finite() || value <= 0.0 || value > 10_000.0)
+        {
+            return Err("El presupuesto mensual de IA no es válido".into());
+        }
         Ok(())
     }
+}
+
+fn valid_model_slug(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && value.chars().count() <= 200
+        && value.contains('/')
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | '/' | ':')
+        })
 }
 
 fn validate_clock(value: &str) -> Result<(), String> {
@@ -150,6 +534,7 @@ pub enum CaptureIssueCode {
     WindowWatcherUnavailable,
     AfkWatcherUnavailable,
     WatcherConflict,
+    AccessibilityPermissionRequired,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -163,8 +548,11 @@ pub struct TrackingStatus {
     pub last_event_at: Option<String>,
     pub pending_check_ins: usize,
     pub data_stays_local: bool,
+    pub processing_mode: String,
+    pub last_cloud_run_at: Option<String>,
     pub capture_issue: Option<CaptureIssueCode>,
     pub native_action_error: Option<String>,
+    pub experimental_intelligence: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -176,11 +564,15 @@ pub struct TimelineBlockV1 {
     pub duration_seconds: i64,
     pub app: String,
     pub title: Option<String>,
+    pub activity_label: Option<String>,
     pub category: String,
     pub confidence: f64,
     pub afk: bool,
     pub source: String,
     pub check_in_id: Option<String>,
+    pub classification_source: String,
+    pub rule_id: Option<String>,
+    pub correctable: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -468,6 +860,8 @@ pub struct ExportEnvelope {
     pub timeline: Vec<ExportTimelineBlockV2>,
     pub workflows: Vec<WorkflowIntakeV1>,
     pub automation_blueprints: Vec<crate::blueprint::AutomationBlueprintV1>,
+    pub classification_rules: Vec<ClassificationRuleV1>,
+    pub classification_overrides: Vec<ClassificationOverrideV1>,
     pub deletion_boundary: String,
 }
 
@@ -479,11 +873,14 @@ pub struct ExportTimelineBlockV2 {
     pub end: String,
     pub duration_seconds: i64,
     pub app: String,
+    pub activity_label: Option<String>,
     pub category: String,
     pub confidence: f64,
     pub afk: bool,
     pub source: String,
     pub check_in_id: Option<String>,
+    pub classification_source: String,
+    pub rule_id: Option<String>,
 }
 
 impl From<&TimelineBlockV1> for ExportTimelineBlockV2 {
@@ -494,11 +891,14 @@ impl From<&TimelineBlockV1> for ExportTimelineBlockV2 {
             end: value.end.clone(),
             duration_seconds: value.duration_seconds,
             app: value.app.clone(),
+            activity_label: value.activity_label.clone(),
             category: value.category.clone(),
             confidence: value.confidence,
             afk: value.afk,
             source: value.source.clone(),
             check_in_id: value.check_in_id.clone(),
+            classification_source: value.classification_source.clone(),
+            rule_id: value.rule_id.clone(),
         }
     }
 }
@@ -550,6 +950,10 @@ mod tests {
                 "afk-watcher-unavailable",
             ),
             (CaptureIssueCode::WatcherConflict, "watcher-conflict"),
+            (
+                CaptureIssueCode::AccessibilityPermissionRequired,
+                "accessibility-permission-required",
+            ),
         ];
         for (code, expected) in cases {
             assert_eq!(

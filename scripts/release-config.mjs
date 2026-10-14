@@ -6,8 +6,8 @@ export function releaseConfig(version, platform, signing = {}) {
   if (!match) throw new Error("Only stable and beta.N release versions are supported");
   const stable = match[4] === undefined;
   if (platform === "darwin") {
-    if (stable && !signing.appleIdentity?.startsWith("Developer ID Application:")) throw new Error("Stable macOS releases require a Developer ID signing identity");
-    return { bundle: { macOS: { signingIdentity: stable ? signing.appleIdentity : "-" } } };
+    if (!signing.appleIdentity?.startsWith("Developer ID Application:")) throw new Error("Stable macOS releases require a Developer ID signing identity");
+    return { bundle: { macOS: { signingIdentity: signing.appleIdentity } } };
   }
   if (platform === "win32") {
     if (stable && !/^[0-9a-f]{40}$/i.test(signing.windowsThumbprint ?? "")) throw new Error("Stable Windows releases require a signing certificate thumbprint");
