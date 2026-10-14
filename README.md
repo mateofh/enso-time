@@ -11,6 +11,10 @@ diagnostic prompt you can paste into ChatGPT or Claude.
 > [PolyForm Noncommercial License 1.0.0](LICENSE). Commercial use requires a separate
 > written agreement; see [Commercial licensing](COMMERCIAL.md).
 
+The current source targets the **`0.2.0` stable candidate**, which has not been
+published or approved for stable distribution. The latest published version remains
+`v0.2.0-beta.1`. See the [candidate acceptance plan](docs/STABLE_CANDIDATE.md).
+
 The product is an independent Ensō application. It uses selected ActivityWatch capture
 and server components under MPL-2.0; it is not an official ActivityWatch distribution.
 
@@ -89,8 +93,10 @@ Authenticode.
 
 Release macOS applications are signed with Developer ID, notarized by Apple, and shipped
 in a DMG with a stapled notarization ticket. The release workflow fails closed when any
-required Apple credential is missing. Windows MSI and NSIS installers remain unsigned,
-so SmartScreen may warn. In every case, verify the published checksum and provenance.
+required Apple credential is missing. Published Windows beta installers are unsigned,
+so SmartScreen may warn. Stable Windows installers require Authenticode signing and
+signature verification before publication. In every case, verify the published checksum
+and provenance.
 
 ### First-run permissions
 

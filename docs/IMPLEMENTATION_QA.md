@@ -1,8 +1,9 @@
 # Implementation validation
 
-This record covers the modified local workspace for the stable-release preparation.
-The application remains `0.2.0-beta.1`; this record is not approval to publish a stable
-release. Validation below ran on the integrated working tree before the merge commit;
+This historical record covers the release hardening work validated as `0.2.0-beta.1`.
+It is not approval to publish a stable release. The subsequent `0.2.0` source candidate
+and its acceptance requirements are tracked in [STABLE_CANDIDATE.md](STABLE_CANDIDATE.md).
+Validation below ran on the integrated working tree before the merge commit;
 the generated report records that tree as dirty. CI validates the pushed commit separately.
 
 ## Completed checks
