@@ -2,6 +2,7 @@ mod activitywatch;
 mod blueprint;
 #[cfg(test)]
 mod calibration;
+mod capture_health;
 mod case_refs;
 mod commands;
 mod connectors;

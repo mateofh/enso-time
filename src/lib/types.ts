@@ -268,6 +268,19 @@ export interface ObservedEvidenceV1 {
   cases?: number;
 }
 
+export interface CaptureHealthV1 {
+  activeSeconds: number;
+  unknownShare: number;
+  topUnknown: { app: string; seconds: number }[];
+  titles: "off" | "missing" | "ok" | "insufficient";
+  titledShare: number;
+  /** Missing titles are fixed by granting Accessibility (macOS only). */
+  accessibilityFix: boolean;
+  browserSeconds: number;
+  browserDomainShare: number;
+  browserConnector: "not-paired" | "not-reporting" | "ok" | "insufficient";
+}
+
 export interface HandoffV1 {
   from: string;
   to: string;
@@ -387,6 +400,8 @@ export interface DiagnosticV1 {
   candidates: AutomationCandidateV1[];
   /** Most repeated app/site handoffs inside work episodes. Absent in older payloads. */
   handoffs?: HandoffV1[];
+  /** How complete the captured data is. Native only; absent in older payloads. */
+  captureHealth?: CaptureHealthV1;
   prompt: string;
   preliminary: boolean;
   generatedAt: string;

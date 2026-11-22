@@ -119,11 +119,48 @@ pub fn dominant_context(
     block_end: DateTime<Utc>,
     observations: &[ParsedObservation<'_>],
 ) -> BlockContext {
+    context_totals(app, block_start, block_end, observations)
+        .into_iter()
+        .max_by_key(|(_, total)| *total)
+        .map(|(observation, _)| BlockContext {
+            domain: observation.domain.clone(),
+            project: observation
+                .project
+                .clone()
+                .or_else(|| observation.repository.clone()),
+        })
+        .unwrap_or_default()
+}
+
+/// Seconds of the block actually covered by a live connector observation (each one holds
+/// until the next or for `CONTEXT_MAX_HOLD_SECONDS`), so one stale report does not count
+/// for an hour-long block.
+pub fn context_covered_seconds(
+    app: &str,
+    block_start: DateTime<Utc>,
+    block_end: DateTime<Utc>,
+    observations: &[ParsedObservation<'_>],
+) -> i64 {
+    context_totals(app, block_start, block_end, observations)
+        .iter()
+        .filter(|(observation, _)| observation.domain.is_some() || observation.project.is_some())
+        .map(|(_, total)| *total)
+        .sum::<i64>()
+        / 1000
+}
+
+/// Milliseconds of the block covered by each distinct context.
+fn context_totals<'a>(
+    app: &str,
+    block_start: DateTime<Utc>,
+    block_end: DateTime<Utc>,
+    observations: &[ParsedObservation<'a>],
+) -> Vec<(&'a ContextObservationV2, i64)> {
     let Some(source) = context_source_for_app(app) else {
-        return BlockContext::default();
+        return Vec::new();
     };
     if block_end <= block_start {
-        return BlockContext::default();
+        return Vec::new();
     }
     let lookback = block_start - Duration::seconds(CONTEXT_LOOKBACK_SECONDS);
     let first = observations.partition_point(|item| item.observed_at < lookback);
@@ -156,16 +193,6 @@ pub fn dominant_context(
         }
     }
     totals
-        .into_iter()
-        .max_by_key(|(_, total)| *total)
-        .map(|(observation, _)| BlockContext {
-            domain: observation.domain.clone(),
-            project: observation
-                .project
-                .clone()
-                .or_else(|| observation.repository.clone()),
-        })
-        .unwrap_or_default()
 }
 
 fn context_key(observation: &ContextObservationV2) -> (Option<&str>, Option<&str>) {

@@ -89,6 +89,18 @@ export const demoObserved = {
   cases: 3,
 };
 
+export const demoCaptureHealth = {
+  activeSeconds: 6 * 3600,
+  unknownShare: 0.31,
+  topUnknown: [{ app: "microsoft edge", seconds: 2 * 3600 }, { app: "preview", seconds: 600 }],
+  titles: "missing" as const,
+  titledShare: 0,
+  accessibilityFix: true,
+  browserSeconds: 2 * 3600,
+  browserDomainShare: 0,
+  browserConnector: "not-paired" as const,
+};
+
 export const demoHandoffs = [
   { from: "mail.google.com", to: "excel", count: 4 },
   { from: "excel", to: "app.hubspot.com", count: 3 },

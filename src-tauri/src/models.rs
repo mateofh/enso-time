@@ -921,6 +921,9 @@ pub struct DiagnosticV1 {
     pub candidates: Vec<AutomationCandidateV1>,
     /// Most repeated app/site handoffs inside work episodes.
     pub handoffs: Vec<crate::episodes::HandoffV1>,
+    /// How complete the captured data is and what to fix; set by the native command.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture_health: Option<crate::capture_health::CaptureHealthV1>,
     pub prompt: String,
     pub preliminary: bool,
     pub generated_at: String,

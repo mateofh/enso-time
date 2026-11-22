@@ -167,6 +167,17 @@ interface UiCopy {
     handoffsTitle: string;
     handoffsHint: string;
     handoffCount: (count: number) => string;
+    healthTitle: string;
+    healthHint: string;
+    healthTitles: string;
+    healthTitlesStatus: Record<"off" | "missing" | "ok" | "insufficient", string>;
+    healthTitlesFix: string;
+    healthBrowser: string;
+    healthBrowserStatus: (status: "not-paired" | "not-reporting" | "ok" | "insufficient", share: number) => string;
+    healthBrowserFix: string;
+    healthUnknown: string;
+    healthUnknownStatus: (share: number, apps: string) => string;
+    healthAccessibility: string;
     openChatGpt: string;
     openClaude: string;
     outboundNotice: string;
@@ -414,6 +425,17 @@ const copy: Record<Locale, UiCopy> = {
       handoffsTitle: "Traspasos más repetidos",
       handoffsHint: "Saltos entre aplicaciones o sitios dentro de una misma tarea. Son candidatos a integrar.",
       handoffCount: (count) => `${count} veces`,
+      healthTitle: "Calidad de los datos",
+      healthHint: "Qué le falta a la captura para mapear tus procesos y cómo completarlo.",
+      healthTitles: "Títulos de ventana",
+      healthTitlesStatus: { off: "Desactivados en Configuración. Sin títulos no hay reglas por título ni casos.", missing: "Activados, pero no están llegando.", ok: "Llegando con normalidad.", insufficient: "Todavía hay poca actividad para evaluarlos." },
+      healthTitlesFix: "Da a Ensō Time el permiso de Accesibilidad en macOS.",
+      healthBrowser: "Sitios del navegador",
+      healthBrowserStatus: (status, share) => ({ "not-paired": "La extensión no está emparejada: el navegador cuenta como una sola app.", "not-reporting": `La extensión está emparejada, pero solo identifica el sitio en el ${share}% del tiempo.`, ok: `Se identifica el sitio en el ${share}% del tiempo de navegador.`, insufficient: "Todavía hay poco uso del navegador para evaluarlo." })[status],
+      healthBrowserFix: "En Configuración, empareja la extensión de Chromium y déjala activa.",
+      healthUnknown: "Sin clasificar",
+      healthUnknownStatus: (share, apps) => apps ? `${share}% del tiempo activo. Sobre todo: ${apps}.` : `${share}% del tiempo activo.`,
+      healthAccessibility: "Abrir Accesibilidad",
       openChatGpt: "Abrir ChatGPT", openClaude: "Abrir Claude", outboundNotice: "Solo sale lo que tú copies",
     },
     workflow: {
@@ -581,6 +603,17 @@ const copy: Record<Locale, UiCopy> = {
       handoffsTitle: "Most repeated handoffs",
       handoffsHint: "Jumps between apps or sites within one task. They are integration candidates.",
       handoffCount: (count) => `${count} times`,
+      healthTitle: "Data quality",
+      healthHint: "What the capture is missing to map your processes, and how to complete it.",
+      healthTitles: "Window titles",
+      healthTitlesStatus: { off: "Turned off in Settings. Without titles there are no title rules or cases.", missing: "Turned on, but not arriving.", ok: "Arriving normally.", insufficient: "Not enough activity yet to evaluate them." },
+      healthTitlesFix: "Give Ensō Time the Accessibility permission in macOS.",
+      healthBrowser: "Browser sites",
+      healthBrowserStatus: (status, share) => ({ "not-paired": "The extension is not paired: the browser counts as a single app.", "not-reporting": `The extension is paired, but identifies the site only ${share}% of the time.`, ok: `The site is identified ${share}% of browser time.`, insufficient: "Not enough browser use yet to evaluate it." })[status],
+      healthBrowserFix: "In Settings, pair the Chromium extension and keep it enabled.",
+      healthUnknown: "Unclassified",
+      healthUnknownStatus: (share, apps) => apps ? `${share}% of active time. Mostly: ${apps}.` : `${share}% of active time.`,
+      healthAccessibility: "Open Accessibility",
       openChatGpt: "Open ChatGPT", openClaude: "Open Claude", outboundNotice: "Only what you copy leaves the app",
     },
     workflow: {

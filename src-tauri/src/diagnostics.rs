@@ -169,6 +169,7 @@ pub fn create_diagnostic(
         ),
         candidates,
         handoffs,
+        capture_health: None,
         preliminary: days_observed < 7.0,
         generated_at,
     }

@@ -35,6 +35,7 @@ import type {
   ClassificationRuleV1,
   CheckInAnswer,
   CheckInV1,
+  CaptureHealthV1,
   CaptureIssue,
   DiagnosticV1,
   Locale,
@@ -634,6 +635,28 @@ function AiEvaluationSection({ days, locale, enabled }: { days: 7 | 14 | 28; loc
   );
 }
 
+function CaptureHealthSection({ health, locale }: { health: CaptureHealthV1; locale: Locale }) {
+  const copy = messages(locale).automate;
+  const [opening, setOpening] = useState(false);
+  const [error, setError] = useState<string>();
+  const percent = (value: number) => Math.round(value * 100);
+  const apps = health.topUnknown.map((item) => item.app).join(", ");
+  const titlesNeedFix = health.titles === "missing";
+  const browserNeedsFix = health.browserConnector === "not-paired" || health.browserConnector === "not-reporting";
+  async function openAccessibility() {
+    setOpening(true); setError(undefined);
+    try { await bridge.requestAccessibilityPermission(); } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); } finally { setOpening(false); }
+  }
+  return <section className="capture-health" aria-labelledby="capture-health-title">
+    <div><h2 id="capture-health-title">{copy.healthTitle}</h2><p>{copy.healthHint}</p></div>
+    <ul>
+      <li data-status={titlesNeedFix || health.titles === "off" ? "warn" : "ok"}><strong>{copy.healthTitles}</strong><span>{copy.healthTitlesStatus[health.titles]}</span>{titlesNeedFix && health.accessibilityFix && <><small>{copy.healthTitlesFix}</small><button type="button" className="secondary-button" disabled={opening} onClick={() => void openAccessibility()}>{copy.healthAccessibility}</button>{error && <small role="alert" className="capture-health-error">{error}</small>}</>}</li>
+      <li data-status={browserNeedsFix ? "warn" : "ok"}><strong>{copy.healthBrowser}</strong><span>{copy.healthBrowserStatus(health.browserConnector, percent(health.browserDomainShare))}</span>{browserNeedsFix && <small>{copy.healthBrowserFix}</small>}</li>
+      <li data-status={health.unknownShare >= 0.2 ? "warn" : "ok"}><strong>{copy.healthUnknown}</strong><span>{copy.healthUnknownStatus(percent(health.unknownShare), apps)}</span></li>
+    </ul>
+  </section>;
+}
+
 function AutomateView({ diagnostic, locale, busy, aiAvailable, aiEnabled, days, onGenerate, onCopy, onOpen, onMapWorkflow, onOpenBlueprint, blueprintCandidate }: { diagnostic: DiagnosticV1; locale: Locale; busy: boolean; aiAvailable: boolean; aiEnabled: boolean; days: 7 | 14 | 28; onGenerate: () => Promise<void>; onCopy: () => Promise<void>; onOpen: (url: string) => Promise<void>; onMapWorkflow: (candidate: AutomationCandidateV1) => void; onOpenBlueprint: (candidate: AutomationCandidateV1) => void; blueprintCandidate: AutomationCandidateV1 | null }) {
   const copy = messages(locale).automate;
   const candidate = diagnostic.candidates[0];
@@ -648,6 +671,7 @@ function AutomateView({ diagnostic, locale, busy, aiAvailable, aiEnabled, days, 
           <div className="candidate-scores"><span><b>{candidate.impactScore}/40</b>{copy.impact}</span><span><b>{candidate.feasibilityScore}/35</b>{copy.feasibility}</span><span><b>{candidate.riskScore}/25</b>{copy.risk}</span></div>
         </section>
       ) : <section className="empty-state"><Target size={30} aria-hidden="true" /><h2>{copy.empty}</h2><p>{copy.emptyCopy}</p></section>}
+      {diagnostic.captureHealth ? <CaptureHealthSection health={diagnostic.captureHealth} locale={locale} /> : null}
       {diagnostic.handoffs?.length ? <section className="handoffs" aria-labelledby="handoffs-title"><div><h2 id="handoffs-title">{copy.handoffsTitle}</h2><p>{copy.handoffsHint}</p></div><ol>{diagnostic.handoffs.map((handoff) => <li key={`${handoff.from}->${handoff.to}`}><span>{handoff.from} → {handoff.to}</span><small>{copy.handoffCount(handoff.count)}</small></li>)}</ol></section> : null}
       <section className="recommendations"><h2>{copy.recommendations}</h2><ol>{diagnostic.recommendations.map((recommendation, index) => <li key={recommendation}><span>{String(index + 1).padStart(2, "0")}</span><p>{recommendation}</p></li>)}</ol></section>
       {aiAvailable && <AiEvaluationSection days={days} locale={locale} enabled={aiEnabled} />}

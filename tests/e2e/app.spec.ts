@@ -273,6 +273,15 @@ test("maps, saves, resumes, and enriches the top candidate workflow", async ({ p
   await expect(page.getByText("4 ejecuciones en 3 días · mediana 14 min")).toBeVisible();
   await expect(page.getByText("2 variantes · la principal cubre 75%")).toBeVisible();
   await expect(page.getByText("3 casos distintos (tickets, facturas u órdenes en los títulos)")).toBeVisible();
+  const health = page.locator(".capture-health");
+  await expect(health.getByRole("heading", { name: "Calidad de los datos" })).toBeVisible();
+  await expect(health.getByText("Activados, pero no están llegando.")).toBeVisible();
+  const openAccessibility = health.getByRole("button", { name: "Abrir Accesibilidad" });
+  await openAccessibility.click();
+  await expect(openAccessibility).toBeEnabled();
+  await expect(health.getByRole("alert")).toHaveCount(0);
+  await expect(health.getByText("La extensión no está emparejada: el navegador cuenta como una sola app.")).toBeVisible();
+  await expect(health.getByText("31% del tiempo activo. Sobre todo: microsoft edge, preview.")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Traspasos más repetidos" })).toBeVisible();
   await expect(page.getByText("mail.google.com → excel", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Levantar workflow" }).click();
