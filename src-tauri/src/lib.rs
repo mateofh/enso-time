@@ -142,6 +142,8 @@ pub fn run() {
             commands::list_classification_rules,
             commands::list_review_groups,
             commands::apply_review_group,
+            commands::list_unlabeled_episodes,
+            commands::label_episode,
             commands::undo_review_operation,
             commands::save_session_classification,
             commands::clear_session_classification,

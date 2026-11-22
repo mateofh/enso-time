@@ -19,7 +19,7 @@ use crate::models::{
 use crate::storage::{BlueprintStoreResult, LocalStore};
 use chrono::{Datelike, Duration, Timelike, Utc};
 use chrono_tz::Tz;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{OpenOptions, Permissions};
 use std::io::Write;
 use std::path::PathBuf;
@@ -510,6 +510,81 @@ pub fn apply_review_group(
         block_ids: overrides.into_iter().map(|item| item.block_id).collect(),
         rule_id: None,
     })
+}
+
+#[tauri::command]
+pub fn list_unlabeled_episodes(
+    state: State<'_, AppState>,
+    from: String,
+    to: String,
+) -> Result<Vec<crate::models::EpisodeSuggestionV1>, String> {
+    let blocks = timeline_for_review(&state, &from, &to)?;
+    Ok(episode_suggestions(&blocks))
+}
+
+fn episode_suggestions(blocks: &[TimelineBlockV1]) -> Vec<crate::models::EpisodeSuggestionV1> {
+    let episodes = crate::episodes::build_episodes(blocks);
+    crate::episodes::unlabeled_suggestions(&episodes)
+        .into_iter()
+        .map(|episode| crate::models::EpisodeSuggestionV1 {
+            id: format!(
+                "episode-{}",
+                episode.block_ids.first().cloned().unwrap_or_default()
+            ),
+            start: episode.start.to_rfc3339(),
+            end: episode.end.to_rfc3339(),
+            steps: episode.steps.clone(),
+            touch_seconds: episode.touch_seconds,
+            block_ids: episode.block_ids.clone(),
+        })
+        .collect()
+}
+
+#[tauri::command]
+pub fn label_episode(
+    state: State<'_, AppState>,
+    mut input: crate::models::LabelEpisodeInputV1,
+) -> Result<ReviewOperationV1, String> {
+    input.activity_label = input.activity_label.trim().to_string();
+    input.validate()?;
+    let operation = state.capture_gate.operation()?;
+    let blocks = timeline_for_review(&state, &input.from, &input.to)?;
+    let overrides = episode_overrides(&blocks, &input, &iso_now())?;
+    operation.ensure_current()?;
+    state.store.save_classification_overrides(&overrides)?;
+    Ok(ReviewOperationV1 {
+        id: Uuid::new_v4().to_string(),
+        mode: "sessions".into(),
+        affected_sessions: overrides.len(),
+        block_ids: overrides.into_iter().map(|item| item.block_id).collect(),
+        rule_id: None,
+    })
+}
+
+/// Overrides for the episode's blocks that still exist and can be corrected.
+fn episode_overrides(
+    blocks: &[TimelineBlockV1],
+    input: &crate::models::LabelEpisodeInputV1,
+    now: &str,
+) -> Result<Vec<ClassificationOverrideV1>, String> {
+    let wanted = input.block_ids.iter().collect::<HashSet<_>>();
+    let overrides = blocks
+        .iter()
+        .filter(|block| block.correctable && wanted.contains(&block.id))
+        .map(|block| ClassificationOverrideV1 {
+            block_id: block.id.clone(),
+            event_start: block.start.clone(),
+            event_end: block.end.clone(),
+            category: input.category.clone(),
+            activity_label: Some(input.activity_label.clone()),
+            created_at: now.into(),
+            updated_at: now.into(),
+        })
+        .collect::<Vec<_>>();
+    if overrides.is_empty() {
+        return Err("Este episodio ya no está disponible".into());
+    }
+    Ok(overrides)
 }
 
 #[tauri::command]
@@ -2266,6 +2341,87 @@ mod tests {
         gate.generation.fetch_add(1, Ordering::AcqRel);
         assert!(record_native_action_error(&store, &gate, original_generation).is_err());
         assert!(store.get_value("native_action_error").unwrap().is_none());
+    }
+
+    #[test]
+    fn labeling_an_episode_overrides_its_blocks_and_removes_the_suggestion() {
+        let block = |id: &str, start: &str, end: &str, app: &str| TimelineBlockV1 {
+            id: id.into(),
+            start: start.into(),
+            end: end.into(),
+            duration_seconds: (parse_utc(end).unwrap() - parse_utc(start).unwrap()).num_seconds(),
+            app: app.into(),
+            title: None,
+            activity_label: None,
+            category: "unknown".into(),
+            confidence: 0.25,
+            afk: false,
+            source: "window".into(),
+            check_in_id: None,
+            classification_source: "unknown".into(),
+            rule_id: None,
+            correctable: true,
+            context_domain: None,
+            context_project: None,
+        };
+        let mut blocks = vec![
+            block(
+                "w1",
+                "2026-11-21T10:00:00Z",
+                "2026-11-21T10:06:00Z",
+                "Excel",
+            ),
+            block("w2", "2026-11-21T10:06:00Z", "2026-11-21T10:12:00Z", "Mail"),
+            block(
+                crate::process_context::EXCLUDED_APP_LABEL,
+                "2026-11-21T10:12:00Z",
+                "2026-11-21T10:30:00Z",
+                crate::process_context::EXCLUDED_APP_LABEL,
+            ),
+        ];
+        blocks[2].correctable = false;
+        let suggestions = episode_suggestions(&blocks);
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].block_ids, vec!["w1", "w2"]);
+        assert_eq!(suggestions[0].steps, vec!["excel", "mail"]);
+
+        let input = crate::models::LabelEpisodeInputV1 {
+            from: "2026-11-21T00:00:00Z".into(),
+            to: "2026-11-22T00:00:00Z".into(),
+            block_ids: vec!["w1".into(), "w2".into(), "gone".into()],
+            category: "admin".into(),
+            activity_label: "Conciliar pagos".into(),
+        };
+        input.validate().unwrap();
+        let overrides = episode_overrides(&blocks, &input, "2026-11-21T18:00:00Z").unwrap();
+        assert_eq!(
+            overrides
+                .iter()
+                .map(|item| item.block_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["w1", "w2"]
+        );
+        for item in &overrides {
+            let target = blocks
+                .iter_mut()
+                .find(|block| block.id == item.block_id)
+                .unwrap();
+            target.category = item.category.clone();
+            target.activity_label = item.activity_label.clone();
+            target.classification_source = "override".into();
+        }
+        assert!(episode_suggestions(&blocks).is_empty());
+
+        let missing = crate::models::LabelEpisodeInputV1 {
+            block_ids: vec!["gone".into()],
+            ..input
+        };
+        assert!(episode_overrides(&blocks, &missing, "2026-11-21T18:00:00Z").is_err());
+        let unlabeled = crate::models::LabelEpisodeInputV1 {
+            activity_label: "  ".into(),
+            ..missing
+        };
+        assert!(unlabeled.validate().is_err());
     }
 
     #[test]

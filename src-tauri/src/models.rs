@@ -316,6 +316,53 @@ pub struct ReviewOperationV1 {
     pub rule_id: Option<String>,
 }
 
+/// An episode with no confirmed label, offered for one-click labeling.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EpisodeSuggestionV1 {
+    pub id: String,
+    pub start: String,
+    pub end: String,
+    pub steps: Vec<String>,
+    pub touch_seconds: i64,
+    pub block_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LabelEpisodeInputV1 {
+    pub from: String,
+    pub to: String,
+    pub block_ids: Vec<String>,
+    pub category: String,
+    pub activity_label: String,
+}
+
+impl LabelEpisodeInputV1 {
+    pub fn validate(&self) -> Result<(), String> {
+        let from = parse_utc(&self.from)?;
+        let to = parse_utc(&self.to)?;
+        if to <= from || to - from > chrono::Duration::days(366) {
+            return Err("El periodo de revisión no es válido".into());
+        }
+        if self.block_ids.is_empty()
+            || self.block_ids.len() > 5_000
+            || self
+                .block_ids
+                .iter()
+                .any(|id| id.is_empty() || id.chars().count() > 512)
+        {
+            return Err("Las sesiones del episodio no son válidas".into());
+        }
+        validate_session_category(&self.category)?;
+        // A label is what turns an episode into candidate evidence, so it is required.
+        if self.activity_label.trim().is_empty() {
+            return Err("La etiqueta de actividad es obligatoria".into());
+        }
+        validate_required_text(&self.activity_label, 200, "La etiqueta de actividad")
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UndoReviewOperationInputV1 {

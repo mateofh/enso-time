@@ -226,6 +226,25 @@ test("reviews an unknown group in bulk and can undo the operation", async ({ pag
   await expect(page.locator(".review-card").filter({ hasText: "Untitled" })).toBeVisible();
 });
 
+test("labels the longest unlabeled episode and can undo it", async ({ page, browserErrors: _browserErrors }) => {
+  await seedBridge(page, { checkIns: [] });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Por revisar" }).click();
+
+  await expect(page.getByRole("heading", { name: "Episodios para etiquetar" })).toBeVisible();
+  const first = page.getByTestId("episode-suggestion").first();
+  const path = await first.getByRole("heading").textContent();
+  await first.getByRole("button", { name: "Etiquetar episodio" }).click();
+  await expect(first.getByRole("alert")).toHaveText("Escribe qué estabas haciendo para etiquetar el episodio.");
+  await first.getByLabel("Actividad").fill("Diseñar sistema de producto");
+  await first.getByRole("button", { name: "Etiquetar episodio" }).click();
+
+  await expect(page.getByText("Se actualizó 1 sesión.")).toBeVisible();
+  await expect(page.getByTestId("episode-suggestion").filter({ has: page.getByRole("heading", { name: path!, exact: true }) })).toHaveCount(0);
+  await page.getByRole("button", { name: "Deshacer" }).click();
+  await expect(page.getByTestId("episode-suggestion").filter({ has: page.getByRole("heading", { name: path!, exact: true }) })).toHaveCount(1);
+});
+
 test("maps, saves, resumes, and enriches the top candidate workflow", async ({ page, browserErrors: _browserErrors }) => {
   const workflowCheckIns = [1, 2, 3].map((day) => ({
     id: `workflow-checkin-${day}`,

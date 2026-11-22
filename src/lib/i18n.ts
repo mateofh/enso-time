@@ -71,6 +71,11 @@ interface UiCopy {
     fallbackWarning: string;
     undo: string;
     applied: (count: number) => string;
+    episodesTitle: string;
+    episodesIntro: string;
+    episodeMeta: (time: string, duration: string) => string;
+    labelEpisode: string;
+    episodeLabelRequired: string;
   };
   classification: {
     edit: string;
@@ -359,6 +364,11 @@ const copy: Record<Locale, UiCopy> = {
       fallbackWarning: "Esta regla se aplicará a todo el uso de este navegador cuando no haya un título más específico. ¿Quieres continuar?",
       undo: "Deshacer",
       applied: (count) => count === 1 ? "Se actualizó 1 sesión." : `Se actualizaron ${count} sesiones.`,
+      episodesTitle: "Episodios para etiquetar",
+      episodesIntro: "Tus tramos de trabajo más largos sin etiqueta. Nombrarlos convierte el tiempo observado en evidencia para el diagnóstico.",
+      episodeMeta: (time, duration) => `${time} · ${duration}`,
+      labelEpisode: "Etiquetar episodio",
+      episodeLabelRequired: "Escribe qué estabas haciendo para etiquetar el episodio.",
     },
     classification: {
       edit: "Corregir clasificación",
@@ -520,6 +530,11 @@ const copy: Record<Locale, UiCopy> = {
       fallbackWarning: "This rule will apply to all use of this browser whenever no more specific title is available. Continue?",
       undo: "Undo",
       applied: (count) => count === 1 ? "1 session was updated." : `${count} sessions were updated.`,
+      episodesTitle: "Episodes to label",
+      episodesIntro: "Your longest unlabeled stretches of work. Naming them turns observed time into evidence for the diagnosis.",
+      episodeMeta: (time, duration) => `${time} · ${duration}`,
+      labelEpisode: "Label episode",
+      episodeLabelRequired: "Describe what you were doing to label the episode.",
     },
     classification: {
       edit: "Correct classification",

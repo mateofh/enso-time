@@ -28,6 +28,8 @@ import type {
   ApplyReviewGroupInputV1,
   ReviewOperationV1,
   UndoReviewOperationInputV1,
+  EpisodeSuggestionV1,
+  LabelEpisodeInputV1,
   AiConfigurationStatusV1,
   AiFeedbackInputV1,
   ConnectorClientV1,
@@ -320,6 +322,28 @@ export const bridge = {
     for (const block of blocks) state.classificationOverrides[block.id] = { category: input.category, activityLabel: input.activityLabel };
     saveWebState(state);
     return { id: crypto.randomUUID(), mode: "sessions", affectedSessions: blocks.length, blockIds: blocks.map((block) => block.id) };
+  },
+
+  async listUnlabeledEpisodes(from: string, to: string): Promise<EpisodeSuggestionV1[]> {
+    if (isTauri()) return invoke("list_unlabeled_episodes", { from, to });
+    // Preview approximation of the desktop episode builder: one block per episode.
+    const confirmed = new Set(["override", "rule", "checkin"]);
+    return (await bridge.getTimeline(from, to))
+      .filter((block) => !block.afk && block.correctable !== false && block.category !== "break"
+        && !(block.activityLabel && confirmed.has(block.classificationSource ?? "")) && block.durationSeconds >= 300)
+      .sort((left, right) => right.durationSeconds - left.durationSeconds)
+      .slice(0, 5)
+      .map((block) => ({ id: `episode-${block.id}`, start: block.start, end: block.end, steps: [block.contextDomain ?? block.app.toLowerCase()], touchSeconds: block.durationSeconds, blockIds: [block.id] }));
+  },
+
+  async labelEpisode(input: LabelEpisodeInputV1): Promise<ReviewOperationV1> {
+    if (isTauri()) return invoke("label_episode", { input });
+    if (!input.activityLabel.trim()) throw new Error("La etiqueta de actividad es obligatoria");
+    const state = loadWebState();
+    state.classificationOverrides = { ...(state.classificationOverrides ?? {}) };
+    for (const blockId of input.blockIds) state.classificationOverrides[blockId] = { category: input.category, activityLabel: input.activityLabel.trim() };
+    saveWebState(state);
+    return { id: crypto.randomUUID(), mode: "sessions", affectedSessions: input.blockIds.length, blockIds: input.blockIds };
   },
 
   async undoReviewOperation(input: UndoReviewOperationInputV1): Promise<void> {

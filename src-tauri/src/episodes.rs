@@ -28,6 +28,9 @@ pub const MAX_VARIANT_STEPS: usize = 8;
 /// Handoffs reported in the diagnostic, and the minimum repetitions for one to count.
 pub const MAX_HANDOFFS: usize = 5;
 pub const MIN_HANDOFF_COUNT: usize = 2;
+/// End-of-day labeling offers only episodes at least this long, and at most this many.
+pub const MIN_LABEL_SUGGESTION_SECONDS: i64 = 300;
+pub const MAX_LABEL_SUGGESTIONS: usize = 5;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Episode {
@@ -39,6 +42,8 @@ pub struct Episode {
     pub task_key: Option<String>,
     /// Started after AFK, a declared break, an excluded app or a long gap.
     pub after_break: bool,
+    /// Window blocks that make up the episode (manual check-in blocks excluded).
+    pub block_ids: Vec<String>,
     /// Consecutive distinct steps (domain, else app), e.g. `[mail.google.com, excel, app.hubspot.com]`.
     pub steps: Vec<String>,
     pub touch_seconds: i64,
@@ -72,6 +77,7 @@ pub struct ObservedEvidenceV1 {
 struct Run {
     start: DateTime<Utc>,
     end: DateTime<Utc>,
+    block_ids: Vec<String>,
     step: Option<String>,
     candidate_key: Option<String>,
     /// Label if confirmed, else category; `None` for unknown blocks, which join any task.
@@ -140,12 +146,14 @@ fn runs_from_blocks(blocks: &[TimelineBlockV1]) -> Vec<Run> {
             let contiguous = (start - last.end).num_seconds() <= 1;
             if contiguous && last.step == step && last.task_key == task_key {
                 last.end = last.end.max(end);
+                last.block_ids.push(block.id.clone());
                 continue;
             }
         }
         runs.push(Run {
             start,
             end,
+            block_ids: vec![block.id.clone()],
             step,
             candidate_key,
             task_key,
@@ -163,6 +171,7 @@ fn push_step(episode: &mut Episode, run: &Run) {
     }
     episode.end = episode.end.max(run.end);
     episode.touch_seconds += run.seconds();
+    episode.block_ids.extend(run.block_ids.iter().cloned());
     if episode.candidate_key.is_none() {
         episode.candidate_key = run.candidate_key.clone();
     }
@@ -176,6 +185,7 @@ fn merge_into(target: &mut Draft, next: Draft) {
     }
     target.episode.end = target.episode.end.max(next.episode.end);
     target.episode.touch_seconds += next.episode.touch_seconds;
+    target.episode.block_ids.extend(next.episode.block_ids);
     target.excursion_seconds += next.excursion_seconds;
     if target.task_key.is_none() {
         target.task_key = next.task_key;
@@ -214,6 +224,7 @@ pub fn build_episodes(blocks: &[TimelineBlockV1]) -> Vec<Episode> {
                 candidate_key: None,
                 task_key: None,
                 after_break: false,
+                block_ids: Vec::new(),
                 steps: Vec::new(),
                 touch_seconds: 0,
             };
@@ -287,6 +298,26 @@ pub fn task_switches(episodes: &[Episode]) -> usize {
                 && pair[0].task_key != pair[1].task_key
         })
         .count()
+}
+
+/// Longest episodes with no confirmed label, offered for one-click labeling at day's end.
+pub fn unlabeled_suggestions(episodes: &[Episode]) -> Vec<&Episode> {
+    let mut suggestions = episodes
+        .iter()
+        .filter(|episode| {
+            episode.candidate_key.is_none()
+                && !episode.steps.is_empty()
+                && episode.touch_seconds >= MIN_LABEL_SUGGESTION_SECONDS
+        })
+        .collect::<Vec<_>>();
+    suggestions.sort_by(|left, right| {
+        right
+            .touch_seconds
+            .cmp(&left.touch_seconds)
+            .then_with(|| left.start.cmp(&right.start))
+    });
+    suggestions.truncate(MAX_LABEL_SUGGESTIONS);
+    suggestions
 }
 
 /// Most repeated step-to-step handoffs inside episodes (swivel-chair candidates).
@@ -553,6 +584,35 @@ mod tests {
         items[1].classification_source = "checkin".into();
         // A short declared break is an interruption, not a task switch.
         assert_eq!(task_switches(&build_episodes(&items)), 0);
+    }
+
+    #[test]
+    fn unlabeled_suggestions_offer_the_longest_unconfirmed_episodes_only() {
+        let mut items = vec![
+            b("Excel", 0, 900).label("Facturar"),
+            b("Google Chrome", 3_000, 3_600)
+                .domain("app.hubspot.com")
+                .category("admin"),
+            b("Slack", 3_600, 3_700),
+            b("Google Chrome", 3_700, 4_200)
+                .domain("app.hubspot.com")
+                .category("admin"),
+            b("Notes", 9_000, 9_100),
+        ];
+        for index in 0..8 {
+            let start = 20_000 + index * 2_000;
+            items.push(b("Figma", start, start + 400 + index * 10).category("creation"));
+        }
+        let episodes = build_episodes(&blocks(&items));
+        let suggestions = unlabeled_suggestions(&episodes);
+        assert_eq!(suggestions.len(), MAX_LABEL_SUGGESTIONS);
+        // The CRM episode (1,200 s across 3 blocks) comes first; the labeled task and
+        // the 100 s note never appear.
+        assert_eq!(suggestions[0].touch_seconds, 1_200);
+        assert_eq!(suggestions[0].block_ids, vec!["b1", "b2", "b3"]);
+        assert!(suggestions
+            .iter()
+            .all(|episode| episode.candidate_key.is_none() && episode.touch_seconds >= 300));
     }
 
     #[test]
