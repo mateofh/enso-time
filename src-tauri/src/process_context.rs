@@ -34,6 +34,13 @@ pub(crate) fn app_identity(app: &str) -> String {
         .unwrap_or(normalized)
 }
 
+/// Lock screen and screensaver processes: the person is away, not working.
+const LOCK_SCREEN_APPS: [&str; 4] = ["loginwindow", "screensaverengine", "lockapp", "logonui"];
+
+pub fn is_lock_screen(app: &str) -> bool {
+    LOCK_SCREEN_APPS.contains(&app_identity(app).as_str())
+}
+
 pub fn is_excluded_app(app: &str, excluded_apps: &[String]) -> bool {
     let identity = app_identity(app);
     !identity.is_empty()
