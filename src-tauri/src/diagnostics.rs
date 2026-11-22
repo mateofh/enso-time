@@ -170,6 +170,7 @@ pub fn create_diagnostic(
         candidates,
         handoffs,
         capture_health: None,
+        readiness: None,
         preliminary: days_observed < 7.0,
         generated_at,
     }
@@ -181,6 +182,8 @@ struct CandidateObservation {
     duration_seconds: i64,
     rules_clear: bool,
     source: &'static str,
+    /// The person named the task; false when the label is only "category · app".
+    named: bool,
 }
 
 fn score_candidates(
@@ -216,6 +219,10 @@ fn score_candidates(
                 duration_seconds: block.duration_seconds.max(0),
                 rules_clear: block.classification_source == "rule",
                 source,
+                named: block
+                    .activity_label
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty()),
             });
     }
 
@@ -247,6 +254,7 @@ fn score_candidates(
                 duration_seconds,
                 rules_clear: item.rules_clear == Some(true),
                 source: "check-in",
+                named: true,
             });
     }
     let mut candidates: Vec<_> = groups
@@ -299,6 +307,7 @@ fn score_candidates(
                     clear_ratio > 0.6,
                 ),
                 observed: None,
+                app_usage_only: !items.iter().any(|item| item.named),
             }
         })
         .collect();
@@ -687,6 +696,23 @@ mod tests {
         );
         assert_eq!(diagnostic.handoffs[0].count, 3);
         assert_eq!(diagnostic.handoffs[0].from, "banco.example.com");
+        assert!(!diagnostic.candidates[0].app_usage_only);
+
+        // An app rule without a task name groups time as "category · app": app usage.
+        let unnamed = blocks
+            .iter()
+            .cloned()
+            .map(|mut item| {
+                item.activity_label = None;
+                item
+            })
+            .collect::<Vec<_>>();
+        let diagnostic = create_diagnostic(&unnamed, &[], 3.0, &SettingsV1::default(), &[]);
+        assert!(!diagnostic.candidates.is_empty());
+        assert!(diagnostic
+            .candidates
+            .iter()
+            .all(|candidate| candidate.app_usage_only));
     }
 
     #[test]

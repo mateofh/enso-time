@@ -718,6 +718,10 @@ pub struct AutomationCandidateV1 {
     /// What the capture observed for this task, separate from declared evidence.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observed: Option<crate::episodes::ObservedEvidenceV1>,
+    /// No observation named the task: the label is only "category · app", which shows
+    /// where time goes, not a workflow.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub app_usage_only: bool,
 }
 
 pub fn canonicalize_candidate_label(label: &str) -> String {
@@ -924,6 +928,9 @@ pub struct DiagnosticV1 {
     /// How complete the captured data is and what to fix; set by the native command.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capture_health: Option<crate::capture_health::CaptureHealthV1>,
+    /// Which level of answer the data supports and what unlocks the next one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<crate::readiness::ReadinessV1>,
     pub prompt: String,
     pub preliminary: bool,
     pub generated_at: String,

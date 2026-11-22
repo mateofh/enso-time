@@ -34,6 +34,13 @@ pub(crate) fn app_identity(app: &str) -> String {
         .unwrap_or(normalized)
 }
 
+/// Lock screen and screensaver processes: the person is away, not working.
+const LOCK_SCREEN_APPS: [&str; 4] = ["loginwindow", "screensaverengine", "lockapp", "logonui"];
+
+pub fn is_lock_screen(app: &str) -> bool {
+    LOCK_SCREEN_APPS.contains(&app_identity(app).as_str())
+}
+
 pub fn is_excluded_app(app: &str, excluded_apps: &[String]) -> bool {
     let identity = app_identity(app);
     !identity.is_empty()
@@ -85,7 +92,7 @@ fn browser_emitter_matches(emitter: Option<&str>, app: &str) -> bool {
     family.contains(&identity.as_str())
 }
 
-fn context_source_for_app(app: &str) -> Option<&'static str> {
+pub(crate) fn context_source_for_app(app: &str) -> Option<&'static str> {
     let identity = app_identity(app);
     if accepts_browser_context(app) {
         Some("browser")
@@ -143,7 +150,11 @@ pub fn context_covered_seconds(
 ) -> i64 {
     context_totals(app, block_start, block_end, observations)
         .iter()
-        .filter(|(observation, _)| observation.domain.is_some() || observation.project.is_some())
+        .filter(|(observation, _)| {
+            observation.domain.is_some()
+                || observation.project.is_some()
+                || observation.repository.is_some()
+        })
         .map(|(_, total)| *total)
         .sum::<i64>()
         / 1000

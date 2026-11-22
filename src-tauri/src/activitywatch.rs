@@ -1444,9 +1444,11 @@ impl ActivityWatchRuntime {
                 let matched_checkin = relevant_checkins.iter().find(|(_, start, end)| {
                     ranges_overlap(*start, *end, segment_start, segment_end)
                 });
-                let is_afk = relevant_afk
-                    .iter()
-                    .any(|(start, end)| ranges_overlap(*start, *end, segment_start, segment_end));
+                // A locked screen is time away even when the AFK watcher missed it.
+                let is_afk = crate::process_context::is_lock_screen(&app)
+                    || relevant_afk.iter().any(|(start, end)| {
+                        ranges_overlap(*start, *end, segment_start, segment_end)
+                    });
                 let context = if excluded {
                     crate::process_context::BlockContext::default()
                 } else {
@@ -3416,6 +3418,35 @@ mod tests {
             client_id: None,
             created_at: at.to_rfc3339(),
         }
+    }
+
+    #[test]
+    fn a_locked_screen_is_time_away_not_unknown_work() {
+        let temp = TempDir::new().unwrap();
+        let start = DateTime::parse_from_rfc3339("2026-11-21T12:00:00Z")
+            .unwrap()
+            .to_utc();
+        let runtime = runtime_with_window_events(
+            &temp,
+            start,
+            &[("loginwindow", "", 30), ("LockApp.exe", "", 10)],
+        );
+        let blocks = runtime
+            .timeline(
+                start,
+                start + Duration::minutes(40),
+                &SettingsV1::default(),
+                &[],
+                &[],
+                &[],
+            )
+            .unwrap();
+        assert!(!blocks.is_empty());
+        assert!(blocks
+            .iter()
+            .all(|block| block.afk && block.category == "break"));
+        assert!(crate::episodes::build_episodes(&blocks).is_empty());
+        assert!(!crate::process_context::is_lock_screen("Google Chrome"));
     }
 
     #[test]

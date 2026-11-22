@@ -43,6 +43,9 @@ pub struct CaptureHealthV1 {
     pub browser_domain_share: f64,
     /// `not-paired`, `not-reporting`, `ok`, `insufficient` (too little browser time).
     pub browser_connector: String,
+    /// Editor and terminal time, and the share with a known project (connectors).
+    pub project_seconds: i64,
+    pub project_share: f64,
     /// Why time was not captured; set by the native command from the uptime log.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coverage: Option<crate::capture_gaps::CaptureCoverageV1>,
@@ -85,6 +88,8 @@ pub fn capture_health(
     let mut unknown = 0;
     let mut browser = 0;
     let mut browser_with_domain = 0;
+    let mut project_tools = 0;
+    let mut with_project = 0;
     let mut unknown_by_app: HashMap<String, i64> = HashMap::new();
     for block in blocks.iter().filter(|block| is_window_activity(block)) {
         let seconds = block.duration_seconds.max(0);
@@ -101,6 +106,12 @@ pub fn capture_health(
         if crate::process_context::accepts_browser_context(&block.app) {
             browser += seconds;
             browser_with_domain += covered_seconds(block, observations).min(seconds);
+        } else if matches!(
+            crate::process_context::context_source_for_app(&block.app),
+            Some("editor" | "shell")
+        ) {
+            project_tools += seconds;
+            with_project += covered_seconds(block, observations).min(seconds);
         }
     }
     let mut top_unknown = unknown_by_app
@@ -148,6 +159,8 @@ pub fn capture_health(
         browser_seconds: browser,
         browser_domain_share,
         browser_connector: browser_connector.into(),
+        project_seconds: project_tools,
+        project_share: share(with_project, project_tools),
         coverage: None,
     }
 }
@@ -272,6 +285,24 @@ mod tests {
         let small = capture_health(&[block("Google Chrome", 60, "unknown")], true, &[], &[]);
         assert_eq!(small.browser_connector, "insufficient");
         assert_eq!(small.titles, "insufficient");
+    }
+
+    #[test]
+    fn editor_time_with_only_a_repository_counts_as_known_project() {
+        let observed = (0..60)
+            .map(|minute| {
+                let mut item = reports(minute, 1).remove(0);
+                item.source = "editor".into();
+                item.app = Some("Cursor".into());
+                item.domain = None;
+                item.repository = Some("enso-time".into());
+                item
+            })
+            .collect::<Vec<_>>();
+        let parsed = crate::process_context::parse_observations(&observed);
+        let health = capture_health(&[block("Cursor", 3_600, "creation")], true, &[], &parsed);
+        assert_eq!(health.project_seconds, 3_600);
+        assert!(health.project_share > 0.99);
     }
 
     #[test]

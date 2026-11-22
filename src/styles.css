@@ -217,6 +217,28 @@ input:hover, select:hover, textarea:hover { border-color: var(--border-strong); 
 .workflow-cta small { max-width: 280px; color: var(--text-secondary); font-size: 10px; line-height: 1.4; }
 .observed-evidence { margin-top: 18px; padding: 12px 14px; border-left: 2px solid var(--blue); background: var(--surface); display: grid; gap: 4px; font-size: 12px; color: var(--text-secondary); line-height: 1.45; overflow-wrap: anywhere; }
 .observed-evidence strong { color: var(--text); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+.readiness { margin: 0 0 40px; display: grid; grid-template-columns: 1fr 2fr; gap: 44px; }
+.readiness > div > p { color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+.readiness-levels { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.readiness-levels li { display: grid; gap: 6px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 12px; color: var(--text-secondary); overflow-wrap: break-word; hyphens: auto; }
+.readiness-levels li span { font-size: 18px; font-weight: 600; color: var(--text-secondary); }
+.readiness-levels li[data-state="done"] { color: var(--text); border-color: color-mix(in srgb, var(--text) 35%, var(--border)); }
+.readiness-levels li[data-state="done"] span { color: var(--text); }
+.readiness-levels li[data-state="next"] { border-style: dashed; color: var(--text); }
+.readiness-gathering { margin-top: 10px; color: var(--text-secondary); font-size: 12px; }
+.readiness-next { margin-top: 16px; }
+.readiness-next strong { font-size: 13px; }
+.readiness-next ul { list-style: none; margin: 8px 0 0; padding: 0; }
+.readiness-next li { display: grid; gap: 4px; border-top: 1px solid var(--border); padding: 10px 0; font-size: 13px; }
+.readiness-next li small { color: var(--text-secondary); }
+.readiness-next li[data-done="true"] span { color: var(--text-secondary); text-decoration: line-through; }
+.app-usage-note { color: var(--text-secondary); font-size: 12px; border-left: 2px solid var(--danger); padding-left: 10px; }
+.hypotheses { margin-top: 48px; display: grid; grid-template-columns: 1fr 2fr; gap: 44px; }
+.hypotheses > div > p { color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+.hypotheses ol { list-style: none; margin: 0; padding: 0; }
+.hypotheses li { display: grid; gap: 10px; border-top: 1px solid var(--border); padding: 14px 0; font-size: 13px; overflow-wrap: anywhere; }
+.hypotheses li:last-child { border-bottom: 1px solid var(--border); }
+.hypotheses li button { justify-self: start; }
 .capture-health { margin-top: 48px; display: grid; grid-template-columns: 1fr 2fr; gap: 44px; }
 .capture-health p { color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
 .capture-health ul { list-style: none; margin: 0; padding: 0; }
@@ -430,7 +452,8 @@ input:hover, select:hover, textarea:hover { border-color: var(--border-strong); 
   .sidebar nav button b { position: absolute; margin: -30px 0 0 27px; }
   .today-layout { grid-template-columns: 1fr; }
   .day-summary { border-left: 0; border-top: 1px solid var(--border); padding: 30px 0 0; }
-  .settings-group, .recommendations, .capture-health, .handoffs, .period-section, .workflow-section, .blueprint-evidence, .blueprint-estimates { grid-template-columns: 1fr; gap: 24px; }
+  .readiness-levels { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .settings-group, .recommendations, .readiness, .hypotheses, .capture-health, .handoffs, .period-section, .workflow-section, .blueprint-evidence, .blueprint-estimates { grid-template-columns: 1fr; gap: 24px; }
 }
 @media (max-width: 620px) {
   .app-shell { display: block; }
