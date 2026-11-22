@@ -393,7 +393,9 @@ export const bridge = {
     const state = loadWebState();
     const diagnostic = enrichPreviewDiagnostic(createDiagnostic(demoTimeline, state.checkIns, Math.min(days, 5), state.settings.role, state.settings.goals, state.settings.locale), state);
     const [top, ...rest] = diagnostic.candidates;
-    if (top) {
+    // Refresh the cache only when preview state already exists: a background refresh
+    // right after "delete all data" must not recreate storage.
+    if (top && localStorage.getItem(STORAGE_KEY) !== null) {
       state.observedEvidence = { [top.id]: { ...demoObserved, computedAt: diagnostic.generatedAt } };
       saveWebState(state);
     }
