@@ -86,6 +86,7 @@ export const demoObserved = {
   variants: 2,
   topVariantShare: 0.75,
   topVariantSteps: ["mail.google.com", "excel", "app.hubspot.com"],
+  cases: 3,
 };
 
 export const demoHandoffs = [

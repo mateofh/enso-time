@@ -1,5 +1,6 @@
 mod activitywatch;
 mod blueprint;
+mod case_refs;
 mod commands;
 mod connectors;
 mod diagnostics;

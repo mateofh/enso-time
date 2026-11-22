@@ -618,6 +618,7 @@ mod tests {
             correctable: true,
             context_domain: None,
             context_project: None,
+            case_refs: Vec::new(),
         };
         let candidates = score_candidates(
             &[block("one", "override"), block("two", "rule")],
@@ -655,6 +656,7 @@ mod tests {
                 correctable: true,
                 context_domain: domain.map(Into::into),
                 context_project: None,
+                case_refs: Vec::new(),
             };
         let mut blocks = Vec::new();
         for day in ["01", "02", "03"] {

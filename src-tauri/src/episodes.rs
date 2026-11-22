@@ -46,6 +46,8 @@ pub struct Episode {
     pub after_break: bool,
     /// Window blocks that make up the episode (manual check-in blocks excluded).
     pub block_ids: Vec<String>,
+    /// Distinct hashed case identifiers seen in the episode's blocks.
+    pub case_refs: Vec<String>,
     /// Consecutive distinct steps (domain, else app), e.g. `[mail.google.com, excel, app.hubspot.com]`.
     pub steps: Vec<String>,
     pub touch_seconds: i64,
@@ -73,6 +75,10 @@ pub struct ObservedEvidenceV1 {
     pub top_variant_share: Option<f64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub top_variant_steps: Vec<String>,
+    /// Distinct cases (hashed ticket/invoice/order ids) worked on in this task's
+    /// episodes. Present only when window titles are kept and identifiers appear.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cases: Option<usize>,
 }
 
 /// A contiguous run of blocks with the same step and task key.
@@ -80,6 +86,7 @@ struct Run {
     start: DateTime<Utc>,
     end: DateTime<Utc>,
     block_ids: Vec<String>,
+    case_refs: Vec<String>,
     step: Option<String>,
     candidate_key: Option<String>,
     /// Label if confirmed, else category; `None` for unknown blocks, which join any task.
@@ -149,6 +156,7 @@ fn runs_from_blocks(blocks: &[TimelineBlockV1]) -> Vec<Run> {
             if contiguous && last.step == step && last.task_key == task_key {
                 last.end = last.end.max(end);
                 last.block_ids.push(block.id.clone());
+                add_unique(&mut last.case_refs, &block.case_refs);
                 continue;
             }
         }
@@ -156,6 +164,7 @@ fn runs_from_blocks(blocks: &[TimelineBlockV1]) -> Vec<Run> {
             start,
             end,
             block_ids: vec![block.id.clone()],
+            case_refs: block.case_refs.clone(),
             step,
             candidate_key,
             task_key,
@@ -163,6 +172,14 @@ fn runs_from_blocks(blocks: &[TimelineBlockV1]) -> Vec<Run> {
     }
     runs.retain(|run| run.is_break() || run.seconds() >= MIN_DWELL_SECONDS);
     runs
+}
+
+fn add_unique(target: &mut Vec<String>, items: &[String]) {
+    for item in items {
+        if !target.contains(item) {
+            target.push(item.clone());
+        }
+    }
 }
 
 fn push_step(episode: &mut Episode, run: &Run) {
@@ -177,6 +194,11 @@ fn push_step(episode: &mut Episode, run: &Run) {
     if episode.candidate_key.is_none() {
         episode.candidate_key = run.candidate_key.clone();
     }
+    // Cases count only for the episode's own confirmed task, never for an absorbed
+    // interruption that belongs to another task.
+    if run.candidate_key.is_some() && run.candidate_key == episode.candidate_key {
+        add_unique(&mut episode.case_refs, &run.case_refs);
+    }
 }
 
 fn merge_into(target: &mut Draft, next: Draft) {
@@ -188,6 +210,11 @@ fn merge_into(target: &mut Draft, next: Draft) {
     target.episode.end = target.episode.end.max(next.episode.end);
     target.episode.touch_seconds += next.episode.touch_seconds;
     target.episode.block_ids.extend(next.episode.block_ids);
+    if target.episode.candidate_key.is_none()
+        || target.episode.candidate_key == next.episode.candidate_key
+    {
+        add_unique(&mut target.episode.case_refs, &next.episode.case_refs);
+    }
     target.excursion_seconds += next.excursion_seconds;
     if target.task_key.is_none() {
         target.task_key = next.task_key;
@@ -227,6 +254,7 @@ pub fn build_episodes(blocks: &[TimelineBlockV1]) -> Vec<Episode> {
                 task_key: None,
                 after_break: false,
                 block_ids: Vec::new(),
+                case_refs: Vec::new(),
                 steps: Vec::new(),
                 touch_seconds: 0,
             };
@@ -400,6 +428,14 @@ fn evidence_for(items: &[&Episode]) -> ObservedEvidenceV1 {
         variants: None,
         top_variant_share: None,
         top_variant_steps: Vec::new(),
+        cases: Some(
+            items
+                .iter()
+                .flat_map(|episode| episode.case_refs.iter())
+                .collect::<HashSet<_>>()
+                .len(),
+        )
+        .filter(|cases| *cases > 0),
     };
     if items.len() >= MIN_EPISODES_FOR_VARIANTS {
         let mut variants: HashMap<Vec<String>, usize> = HashMap::new();
@@ -496,6 +532,7 @@ mod tests {
                 correctable: true,
                 context_domain: self.domain.map(Into::into),
                 context_project: None,
+                case_refs: Vec::new(),
             }
         }
     }
@@ -616,6 +653,44 @@ mod tests {
         assert!(suggestions
             .iter()
             .all(|episode| episode.candidate_key.is_none() && episode.touch_seconds >= 300));
+    }
+
+    #[test]
+    fn cases_count_distinct_hashed_identifiers_across_a_tasks_episodes() {
+        let mut items = blocks(&[
+            b("Google Chrome", 0, 300)
+                .domain("mail.google.com")
+                .label("Facturar"),
+            b("Excel", 300, 600).label("Facturar"),
+            b("Excel", 5_000, 5_300).label("Facturar"),
+        ]);
+        items[0].case_refs = vec!["invoice:aaa".into()];
+        items[1].case_refs = vec!["invoice:aaa".into()];
+        items[2].case_refs = vec!["invoice:bbb".into()];
+        let episodes = build_episodes(&items);
+        assert_eq!(episodes.len(), 2);
+        assert_eq!(episodes[0].case_refs, vec!["invoice:aaa"]);
+        assert_eq!(observed_evidence(&episodes)["facturar"].cases, Some(2));
+
+        // An absorbed interruption from another task does not lend its case.
+        let mut interrupted = blocks(&[
+            b("Excel", 0, 300).label("Facturar"),
+            b("Zendesk", 300, 360).label("Resolver ticket"),
+            b("Excel", 360, 600).label("Facturar"),
+        ]);
+        interrupted[0].case_refs = vec!["invoice:aaa".into()];
+        interrupted[1].case_refs = vec!["ticket:ccc".into()];
+        interrupted[2].case_refs = vec!["invoice:aaa".into()];
+        let merged = build_episodes(&interrupted);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].case_refs, vec!["invoice:aaa"]);
+        assert_eq!(observed_evidence(&merged)["facturar"].cases, Some(1));
+
+        let without = blocks(&[b("Excel", 0, 300).label("Facturar")]);
+        assert_eq!(
+            observed_evidence(&build_episodes(&without))["facturar"].cases,
+            None
+        );
     }
 
     #[test]

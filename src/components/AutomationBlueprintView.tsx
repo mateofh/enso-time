@@ -209,6 +209,7 @@ function ObservedEpisodes({ episodes, locale }: { episodes: NonNullable<Automati
       <span>{copy.episodesSummary(episodes.episodes, episodes.observedDays, episodes.medianMinutes.toLocaleString(locale))}</span>
       {episodes.variants !== undefined && episodes.topVariantShare !== undefined && <span>{copy.episodesVariants(episodes.variants, Math.round(episodes.topVariantShare * 100))}</span>}
       {episodes.topVariantSteps?.length ? <span>{copy.episodesPath}: {episodes.topVariantSteps.join(" → ")}</span> : null}
+      {episodes.cases ? <span>{messages(locale).automate.observedCases(episodes.cases)}</span> : null}
       <small>{copy.episodesComputed(computed)} · {copy.episodesHint}</small>
     </div>
   );

@@ -1535,6 +1535,7 @@ impl ActivityWatchRuntime {
                     correctable: !excluded,
                     context_domain: context.domain,
                     context_project: context.project,
+                    case_refs: Vec::new(),
                 });
             }
         }
@@ -1565,6 +1566,7 @@ impl ActivityWatchRuntime {
                         correctable: false,
                         context_domain: None,
                         context_project: None,
+                        case_refs: Vec::new(),
                     });
                 }
             }
