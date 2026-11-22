@@ -1957,7 +1957,7 @@ fn record_heartbeat(
         capture_issue,
         paused,
     };
-    if let Err(error) = heartbeat.tick(store, Utc::now(), &state) {
+    if let Err(error) = heartbeat.tick(store, Utc::now(), std::time::Instant::now(), &state) {
         eprintln!("Ensō Time uptime log: {error}");
     }
 }
@@ -2036,6 +2036,27 @@ fn scheduler_tick(
     heartbeat: &mut crate::runtime_sessions::Heartbeat,
 ) -> Result<(), String> {
     let operation = capture_gate.tracking_operation()?;
+    // The uptime log goes first: maintenance below can fail without making an open app
+    // look closed.
+    let statuses = match is_running(store) {
+        Ok(true) => {
+            let statuses = activity.watcher_statuses();
+            let issue = activity
+                .capture_issue()
+                .and_then(|code| serde_json::to_value(code).ok())
+                .and_then(|value| value.as_str().map(str::to_owned));
+            record_heartbeat(heartbeat, store, &statuses.0, &statuses.1, issue, false);
+            Some(statuses)
+        }
+        Ok(false) => {
+            record_heartbeat(heartbeat, store, "paused", "paused", None, true);
+            None
+        }
+        Err(error) => {
+            eprintln!("Ensō Time uptime log: {error}");
+            None
+        }
+    };
     let settings = store.settings()?;
     let today = Utc::now().date_naive().to_string();
     if store.get_value("last_retention_prune")?.as_deref() != Some(&today) {
@@ -2048,15 +2069,9 @@ fn scheduler_tick(
     }
     schedule_weekly_ai_if_due(app, store, activity, capture_gate, &settings)?;
     if !is_running(store)? {
-        record_heartbeat(heartbeat, store, "paused", "paused", None, true);
         return Ok(());
     }
-    let (window_status, afk_status) = activity.watcher_statuses();
-    let issue = activity
-        .capture_issue()
-        .and_then(|code| serde_json::to_value(code).ok())
-        .and_then(|value| value.as_str().map(str::to_owned));
-    record_heartbeat(heartbeat, store, &window_status, &afk_status, issue, false);
+    let (window_status, afk_status) = statuses.unwrap_or_else(|| activity.watcher_statuses());
     if window_status != "running" || afk_status != "running" {
         if operation.ensure_current().is_err() || activity.shutdown_requested() {
             return Ok(());
@@ -2528,15 +2543,23 @@ mod tests {
         let at =
             |minutes: i64| parse_utc("2026-11-23T10:00:00Z").unwrap() + Duration::minutes(minutes);
         // A quit followed by a restart is deliberate: no notice.
-        Heartbeat::default().tick(&store, at(0), &state).unwrap();
+        Heartbeat::default()
+            .tick(&store, at(0), std::time::Instant::now(), &state)
+            .unwrap();
         close_session(&store, at(1)).unwrap();
-        Heartbeat::default().tick(&store, at(180), &state).unwrap();
+        Heartbeat::default()
+            .tick(&store, at(180), std::time::Instant::now(), &state)
+            .unwrap();
         assert!(capture_gap_notice_inner(&store).unwrap().is_none());
         // The process dies without quitting (session left open); 30 min later: too short.
-        Heartbeat::default().tick(&store, at(210), &state).unwrap();
+        Heartbeat::default()
+            .tick(&store, at(210), std::time::Instant::now(), &state)
+            .unwrap();
         assert!(capture_gap_notice_inner(&store).unwrap().is_none());
         // Dies again; two hours later the notice appears, until it is dismissed.
-        Heartbeat::default().tick(&store, at(330), &state).unwrap();
+        Heartbeat::default()
+            .tick(&store, at(330), std::time::Instant::now(), &state)
+            .unwrap();
         let notice = capture_gap_notice_inner(&store).unwrap().unwrap();
         assert_eq!(notice.start, at(210).to_rfc3339());
         assert_eq!(notice.end, at(330).to_rfc3339());

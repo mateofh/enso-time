@@ -49,10 +49,22 @@ impl RuntimeSessionV1 {
     }
 }
 
+/// Wall time that elapsed beyond the monotonic clock: on macOS the monotonic clock stops
+/// during sleep, so this separates a suspended machine from a slow scheduler.
+const MIN_SLEEP_DRIFT_SECONDS: i64 = 60;
+
 /// In-memory memory of the previous tick of this process.
 #[derive(Debug, Default)]
 pub struct Heartbeat {
-    last_tick: Option<DateTime<Utc>>,
+    last_tick: Option<(DateTime<Utc>, std::time::Instant)>,
+}
+
+/// A long wall gap is sleep when the monotonic clock did not advance with it (macOS). Where
+/// the monotonic clock may keep running during sleep (other platforms), a long gap is
+/// still read as sleep: the scheduler thread cannot be delayed that long otherwise.
+fn missed_ticks_were_sleep(wall_gap: i64, mono_gap: i64) -> bool {
+    wall_gap > MAX_TICK_GAP_SECONDS
+        && (!cfg!(target_os = "macos") || wall_gap - mono_gap > MIN_SLEEP_DRIFT_SECONDS)
 }
 
 impl Heartbeat {
@@ -60,13 +72,15 @@ impl Heartbeat {
         &mut self,
         store: &LocalStore,
         now: DateTime<Utc>,
+        mono: std::time::Instant,
         state: &RuntimeStateV1,
     ) -> Result<(), String> {
-        let slept = self
-            .last_tick
-            .is_some_and(|previous| (now - previous).num_seconds() > MAX_TICK_GAP_SECONDS);
+        let slept = self.last_tick.is_some_and(|(wall, previous)| {
+            let mono_gap = mono.saturating_duration_since(previous).as_secs() as i64;
+            missed_ticks_were_sleep((now - wall).num_seconds(), mono_gap)
+        });
         record_tick(store, now, state, self.last_tick.is_some(), slept)?;
-        self.last_tick = Some(now);
+        self.last_tick = Some((now, mono));
         Ok(())
     }
 }
@@ -192,13 +206,34 @@ pub fn record_tick(
         .map_err(|error| error.to_string())
 }
 
-/// Called from the app's exit path. A no-op when nothing is open.
+/// Called from the app's exit path. A no-op when nothing is open. If the open session is
+/// stale (the machine slept and the app quit before the next tick), the stale stretch
+/// ends as sleep and the quit is recorded as its own instant, so the gap is kept.
 pub fn close_session(store: &LocalStore, now: DateTime<Utc>) -> Result<(), String> {
     let connection = store.connection()?;
-    if let Some(open) = open_session(&connection)? {
-        end_session(&connection, open.id, Some(now), "quit")?;
+    let Some(open) = open_session(&connection)? else {
+        return Ok(());
+    };
+    if (now - open.last_seen_at).num_seconds() <= MAX_TICK_GAP_SECONDS {
+        return end_session(&connection, open.id, Some(now), "quit");
     }
-    Ok(())
+    end_session(&connection, open.id, None, "sleep")?;
+    connection
+        .execute(
+            "INSERT INTO runtime_sessions
+               (started_at, last_seen_at, window_status, afk_status, capture_issue, paused,
+                ended_reason)
+             VALUES (?1, ?1, ?2, ?3, ?4, ?5, 'quit')",
+            params![
+                now.to_rfc3339(),
+                open.window_status,
+                open.afk_status,
+                open.capture_issue,
+                open.paused
+            ],
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 /// Sessions overlapping `[from, to]`, plus the last one before `from` so the gap at the
@@ -300,6 +335,11 @@ mod tests {
         crate::models::parse_utc("2026-11-23T13:00:00Z").unwrap() + Duration::minutes(minutes)
     }
 
+    /// Monotonic instant matching `at(minutes)` while the machine stays awake.
+    fn awake(base: std::time::Instant, minutes: i64) -> std::time::Instant {
+        base + std::time::Duration::from_secs((minutes * 60) as u64)
+    }
+
     fn all(store: &LocalStore) -> Vec<RuntimeSessionV1> {
         sessions_between(store, at(-10_000), at(10_000)).unwrap()
     }
@@ -307,10 +347,16 @@ mod tests {
     #[test]
     fn identical_ticks_compact_into_one_row() {
         let (_temp, store) = store();
+        let base = std::time::Instant::now();
         let mut heartbeat = Heartbeat::default();
         for tick in 0..20 {
             heartbeat
-                .tick(&store, at(0) + Duration::seconds(30 * tick), &running())
+                .tick(
+                    &store,
+                    at(0) + Duration::seconds(30 * tick),
+                    base + std::time::Duration::from_secs(30 * tick as u64),
+                    &running(),
+                )
                 .unwrap();
         }
         let sessions = all(&store);
@@ -323,19 +369,36 @@ mod tests {
     #[test]
     fn state_change_sleep_quit_and_lost_end_rows_with_their_reason() {
         let (_temp, store) = store();
+        let base = std::time::Instant::now();
         let mut heartbeat = Heartbeat::default();
-        heartbeat.tick(&store, at(0), &running()).unwrap();
+        heartbeat
+            .tick(&store, at(0), awake(base, 0), &running())
+            .unwrap();
         let mut down = running();
         down.window_status = "stopped".into();
-        heartbeat.tick(&store, at(1), &down).unwrap();
+        heartbeat
+            .tick(&store, at(1), awake(base, 1), &down)
+            .unwrap();
         // Missed ticks for 20 minutes: the machine slept.
-        heartbeat.tick(&store, at(21), &down).unwrap();
+        // The monotonic clock barely moved while the wall clock jumped: suspended.
+        heartbeat
+            .tick(
+                &store,
+                at(21),
+                awake(base, 1) + std::time::Duration::from_secs(30),
+                &down,
+            )
+            .unwrap();
         close_session(&store, at(22)).unwrap();
         // A new process starts; then it dies without quitting and another one starts.
         let mut second = Heartbeat::default();
-        second.tick(&store, at(30), &running()).unwrap();
+        second
+            .tick(&store, at(30), awake(base, 30), &running())
+            .unwrap();
         let mut third = Heartbeat::default();
-        third.tick(&store, at(90), &running()).unwrap();
+        third
+            .tick(&store, at(90), awake(base, 90), &running())
+            .unwrap();
 
         let sessions = all(&store);
         let reasons = sessions
@@ -361,13 +424,54 @@ mod tests {
     }
 
     #[test]
+    fn a_slow_scheduler_is_not_mistaken_for_sleep_on_macos() {
+        let (_temp, store) = store();
+        let base = std::time::Instant::now();
+        let mut heartbeat = Heartbeat::default();
+        heartbeat
+            .tick(&store, at(0), awake(base, 0), &running())
+            .unwrap();
+        // Both clocks advanced 5 minutes: the process was busy, not suspended.
+        heartbeat
+            .tick(&store, at(5), awake(base, 5), &running())
+            .unwrap();
+        let sessions = all(&store);
+        if cfg!(target_os = "macos") {
+            assert_eq!(sessions.len(), 1);
+            assert_eq!(sessions[0].last_seen_at, at(5));
+        } else {
+            assert_eq!(sessions[0].ended_reason.as_deref(), Some("sleep"));
+        }
+    }
+
+    #[test]
+    fn quitting_right_after_waking_keeps_the_sleep_gap() {
+        let (_temp, store) = store();
+        let base = std::time::Instant::now();
+        let mut heartbeat = Heartbeat::default();
+        heartbeat
+            .tick(&store, at(0), awake(base, 0), &running())
+            .unwrap();
+        // The machine sleeps two hours and the app quits before the next tick.
+        close_session(&store, at(120)).unwrap();
+        let sessions = all(&store);
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].last_seen_at, at(0));
+        assert_eq!(sessions[0].ended_reason.as_deref(), Some("sleep"));
+        assert_eq!(sessions[1].started_at, at(120));
+        assert_eq!(sessions[1].ended_reason.as_deref(), Some("quit"));
+    }
+
+    #[test]
     fn retention_prunes_old_sessions_and_delete_all_removes_every_session() {
         let (_temp, store) = store();
         let old = crate::models::parse_utc("2026-01-01T10:00:00Z").unwrap();
-        Heartbeat::default().tick(&store, old, &running()).unwrap();
+        Heartbeat::default()
+            .tick(&store, old, std::time::Instant::now(), &running())
+            .unwrap();
         close_session(&store, old + Duration::minutes(5)).unwrap();
         Heartbeat::default()
-            .tick(&store, Utc::now(), &running())
+            .tick(&store, Utc::now(), std::time::Instant::now(), &running())
             .unwrap();
         store.prune_context_and_ai_runs(Some(30)).unwrap();
         let remaining = sessions_between(&store, old - Duration::days(1), Utc::now()).unwrap();
@@ -380,11 +484,15 @@ mod tests {
     #[test]
     fn range_query_includes_the_session_before_the_range() {
         let (_temp, store) = store();
+        let base = std::time::Instant::now();
         let mut heartbeat = Heartbeat::default();
-        heartbeat.tick(&store, at(0), &running()).unwrap();
+        heartbeat
+            .tick(&store, at(0), awake(base, 0), &running())
+            .unwrap();
         close_session(&store, at(5)).unwrap();
         let mut next = Heartbeat::default();
-        next.tick(&store, at(100), &running()).unwrap();
+        next.tick(&store, at(100), awake(base, 100), &running())
+            .unwrap();
         let sessions = sessions_between(&store, at(50), at(200)).unwrap();
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].ended_reason.as_deref(), Some("quit"));
