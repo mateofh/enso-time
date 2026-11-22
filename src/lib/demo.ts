@@ -91,8 +91,8 @@ export const demoObserved = {
 
 export const demoCaptureHealth = {
   activeSeconds: 6 * 3600,
-  unknownShare: 0.42,
-  topUnknown: [{ app: "google chrome", seconds: 2 * 3600 }, { app: "notes", seconds: 600 }],
+  unknownShare: 0.31,
+  topUnknown: [{ app: "microsoft edge", seconds: 2 * 3600 }, { app: "preview", seconds: 600 }],
   titles: "missing" as const,
   titledShare: 0,
   accessibilityFix: true,

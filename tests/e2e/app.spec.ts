@@ -281,7 +281,7 @@ test("maps, saves, resumes, and enriches the top candidate workflow", async ({ p
   await expect(openAccessibility).toBeEnabled();
   await expect(health.getByRole("alert")).toHaveCount(0);
   await expect(health.getByText("La extensión no está emparejada: el navegador cuenta como una sola app.")).toBeVisible();
-  await expect(health.getByText("42% del tiempo activo. Sobre todo: google chrome, notes.")).toBeVisible();
+  await expect(health.getByText("31% del tiempo activo. Sobre todo: microsoft edge, preview.")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Traspasos más repetidos" })).toBeVisible();
   await expect(page.getByText("mail.google.com → excel", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Levantar workflow" }).click();
