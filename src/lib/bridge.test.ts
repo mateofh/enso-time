@@ -86,4 +86,16 @@ describe("preview persistence evidence guards", () => {
     expect(saved.status).toBe("draft");
     await expect(bridge.exportAutomationBlueprint(source.candidateId, 1, "markdown", "en")).rejects.toThrow();
   });
+
+  it("keeps cached observed episodes on read and save responses", async () => {
+    const source = { ...intake, candidateId: candidateId(intake.candidateLabel) };
+    const observedEpisodes = { episodes: 4, observedDays: 3, medianMinutes: 14, computedAt: "2026-08-21T12:00:00.000Z" };
+    let stored = JSON.stringify({ settings: { locale: "en" }, workflowIntakes: [source], checkIns: [], observedEvidence: { [source.candidateId]: observedEpisodes } });
+    vi.stubGlobal("window", {});
+    vi.stubGlobal("localStorage", { getItem: () => stored, setItem: (_key: string, value: string) => { stored = value; } });
+    const initial = await bridge.getAutomationBlueprint(source.candidateId, "en");
+    expect(initial!.evidence.observedEpisodes).toEqual(observedEpisodes);
+    const saved = await bridge.saveAutomationBlueprint({ draft: { ...initial!.draft, runsPerWeek: 3 }, expectedRevision: 0 }, "en");
+    expect(saved.evidence.observedEpisodes).toEqual(observedEpisodes);
+  });
 });

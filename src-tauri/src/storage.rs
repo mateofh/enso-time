@@ -219,6 +219,11 @@ impl LocalStore {
                  );
                  CREATE INDEX IF NOT EXISTS classification_overrides_range_idx
                    ON classification_overrides(event_start, event_end);
+                 CREATE TABLE IF NOT EXISTS candidate_observed_evidence (
+                   candidate_id TEXT PRIMARY KEY,
+                   payload_json TEXT NOT NULL,
+                   computed_at TEXT NOT NULL
+                 );
                  CREATE TABLE IF NOT EXISTS context_observations (
                    id TEXT PRIMARY KEY,
                    source TEXT NOT NULL,
@@ -849,6 +854,12 @@ impl LocalStore {
             .map_err(|error| error.to_string())?;
         transaction
             .execute(
+                "DELETE FROM candidate_observed_evidence WHERE computed_at < ?1",
+                [&cutoff],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
                 "DELETE FROM ai_feedback WHERE run_id IN
                    (SELECT id FROM ai_evaluation_runs WHERE created_at < ?1)",
                 [&cutoff],
@@ -862,6 +873,59 @@ impl LocalStore {
             .map_err(|error| error.to_string())?;
         transaction.commit().map_err(|error| error.to_string())?;
         Ok(observations + runs)
+    }
+
+    /// Replaces the cached observed evidence with the latest diagnostic's candidates, so
+    /// ids that are no longer candidates do not keep stale evidence.
+    pub fn replace_candidate_observed_evidence(
+        &self,
+        evidence: &[(String, crate::episodes::ObservedEvidenceV1)],
+        computed_at: &str,
+    ) -> Result<(), String> {
+        crate::models::parse_utc(computed_at)?;
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute("DELETE FROM candidate_observed_evidence", [])
+            .map_err(|error| error.to_string())?;
+        for (candidate_id, item) in evidence {
+            let payload = serde_json::to_string(item).map_err(|error| error.to_string())?;
+            transaction
+                .execute(
+                    "INSERT INTO candidate_observed_evidence (candidate_id, payload_json, computed_at)
+                     VALUES (?1, ?2, ?3)",
+                    params![candidate_id, payload, computed_at],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        transaction.commit().map_err(|error| error.to_string())
+    }
+
+    pub fn candidate_observed_evidence(
+        &self,
+        candidate_id: &str,
+    ) -> Result<Option<crate::blueprint::ObservedEpisodesV1>, String> {
+        let connection = self.connection()?;
+        let row = connection
+            .query_row(
+                "SELECT payload_json, computed_at FROM candidate_observed_evidence
+                 WHERE candidate_id = ?1",
+                [candidate_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        // A payload from an older shape is ignored rather than failing the blueprint.
+        Ok(row.and_then(|(payload, computed_at)| {
+            serde_json::from_str(&payload).ok().map(|evidence| {
+                crate::blueprint::ObservedEpisodesV1 {
+                    evidence,
+                    computed_at,
+                }
+            })
+        }))
     }
 
     pub fn list_workflow_intakes(&self) -> Result<Vec<WorkflowIntakeV1>, String> {
@@ -1263,6 +1327,9 @@ impl LocalStore {
                 .map_err(|error| error.to_string())?;
             transaction
                 .execute("DELETE FROM context_observations", [])
+                .map_err(|error| error.to_string())?;
+            transaction
+                .execute("DELETE FROM candidate_observed_evidence", [])
                 .map_err(|error| error.to_string())?;
             transaction
                 .execute("DELETE FROM connector_clients", [])

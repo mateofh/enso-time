@@ -5,6 +5,11 @@ use crate::models::{
 use chrono::Utc;
 use std::collections::{HashMap, HashSet};
 
+/// Task switches (not window changes) above which batching is recommended. Calibrated
+/// for episode switches, which are far fewer than the former app-change count.
+const TASK_SWITCHES_PER_HOUR_LIMIT: f64 = 4.0;
+const MIN_TASK_SWITCHES_LIMIT: f64 = 4.0;
+
 pub fn create_diagnostic(
     blocks: &[TimelineBlockV1],
     checkins: &[CheckInV1],
@@ -23,15 +28,12 @@ pub fn create_diagnostic(
         .filter(|block| block.category == "focus")
         .map(|block| block.duration_seconds)
         .sum();
-    let switches = blocks
-        .windows(2)
-        .filter(|pair| pair[0].app != pair[1].app)
-        .count();
+    let episodes = crate::episodes::build_episodes(blocks);
+    let switches = crate::episodes::task_switches(&episodes);
     let answered = checkins
         .iter()
         .filter(|item| item.status == "answered")
         .count();
-    let episodes = crate::episodes::build_episodes(blocks);
     let mut candidates = score_candidates(blocks, checkins, days_observed, &settings.locale);
     let mut observed = crate::episodes::observed_evidence(&episodes);
     for candidate in &mut candidates {
@@ -55,7 +57,10 @@ pub fn create_diagnostic(
             .into(),
         );
     }
-    if switches as f64 > (active_seconds as f64 / 3600.0 * 12.0).max(8.0) {
+    if switches as f64
+        > (active_seconds as f64 / 3600.0 * TASK_SWITCHES_PER_HOUR_LIMIT)
+            .max(MIN_TASK_SWITCHES_LIMIT)
+    {
         recommendations.push(
             (if english {
                 "Group messages and administrative tasks into two daily windows."

@@ -321,6 +321,8 @@ export interface BlueprintEvidenceV1 {
   declaredRepeatedDays: number;
   rulesQuality: number;
   observedWeeklyFrequency: number;
+  /** Work episodes from the latest diagnostic. Informational: never changes confidence or status. */
+  observedEpisodes?: ObservedEvidenceV1 & { computedAt: string };
 }
 
 export interface BlueprintCompletenessV1 {

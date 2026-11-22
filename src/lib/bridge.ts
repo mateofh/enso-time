@@ -50,6 +50,8 @@ interface WebState {
   automationBlueprints?: AutomationBlueprintDraftV1[];
   automationBlueprintError?: string | null;
   automationBlueprintConflict?: { currentRevision: number } | null;
+  /** Mirrors the desktop cache of observed evidence written by the latest diagnostic. */
+  observedEvidence?: Record<string, NonNullable<BlueprintEvidenceV1["observedEpisodes"]>>;
   classificationRules?: ClassificationRuleV1[];
   classificationOverrides?: Record<string, { category: CategoryId; activityLabel?: string }>;
   aiReports?: EvaluationReportV1[];
@@ -154,6 +156,12 @@ function previewRuleImpact(rule: ClassificationRuleV1, state: WebState): RuleImp
   const overrides = state.classificationOverrides ?? {};
   const matches = demoTimeline.filter((block) => block.correctable && !overrides[block.id] && ruleMatches(rule, block));
   return { sessions: matches.length, durationSeconds: matches.reduce((sum, block) => sum + block.durationSeconds, 0) };
+}
+
+/** Every preview blueprint response (read, save, refresh, conflict) carries the cached episodes. */
+function previewEvidenceWithEpisodes(intake: WorkflowIntakeV1, state: WebState, locale: string): BlueprintEvidenceV1 {
+  const observedEpisodes = state.observedEvidence?.[intake.candidateId];
+  return { ...previewBlueprintEvidence(intake, state.checkIns, locale), ...(observedEpisodes ? { observedEpisodes } : {}) };
 }
 
 export function previewBlueprintEvidence(intake: WorkflowIntakeV1, checkIns: CheckInV1[], locale: string): BlueprintEvidenceV1 {
@@ -391,6 +399,12 @@ export const bridge = {
     const state = loadWebState();
     const diagnostic = enrichPreviewDiagnostic(createDiagnostic(demoTimeline, state.checkIns, Math.min(days, 5), state.settings.role, state.settings.goals, state.settings.locale), state);
     const [top, ...rest] = diagnostic.candidates;
+    // Refresh the cache only when preview state already exists: a background refresh
+    // right after "delete all data" must not recreate storage.
+    if (top && localStorage.getItem(STORAGE_KEY) !== null) {
+      state.observedEvidence = { [top.id]: { ...demoObserved, computedAt: diagnostic.generatedAt } };
+      saveWebState(state);
+    }
     return { ...diagnostic, candidates: top ? [{ ...top, observed: demoObserved }, ...rest] : [], handoffs: demoHandoffs };
   },
 
@@ -504,7 +518,7 @@ export const bridge = {
     const raw = state.automationBlueprints?.find((item) => item.candidateId === candidateId);
     const base = emptyBlueprintDraft(intake);
     const draft: AutomationBlueprintDraftV1 = raw ? { ...base, ...raw, candidateId, workflowIntakeId: raw.workflowIntakeId ?? intake.id, sourceIntakeUpdatedAt: raw.sourceIntakeUpdatedAt ?? intake.updatedAt, revision: raw.revision ?? 0, stepBoundaries: raw.stepBoundaries ?? base.stepBoundaries } : base;
-    const evidence = previewBlueprintEvidence(intake, state.checkIns, locale);
+    const evidence = previewEvidenceWithEpisodes(intake, state, locale);
     return { ...buildPreviewBlueprint(intake, draft, evidence), conflict: state.automationBlueprintConflict ?? undefined };
   },
 
@@ -515,13 +529,13 @@ export const bridge = {
     if (!intake) throw new BlueprintBridgeError("blueprint.intake_missing");
     const existing = state.automationBlueprints?.find((item) => item.candidateId === input.draft.candidateId);
     if (input.expectedRevision !== undefined && input.expectedRevision !== (existing?.revision ?? 0)) {
-      throw new BlueprintBridgeError("blueprint.conflict", existing ? buildPreviewBlueprint(intake, existing, previewBlueprintEvidence(intake, state.checkIns, locale)) : undefined);
+      throw new BlueprintBridgeError("blueprint.conflict", existing ? buildPreviewBlueprint(intake, existing, previewEvidenceWithEpisodes(intake, state, locale)) : undefined);
     }
     const now = new Date().toISOString();
     const draft: AutomationBlueprintDraftV1 = { ...input.draft, revision: (existing?.revision ?? 0) + 1, updatedAt: now, createdAt: existing?.createdAt ?? input.draft.createdAt };
     const automationBlueprints = [...(state.automationBlueprints ?? []).filter((item) => item.candidateId !== draft.candidateId), draft];
     saveWebState({ ...state, automationBlueprints });
-    return buildPreviewBlueprint(intake, draft, previewBlueprintEvidence(intake, state.checkIns, locale));
+    return buildPreviewBlueprint(intake, draft, previewEvidenceWithEpisodes(intake, state, locale));
   },
 
   async refreshAutomationBlueprintSource(candidateId: string, expectedRevision: number, locale: string): Promise<AutomationBlueprintV1> {
@@ -530,11 +544,11 @@ export const bridge = {
     const intake = (state.workflowIntakes ?? []).find((item) => item.candidateId === candidateId);
     const existing = state.automationBlueprints?.find((item) => item.candidateId === candidateId);
     if (!intake || !existing) throw new BlueprintBridgeError("blueprint.not_found");
-    if (existing.revision !== expectedRevision) throw new BlueprintBridgeError("blueprint.conflict", buildPreviewBlueprint(intake, existing, previewBlueprintEvidence(intake, state.checkIns, locale)));
+    if (existing.revision !== expectedRevision) throw new BlueprintBridgeError("blueprint.conflict", buildPreviewBlueprint(intake, existing, previewEvidenceWithEpisodes(intake, state, locale)));
     const reset = emptyBlueprintDraft(intake);
     const draft: AutomationBlueprintDraftV1 = { ...reset, revision: existing.revision + 1, createdAt: existing.createdAt, runsPerWeek: existing.runsPerWeek, dataSensitivity: existing.dataSensitivity, sideEffectLevel: existing.sideEffectLevel, verificationMode: existing.verificationMode, verificationMinutesPerRun: existing.verificationMinutesPerRun, recoveryPlan: existing.recoveryPlan };
     saveWebState({ ...state, automationBlueprints: [...(state.automationBlueprints ?? []).filter((item) => item.candidateId !== candidateId), draft] });
-    return buildPreviewBlueprint(intake, draft, previewBlueprintEvidence(intake, state.checkIns, locale));
+    return buildPreviewBlueprint(intake, draft, previewEvidenceWithEpisodes(intake, state, locale));
   },
 
   async exportAutomationBlueprint(candidateId: string, expectedRevision: number, format: "markdown" | "json", locale: string): Promise<string> {

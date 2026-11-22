@@ -923,9 +923,21 @@ pub fn generate_diagnostic(state: State<'_, AppState>, days: u16) -> Result<Diag
     )?;
     let observed = ((now - start).num_seconds().max(0) as f64 / 86_400.0).min(f64::from(days));
     operation.ensure_current()?;
-    Ok(create_diagnostic(
-        &blocks, &checkins, observed, &settings, &workflows,
-    ))
+    let diagnostic = create_diagnostic(&blocks, &checkins, observed, &settings, &workflows);
+    let cached = diagnostic
+        .candidates
+        .iter()
+        .filter_map(|candidate| {
+            candidate
+                .observed
+                .clone()
+                .map(|evidence| (candidate.id.clone(), evidence))
+        })
+        .collect::<Vec<_>>();
+    state
+        .store
+        .replace_candidate_observed_evidence(&cached, &diagnostic.generated_at)?;
+    Ok(diagnostic)
 }
 
 fn intelligence_bundle(
@@ -1211,17 +1223,31 @@ fn assess_stored_blueprint(
     let intake = store
         .workflow_intake_for_candidate(&draft.candidate_id)?
         .ok_or_else(|| "El intake fuente ya no existe".to_string())?;
+    assess_with_store(store, draft, &intake, locale)
+}
+
+/// Assesses a draft with the check-in evidence and, as information only, the cached
+/// work episodes from the latest diagnostic.
+fn assess_with_store(
+    store: &LocalStore,
+    draft: crate::blueprint::AutomationBlueprintDraftV1,
+    intake: &WorkflowIntakeV1,
+    locale: &str,
+) -> Result<AutomationBlueprintV1, String> {
     let observed = store.blueprint_observation_counts(&draft.candidate_id)?;
-    assess_blueprint(
+    let observed_episodes = store.candidate_observed_evidence(&draft.candidate_id)?;
+    let mut blueprint = assess_blueprint(
         draft,
-        &intake,
+        intake,
         observed.total,
         observed.repeated,
         observed.observed_days,
         observed.declared_repeated_days,
         observed.rules_quality,
         locale,
-    )
+    )?;
+    blueprint.evidence.observed_episodes = observed_episodes;
+    Ok(blueprint)
 }
 
 fn get_automation_blueprint_inner(
@@ -1239,18 +1265,7 @@ fn get_automation_blueprint_inner(
     let draft = store
         .automation_blueprint_draft(candidate_id)?
         .unwrap_or_else(|| ephemeral_draft(&intake));
-    let observed = store.blueprint_observation_counts(candidate_id)?;
-    assess_blueprint(
-        draft,
-        &intake,
-        observed.total,
-        observed.repeated,
-        observed.observed_days,
-        observed.declared_repeated_days,
-        observed.rules_quality,
-        locale,
-    )
-    .map(Some)
+    assess_with_store(store, draft, &intake, locale).map(Some)
 }
 
 #[tauri::command]
@@ -2251,6 +2266,118 @@ mod tests {
         gate.generation.fetch_add(1, Ordering::AcqRel);
         assert!(record_native_action_error(&store, &gate, original_generation).is_err());
         assert!(store.get_value("native_action_error").unwrap().is_none());
+    }
+
+    #[test]
+    fn cached_observed_episodes_reach_the_blueprint_without_opening_the_gate() {
+        use crate::blueprint::{
+            DataSensitivityV1, SideEffectLevelV1, StepBoundaryV1, StepDispositionV1,
+            VerificationModeV1,
+        };
+        let (_directory, store, intake) = blueprint_command_fixture();
+        let candidate_id = intake.candidate_id.clone();
+        // A complete draft with an automatable step: only confirmed repetitions are missing.
+        let mut draft = ephemeral_draft(&intake);
+        draft.runs_per_week = Some(5);
+        draft.step_boundaries = vec![StepBoundaryV1 {
+            step_id: "step-01".into(),
+            disposition: StepDispositionV1::Automatable,
+            rationale: Some("Reglas deterministas".into()),
+        }];
+        draft.data_sensitivity = DataSensitivityV1::Low;
+        draft.side_effect_level = SideEffectLevelV1::Reversible;
+        draft.verification_mode = VerificationModeV1::EveryRun;
+        draft.verification_minutes_per_run = Some(5);
+        draft.recovery_plan = Some("Restaurar el reporte anterior".into());
+
+        let evidence = crate::episodes::ObservedEvidenceV1 {
+            episodes: 40,
+            observed_days: 20,
+            median_minutes: 14.0,
+            variants: Some(1),
+            top_variant_share: Some(1.0),
+            top_variant_steps: vec!["mail.google.com".into(), "excel".into()],
+        };
+        store
+            .replace_candidate_observed_evidence(
+                &[(candidate_id.clone(), evidence.clone())],
+                "2026-11-21T12:00:00Z",
+            )
+            .unwrap();
+        let observed_only = assess_with_store(&store, draft.clone(), &intake, "es-419").unwrap();
+        let cached = observed_only.evidence.observed_episodes.as_ref().unwrap();
+        assert_eq!(cached.evidence, evidence);
+        assert_eq!(cached.computed_at, "2026-11-21T12:00:00Z");
+        assert_eq!(observed_only.completeness.score, 100);
+        // Abundant observed episodes never replace confirmed repetitions.
+        assert_eq!(observed_only.status, BlueprintStatusV1::Draft);
+
+        // Positive control: two confirmed repetitions on different days open the gate.
+        for (position, start) in [(1, "2025-01-06T10:00:00Z"), (2, "2025-01-07T10:00:00Z")] {
+            let checkin = CheckInV1 {
+                id: format!("gate-control-{position}"),
+                interval_start: start.into(),
+                interval_end: (parse_utc(start).unwrap() + Duration::minutes(15)).to_rfc3339(),
+                reason: "ambiguous".into(),
+                status: "pending".into(),
+                activity_label: None,
+                category: None,
+                project: None,
+                repetitive: None,
+                rules_clear: None,
+                created_at: start.into(),
+                answered_at: None,
+            };
+            store.create_checkin(&checkin).unwrap();
+            store
+                .answer_checkin(&crate::models::CheckInAnswer {
+                    id: checkin.id,
+                    activity_label: intake.candidate_label.clone(),
+                    category: "admin".into(),
+                    project: None,
+                    repetitive: true,
+                    rules_clear: true,
+                })
+                .unwrap();
+        }
+        let confirmed = assess_with_store(&store, draft, &intake, "es-419").unwrap();
+        assert_eq!(confirmed.status, BlueprintStatusV1::Ready);
+        assert_eq!(
+            confirmed.estimates.confidence,
+            assess_blueprint(
+                confirmed.draft.clone(),
+                &intake,
+                2,
+                2,
+                2.0,
+                2.0,
+                1.0,
+                "es-419"
+            )
+            .unwrap()
+            .estimates
+            .confidence,
+            "observed episodes must not change confidence"
+        );
+
+        store
+            .replace_candidate_observed_evidence(&[], "2026-11-22T12:00:00Z")
+            .unwrap();
+        assert!(store
+            .candidate_observed_evidence(&candidate_id)
+            .unwrap()
+            .is_none());
+        store
+            .replace_candidate_observed_evidence(
+                &[(candidate_id.clone(), evidence)],
+                "2026-11-22T12:00:00Z",
+            )
+            .unwrap();
+        store.delete_all().unwrap();
+        assert!(store
+            .candidate_observed_evidence(&candidate_id)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

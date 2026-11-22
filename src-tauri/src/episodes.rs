@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Local, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::models::{canonicalize_candidate_label, TimelineBlockV1};
 
@@ -35,6 +35,10 @@ pub struct Episode {
     pub end: DateTime<Utc>,
     /// Canonical candidate label when the episode holds confirmed evidence.
     pub candidate_key: Option<String>,
+    /// Confirmed label, else `category:<id>`; `None` when every block was unknown.
+    pub task_key: Option<String>,
+    /// Started after AFK, a declared break, an excluded app or a long gap.
+    pub after_break: bool,
     /// Consecutive distinct steps (domain, else app), e.g. `[mail.google.com, excel, app.hubspot.com]`.
     pub steps: Vec<String>,
     pub touch_seconds: i64,
@@ -49,18 +53,18 @@ pub struct HandoffV1 {
 }
 
 /// What the capture observed for one candidate, kept apart from what the person declared.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ObservedEvidenceV1 {
     pub episodes: usize,
     pub observed_days: usize,
     pub median_minutes: f64,
     /// Present only from `MIN_EPISODES_FOR_VARIANTS` episodes on.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variants: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_variant_share: Option<f64>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub top_variant_steps: Vec<String>,
 }
 
@@ -208,6 +212,8 @@ pub fn build_episodes(blocks: &[TimelineBlockV1]) -> Vec<Episode> {
                 start: run.start,
                 end: run.start,
                 candidate_key: None,
+                task_key: None,
+                after_break: false,
                 steps: Vec::new(),
                 touch_seconds: 0,
             };
@@ -223,7 +229,11 @@ pub fn build_episodes(blocks: &[TimelineBlockV1]) -> Vec<Episode> {
     }
     absorb_short_excursions(drafts)
         .into_iter()
-        .map(|draft| draft.episode)
+        .map(|draft| Episode {
+            task_key: draft.task_key,
+            after_break: draft.after_break,
+            ..draft.episode
+        })
         .collect()
 }
 
@@ -261,6 +271,22 @@ fn absorb_short_excursions(drafts: Vec<Draft>) -> Vec<Draft> {
         }
     }
     merged
+}
+
+/// Moves from one task to a different one without a pause in between. Window changes
+/// inside a task (Gmail → Sheets for the same invoice) are not switches.
+pub fn task_switches(episodes: &[Episode]) -> usize {
+    episodes
+        .windows(2)
+        .filter(|pair| {
+            let continuous = !pair[1].after_break
+                && (pair[1].start - pair[0].end).num_seconds() <= MAX_GAP_SECONDS;
+            continuous
+                && pair[0].task_key.is_some()
+                && pair[1].task_key.is_some()
+                && pair[0].task_key != pair[1].task_key
+        })
+        .count()
 }
 
 /// Most repeated step-to-step handoffs inside episodes (swivel-chair candidates).
@@ -501,6 +527,32 @@ mod tests {
         let episodes = build_episodes(&blocks(&items));
         // Equal interleaving is two tasks, not one task with detours.
         assert_eq!(episodes.len(), 30, "got {} episodes", episodes.len());
+    }
+
+    #[test]
+    fn task_switches_ignore_window_changes_inside_a_task_and_pauses() {
+        let episodes = build_episodes(&blocks(&[
+            b("Google Chrome", 0, 300)
+                .domain("mail.google.com")
+                .label("Facturar"),
+            b("Excel", 300, 600).label("Facturar"),
+            b("Figma", 600, 1200).label("Diseñar"),
+            b("Excel", 1200, 1500).label("Facturar"),
+            b("Excel", 3000, 3300).label("Diseñar"),
+        ]));
+        assert_eq!(episodes.len(), 4);
+        // Facturar → Diseñar → Facturar are switches; the move after a 25 min pause is not.
+        assert_eq!(task_switches(&episodes), 2);
+
+        let mut items = blocks(&[
+            b("Excel", 0, 300).label("Facturar"),
+            b("Excel", 300, 330),
+            b("Figma", 330, 900).label("Diseñar"),
+        ]);
+        items[1].category = "break".into();
+        items[1].classification_source = "checkin".into();
+        // A short declared break is an interruption, not a task switch.
+        assert_eq!(task_switches(&build_episodes(&items)), 0);
     }
 
     #[test]

@@ -291,6 +291,9 @@ input:hover, select:hover, textarea:hover { border-color: var(--border-strong); 
 .evidence-columns strong { font-size: 11px; }
 .evidence-columns ul { margin: 8px 0 0; padding-left: 16px; color: var(--text-secondary); font-size: 11px; line-height: 1.55; }
 .evidence-columns small { color: var(--blue); font-variant-numeric: tabular-nums; }
+.blueprint-episodes { margin-top: 14px; padding: 12px 14px; border-left: 2px solid var(--blue); background: var(--surface); display: grid; gap: 4px; font-size: 11px; color: var(--text-secondary); line-height: 1.5; overflow-wrap: anywhere; }
+.blueprint-episodes strong { color: var(--text); }
+.blueprint-episodes small { font-size: 10px; }
 .blueprint-alert { margin: -10px 0 30px; padding: 16px; border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border)); background: color-mix(in srgb, var(--danger) 7%, var(--surface)); display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: start; color: var(--danger); }
 .blueprint-alert strong { color: var(--text); font-size: 13px; }
 .blueprint-alert p { margin: 4px 0 0; color: var(--text-secondary); font-size: 11px; line-height: 1.45; }

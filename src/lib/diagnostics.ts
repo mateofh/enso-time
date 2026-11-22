@@ -107,6 +107,29 @@ function intakeContext(intake: WorkflowIntakeV1 | undefined, locale: Locale): st
   return `\n\n${labels[0]}\n${values.map((value, index) => `- ${labels[index + 1]}: ${value}`).join("\n")}`;
 }
 
+/** Mirrors the desktop thresholds in `src-tauri/src/diagnostics.rs`. */
+const TASK_SWITCHES_PER_HOUR_LIMIT = 4;
+const MIN_TASK_SWITCHES_LIMIT = 4;
+const MAX_GAP_SECONDS = 120;
+
+/**
+ * Preview-only approximation of the desktop episode-based count: the web demo has no
+ * episode builder, so it counts continuous changes of label (or category), ignoring
+ * unknown and AFK blocks. Window changes within one task are not switches.
+ */
+function approximateTaskSwitches(blocks: TimelineBlockV1[]): number {
+  let switches = 0;
+  let previous: { key: string; end: number } | undefined;
+  for (const block of [...blocks].sort((left, right) => left.start.localeCompare(right.start))) {
+    if (block.afk || block.category === "unknown" || block.category === "break") { previous = undefined; continue; }
+    const key = block.activityLabel?.trim().toLowerCase() || `category:${block.category}`;
+    const start = Date.parse(block.start);
+    if (previous && previous.key !== key && (start - previous.end) / 1000 <= MAX_GAP_SECONDS) switches += 1;
+    previous = { key, end: Date.parse(block.end) };
+  }
+  return switches;
+}
+
 export function createDiagnostic(
   blocks: TimelineBlockV1[],
   checkIns: CheckInV1[],
@@ -117,16 +140,13 @@ export function createDiagnostic(
 ): DiagnosticV1 {
   const activeSeconds = blocks.filter((block) => !block.afk).reduce((sum, block) => sum + block.durationSeconds, 0);
   const focusSeconds = blocks.filter((block) => block.category === "focus").reduce((sum, block) => sum + block.durationSeconds, 0);
-  const switches = blocks.reduce((count, block, index) => {
-    const previous = blocks[index - 1];
-    return count + (previous && previous.app !== block.app ? 1 : 0);
-  }, 0);
+  const switches = approximateTaskSwitches(blocks);
   const answered = checkIns.filter((checkIn) => checkIn.status === "answered").length;
   const candidates = scoreCandidate(checkIns, daysObserved, blocks, locale);
   const recommendations: string[] = [];
 
   if (activeSeconds > 0 && focusSeconds / activeSeconds < 0.35) recommendations.push((locale === "en" ? "Protect a 45-minute focus block before opening communication apps." : "Reserva un bloque protegido de 45 minutos antes de abrir comunicación."));
-  if (switches > Math.max(8, activeSeconds / 3600 * 12)) recommendations.push((locale === "en" ? "Group messages and administrative tasks into two daily windows." : "Agrupa mensajes y tareas administrativas en dos ventanas del día."));
+  if (switches > Math.max(MIN_TASK_SWITCHES_LIMIT, activeSeconds / 3600 * TASK_SWITCHES_PER_HOUR_LIMIT)) recommendations.push((locale === "en" ? "Group messages and administrative tasks into two daily windows." : "Agrupa mensajes y tareas administrativas en dos ventanas del día."));
   if (checkIns.some((checkIn) => checkIn.status === "pending")) recommendations.push((locale === "en" ? "Resolve pending intervals to improve the diagnosis." : "Resuelve los intervalos pendientes para mejorar la calidad del diagnóstico."));
   if (candidates[0]) recommendations.push(locale === "en" ? `Validate “${candidates[0].activityLabel}” as your first automation experiment.` : `Valida “${candidates[0].activityLabel}” como primer experimento de automatización.`);
   if (recommendations.length === 0) recommendations.push((locale === "en" ? "Keep recording context; the current pattern is stable and does not require an immediate change." : "Sigue registrando contexto; el patrón actual todavía es estable y no exige un cambio inmediato."));
