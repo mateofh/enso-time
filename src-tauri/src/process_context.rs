@@ -24,12 +24,41 @@ pub struct BlockContext {
     pub project: Option<String>,
 }
 
-pub fn is_excluded_app(app: &str, excluded_apps: &[String]) -> bool {
+/// Normalized app identity that also matches Windows executable basenames
+/// (`aw-watcher-window` reports `chrome.exe`, `1Password.exe`, ...).
+fn app_identity(app: &str) -> String {
     let normalized = crate::activitywatch::normalize_match_text(app);
-    !normalized.is_empty()
+    normalized
+        .strip_suffix(".exe")
+        .map(str::to_string)
+        .unwrap_or(normalized)
+}
+
+pub fn is_excluded_app(app: &str, excluded_apps: &[String]) -> bool {
+    let identity = app_identity(app);
+    !identity.is_empty()
         && excluded_apps
             .iter()
-            .any(|excluded| crate::activitywatch::normalize_match_text(excluded) == normalized)
+            .any(|excluded| app_identity(excluded) == identity)
+}
+
+/// The only browser connector is the Chromium extension, and it reports the active tab
+/// even while another browser is frontmost. Only Chromium-family windows may take its
+/// domain; Safari and Firefox blocks must never inherit Chrome's background tab.
+pub fn accepts_browser_context(app: &str) -> bool {
+    [
+        "google chrome",
+        "chrome",
+        "chromium",
+        "microsoft edge",
+        "msedge",
+        "brave browser",
+        "brave",
+        "arc",
+        "opera",
+        "vivaldi",
+    ]
+    .contains(&app_identity(app).as_str())
 }
 
 /// Redacts emails, card-like numbers, API keys and phone numbers from a window title.
@@ -40,13 +69,11 @@ pub fn sanitize_window_title(title: &str) -> String {
         .to_string()
 }
 
-fn context_source_for_app(normalized_app: &str) -> Option<&'static str> {
-    if crate::activitywatch::is_browser(normalized_app) {
+fn context_source_for_app(app: &str) -> Option<&'static str> {
+    let identity = app_identity(app);
+    if accepts_browser_context(app) {
         Some("browser")
-    } else if ["visual studio code", "code", "cursor", "vscodium"]
-        .iter()
-        .any(|name| normalized_app == *name)
-    {
+    } else if ["visual studio code", "code", "cursor", "vscodium"].contains(&identity.as_str()) {
         Some("editor")
     } else if [
         "terminal",
@@ -55,10 +82,11 @@ fn context_source_for_app(normalized_app: &str) -> Option<&'static str> {
         "warp",
         "ghostty",
         "windows terminal",
+        "windowsterminal",
         "powershell",
+        "pwsh",
     ]
-    .iter()
-    .any(|name| normalized_app == *name)
+    .contains(&identity.as_str())
     {
         Some("shell")
     } else {
@@ -75,18 +103,18 @@ pub fn dominant_context(
     block_end: DateTime<Utc>,
     observations: &[ParsedObservation<'_>],
 ) -> BlockContext {
-    let Some(source) = context_source_for_app(&crate::activitywatch::normalize_match_text(app))
-    else {
+    let Some(source) = context_source_for_app(app) else {
         return BlockContext::default();
     };
     if block_end <= block_start {
         return BlockContext::default();
     }
     let lookback = block_start - Duration::seconds(CONTEXT_LOOKBACK_SECONDS);
-    let relevant = observations
+    let first = observations.partition_point(|item| item.observed_at < lookback);
+    let last = observations.partition_point(|item| item.observed_at < block_end);
+    let relevant = observations[first..last.max(first)]
         .iter()
         .filter(|item| item.observation.source == source)
-        .filter(|item| item.observed_at >= lookback && item.observed_at < block_end)
         .collect::<Vec<_>>();
     let mut totals: Vec<(&ContextObservationV2, i64)> = Vec::new();
     for (index, item) in relevant.iter().enumerate() {
@@ -248,6 +276,31 @@ mod tests {
         assert!(is_excluded_app("\u{200e}1Password", &excluded));
         assert!(!is_excluded_app("Google Chrome", &excluded));
         assert!(!is_excluded_app("", &excluded));
+        assert!(is_excluded_app("1Password.exe", &excluded));
+    }
+
+    #[test]
+    fn safari_and_firefox_never_inherit_the_chromium_extension_domain() {
+        let observations = vec![observation(
+            "browser",
+            "2026-11-21T12:00:05Z",
+            Some("mail.google.com"),
+            None,
+        )];
+        let parsed = parse_observations(&observations);
+        let (start, end) = (at("2026-11-21T12:00:00Z"), at("2026-11-21T12:02:00Z"));
+        for app in ["Safari", "Firefox", "firefox.exe"] {
+            assert_eq!(
+                dominant_context(app, start, end, &parsed),
+                BlockContext::default()
+            );
+        }
+        for app in ["chrome.exe", "msedge.exe", "Brave Browser"] {
+            assert_eq!(
+                dominant_context(app, start, end, &parsed).domain.as_deref(),
+                Some("mail.google.com")
+            );
+        }
     }
 
     #[test]

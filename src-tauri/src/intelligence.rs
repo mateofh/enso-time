@@ -1440,17 +1440,23 @@ fn normalize_domain(value: Option<String>) -> Result<Option<String>, String> {
     Ok(Some(value))
 }
 
-pub fn redact_sensitive_text(value: &str) -> String {
-    let mut redacted = value.to_string();
-    for pattern in [
+/// Compiled once: redaction now runs on every window title read, not only at ingest.
+static SENSITIVE_PATTERNS: std::sync::LazyLock<Vec<Regex>> = std::sync::LazyLock::new(|| {
+    [
         r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
         r"\b(?:\d[ -]*?){13,19}\b",
         r"(?i)\b(?:sk|pk|api|token|secret)[-_][A-Z0-9_-]{12,}\b",
         r"\b(?:\+?\d[\d .()-]{8,}\d)\b",
-    ] {
-        if let Ok(regex) = Regex::new(pattern) {
-            redacted = regex.replace_all(&redacted, "[REDACTED]").into_owned();
-        }
+    ]
+    .iter()
+    .map(|pattern| Regex::new(pattern).expect("built-in redaction pattern is valid"))
+    .collect()
+});
+
+pub fn redact_sensitive_text(value: &str) -> String {
+    let mut redacted = value.to_string();
+    for regex in SENSITIVE_PATTERNS.iter() {
+        redacted = regex.replace_all(&redacted, "[REDACTED]").into_owned();
     }
     redacted
         .chars()

@@ -549,9 +549,10 @@ fn timeline_for_review(
 
 /// Browser sessions with connector context are reviewed per domain, across browsers.
 fn review_domain(block: &TimelineBlockV1) -> Option<String> {
-    crate::activitywatch::is_browser(&crate::activitywatch::normalize_match_text(&block.app))
-        .then(|| block.context_domain.clone())
-        .flatten()
+    block
+        .context_domain
+        .clone()
+        .filter(|_| crate::process_context::accepts_browser_context(&block.app))
         .filter(|domain| crate::models::validate_rule_domain(domain).is_ok())
 }
 
@@ -1801,7 +1802,12 @@ fn scheduler_tick(
     schedule_screen_ocr_if_due(store, capture_gate, &settings)?;
     let (start, end) = completed_interval(Utc::now(), settings.cadence_minutes);
     let rules = store.classification_rules()?;
-    let Some(reason) = activity.interval_reason(start, end, &settings, &rules)? else {
+    let context = crate::intelligence::timeline_context_between(
+        store,
+        &start.to_rfc3339(),
+        &end.to_rfc3339(),
+    )?;
+    let Some(reason) = activity.interval_reason(start, end, &settings, &rules, &context)? else {
         return Ok(());
     };
     let checkin = CheckInV1 {

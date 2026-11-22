@@ -1253,8 +1253,7 @@ impl ActivityWatchRuntime {
         (window.status, afk.status)
     }
 
-    /// Timeline without connector context. Check-in triggering relies on this on purpose:
-    /// browser intervals must keep prompting even when a domain would classify them.
+    /// Timeline without connector context.
     pub fn timeline(
         &self,
         from: DateTime<Utc>,
@@ -1619,14 +1618,18 @@ impl ActivityWatchRuntime {
         Ok((event.timestamp, event_end))
     }
 
+    /// Built-in domain guesses stay below the ambiguity threshold, so browser intervals
+    /// keep prompting; an explicit user domain rule silences them like any other rule.
     pub fn interval_reason(
         &self,
         from: DateTime<Utc>,
         to: DateTime<Utc>,
         settings: &SettingsV1,
         rules: &[ClassificationRuleV1],
+        observations: &[crate::intelligence::ContextObservationV2],
     ) -> Result<Option<String>, String> {
-        let blocks = self.timeline(from, to, settings, &[], rules, &[])?;
+        let blocks =
+            self.timeline_with_context(from, to, settings, &[], rules, &[], observations)?;
         let interval_seconds = (to - from).num_seconds().max(1);
         let tracked: i64 = blocks.iter().map(|block| block.duration_seconds).sum();
         let afk: i64 = blocks
@@ -2759,6 +2762,8 @@ struct ClassificationMatch {
     rule_id: Option<String>,
 }
 
+const BUILT_IN_DOMAIN_CONFIDENCE: f64 = 0.45;
+
 /// Excluded apps are private by definition: never analysed, never offered for review.
 fn excluded_match() -> ClassificationMatch {
     ClassificationMatch {
@@ -2780,7 +2785,7 @@ fn classify(
     let normalized_app = normalize_match_text(app);
     let normalized_title = title.map(normalize_match_text).unwrap_or_default();
     let searchable = format!("{normalized_app} {normalized_title}");
-    let browser_domain = domain.filter(|_| is_browser(&normalized_app));
+    let browser_domain = domain.filter(|_| crate::process_context::accepts_browser_context(app));
 
     for scope in ["app-title", "domain", "app", "legacy"] {
         if let Some(rule) = rules
@@ -2836,9 +2841,20 @@ fn classify(
         };
     }
 
-    let category = browser_domain
-        .and_then(crate::process_context::built_in_domain_category)
-        .unwrap_or_else(|| built_in_category(&normalized_app, &normalized_title));
+    if let Some(category) =
+        browser_domain.and_then(crate::process_context::built_in_domain_category)
+    {
+        return ClassificationMatch {
+            category: category.into(),
+            activity_label: None,
+            // Below the 0.5 check-in threshold on purpose: a guessed category for a
+            // browser interval must not silence the prompt that collects real evidence.
+            confidence: BUILT_IN_DOMAIN_CONFIDENCE,
+            source: "builtin".into(),
+            rule_id: None,
+        };
+    }
+    let category = built_in_category(&normalized_app, &normalized_title);
     ClassificationMatch {
         category: category.into(),
         activity_label: None,
@@ -3405,7 +3421,7 @@ mod tests {
         // must not silence the prompt for browser-heavy intervals.
         assert_eq!(
             runtime
-                .interval_reason(start, end, &settings, &[])
+                .interval_reason(start, end, &settings, &[], &observations)
                 .unwrap()
                 .as_deref(),
             Some("ambiguous")
@@ -3439,6 +3455,86 @@ mod tests {
             .unwrap();
         assert_eq!(ruled[0].rule_id.as_deref(), Some("crm"));
         assert_eq!(ruled[0].activity_label.as_deref(), Some("Seguimiento CRM"));
+        // An explicit user domain rule is confirmed knowledge and silences the prompt.
+        assert_eq!(
+            runtime
+                .interval_reason(start, end, &settings, &rules, &observations)
+                .unwrap(),
+            None
+        );
+    }
+
+    /// Manual timing check: `cargo test --release timeline_context_scales -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn timeline_context_scales_to_weeks_of_events_and_observations() {
+        let temp = TempDir::new().unwrap();
+        let start = DateTime::parse_from_rfc3339("2026-11-01T00:00:00Z")
+            .unwrap()
+            .to_utc();
+        let runtime = ActivityWatchRuntime::start(
+            &temp.path().join("data"),
+            temp.path().join("empty-resources"),
+        )
+        .unwrap();
+        let datastore = runtime.datastore().unwrap();
+        datastore
+            .create_bucket(&aw_models::Bucket {
+                bid: None,
+                id: "bench-window".into(),
+                _type: "currentwindow".into(),
+                client: "aw-watcher-window".into(),
+                hostname: "test".into(),
+                created: Some(start),
+                data: Map::new(),
+                metadata: aw_models::BucketMetadata::default(),
+                events: None,
+                last_updated: None,
+            })
+            .unwrap();
+        let apps = ["Google Chrome", "Slack", "Cursor", "Mail"];
+        let events = (0..20_000)
+            .map(|index| {
+                let mut data = Map::new();
+                data.insert(
+                    "app".into(),
+                    serde_json::Value::String(apps[index % 4].into()),
+                );
+                data.insert(
+                    "title".into(),
+                    serde_json::Value::String(format!("Ticket #{index} — cliente{index}@acme.com")),
+                );
+                Event::new(
+                    start + Duration::seconds(index as i64 * 60),
+                    Duration::seconds(55),
+                    data,
+                )
+            })
+            .collect::<Vec<_>>();
+        datastore.insert_events("bench-window", &events).unwrap();
+        let observations = (0..20_000)
+            .map(|index| {
+                browser_observation(
+                    start + Duration::seconds(index as i64 * 60 + 5),
+                    "app.hubspot.com",
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut settings = SettingsV1::default();
+        settings.capture_window_titles = true;
+        let end = start + Duration::days(14);
+        let began = std::time::Instant::now();
+        let blocks = runtime
+            .timeline_with_context(start, end, &settings, &[], &[], &[], &observations)
+            .unwrap();
+        let elapsed = began.elapsed();
+        println!(
+            "timeline_with_context: {} blocks in {:?}",
+            blocks.len(),
+            elapsed
+        );
+        assert!(blocks.len() >= 19_000);
+        assert!(elapsed < std::time::Duration::from_secs(5));
     }
 
     #[test]
