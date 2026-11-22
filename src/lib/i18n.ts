@@ -178,6 +178,16 @@ interface UiCopy {
     healthUnknown: string;
     healthUnknownStatus: (share: number, apps: string) => string;
     healthAccessibility: string;
+    healthCoverage: string;
+    healthCoverageStatus: (captured: string, closed: string, down: string) => string;
+    healthCoverageGaps: string;
+    healthGapReason: Record<"asleep" | "quit" | "closed-or-off" | "watcher-down" | "paused", string>;
+    healthGapInferred: string;
+    healthCoverageLimit: string;
+    gapNoticeLabel: string;
+    gapNoticeTitle: (from: string, to: string, hours: string) => string;
+    gapNoticeDetail: string;
+    gapNoticeDismiss: string;
     openChatGpt: string;
     openClaude: string;
     outboundNotice: string;
@@ -436,6 +446,16 @@ const copy: Record<Locale, UiCopy> = {
       healthUnknown: "Sin clasificar",
       healthUnknownStatus: (share, apps) => apps ? `${share}% del tiempo activo. Sobre todo: ${apps}.` : `${share}% del tiempo activo.`,
       healthAccessibility: "Abrir Accesibilidad",
+      healthCoverage: "Cobertura en tu horario",
+      healthCoverageStatus: (captured, closed, down) => `${captured} capturadas · ${closed} con Ensō cerrado o el equipo apagado · ${down} con la captura caída.`,
+      healthCoverageGaps: "Huecos más largos",
+      healthGapReason: { asleep: "Equipo en reposo", quit: "Ensō cerrado por ti", "closed-or-off": "Ensō cerrado o equipo apagado", "watcher-down": "Captura caída", paused: "En pausa" },
+      healthGapInferred: "deducido",
+      healthCoverageLimit: "Antes de esta versión, Ensō no distingue «cerrado» de «equipo apagado».",
+      gapNoticeLabel: "Ensō no estuvo activo",
+      gapNoticeTitle: (from, to, hours) => `Sin registro entre ${from} y ${to} (≈ ${hours} de tu horario).`,
+      gapNoticeDetail: "Ensō se cerró sin pasar por su salida: un cierre forzado, un error o el equipo apagado. Si no fue intencional, deja Ensō abierto durante tu jornada.",
+      gapNoticeDismiss: "Entendido",
       openChatGpt: "Abrir ChatGPT", openClaude: "Abrir Claude", outboundNotice: "Solo sale lo que tú copies",
     },
     workflow: {
@@ -614,6 +634,16 @@ const copy: Record<Locale, UiCopy> = {
       healthUnknown: "Unclassified",
       healthUnknownStatus: (share, apps) => apps ? `${share}% of active time. Mostly: ${apps}.` : `${share}% of active time.`,
       healthAccessibility: "Open Accessibility",
+      healthCoverage: "Coverage in your schedule",
+      healthCoverageStatus: (captured, closed, down) => `${captured} captured · ${closed} with Ensō closed or the computer off · ${down} with capture down.`,
+      healthCoverageGaps: "Longest gaps",
+      healthGapReason: { asleep: "Computer asleep", quit: "Ensō quit by you", "closed-or-off": "Ensō closed or computer off", "watcher-down": "Capture down", paused: "Paused" },
+      healthGapInferred: "inferred",
+      healthCoverageLimit: "Before this version, Ensō cannot tell “closed” from “computer off”.",
+      gapNoticeLabel: "Ensō was not running",
+      gapNoticeTitle: (from, to, hours) => `Nothing recorded between ${from} and ${to} (≈ ${hours} of your schedule).`,
+      gapNoticeDetail: "Ensō stopped without going through its own exit: a forced quit, an error or the computer turning off. If it was not intended, keep Ensō open during your workday.",
+      gapNoticeDismiss: "Got it",
       openChatGpt: "Open ChatGPT", openClaude: "Open Claude", outboundNotice: "Only what you copy leaves the app",
     },
     workflow: {

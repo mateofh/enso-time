@@ -219,6 +219,18 @@ impl LocalStore {
                  );
                  CREATE INDEX IF NOT EXISTS classification_overrides_range_idx
                    ON classification_overrides(event_start, event_end);
+                 CREATE TABLE IF NOT EXISTS runtime_sessions (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   started_at TEXT NOT NULL,
+                   last_seen_at TEXT NOT NULL,
+                   window_status TEXT NOT NULL,
+                   afk_status TEXT NOT NULL,
+                   capture_issue TEXT,
+                   paused INTEGER NOT NULL DEFAULT 0,
+                   ended_reason TEXT
+                 );
+                 CREATE INDEX IF NOT EXISTS runtime_sessions_seen_idx
+                   ON runtime_sessions(last_seen_at);
                  CREATE TABLE IF NOT EXISTS candidate_observed_evidence (
                    candidate_id TEXT PRIMARY KEY,
                    payload_json TEXT NOT NULL,
@@ -860,6 +872,12 @@ impl LocalStore {
             .map_err(|error| error.to_string())?;
         transaction
             .execute(
+                "DELETE FROM runtime_sessions WHERE last_seen_at < ?1",
+                [&cutoff],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
                 "DELETE FROM ai_feedback WHERE run_id IN
                    (SELECT id FROM ai_evaluation_runs WHERE created_at < ?1)",
                 [&cutoff],
@@ -1330,6 +1348,9 @@ impl LocalStore {
                 .map_err(|error| error.to_string())?;
             transaction
                 .execute("DELETE FROM candidate_observed_evidence", [])
+                .map_err(|error| error.to_string())?;
+            transaction
+                .execute("DELETE FROM runtime_sessions", [])
                 .map_err(|error| error.to_string())?;
             transaction
                 .execute("DELETE FROM connector_clients", [])

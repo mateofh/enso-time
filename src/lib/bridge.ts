@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { demoCaptureHealth, demoCheckIns, demoHandoffs, demoObserved, demoSettings, demoStudy, demoTimeline, demoTrackingStatus } from "./demo";
+import { demoCaptureGapNotice, demoCaptureHealth, demoCheckIns, demoHandoffs, demoObserved, demoSettings, demoStudy, demoTimeline, demoTrackingStatus } from "./demo";
 import { buildPrompt, createDiagnostic } from "./diagnostics";
 import { migrateWorkflowIntakes, upsertWorkflowIntake } from "./workflowIntakes";
 import { buildPreviewBlueprint, emptyBlueprintDraft } from "./blueprints";
@@ -33,6 +33,7 @@ import type {
   AiConfigurationStatusV1,
   AiFeedbackInputV1,
   ConnectorClientV1,
+  CoverageGapV1,
   ConnectorPairingV1,
   EvaluationPayloadPreviewV1,
   EvaluationReportV1,
@@ -60,6 +61,7 @@ interface WebState {
   aiConsentFingerprint?: string;
   hasOpenRouterKey?: boolean;
   connectors?: ConnectorClientV1[];
+  captureGapNoticeSeenUntil?: string;
 }
 
 export class BlueprintBridgeError extends Error {
@@ -253,6 +255,19 @@ export const bridge = {
     state.captureIssue = null;
     saveWebState(state);
     return bridge.getTrackingStatus();
+  },
+
+  async captureGapNotice(): Promise<CoverageGapV1 | null> {
+    if (isTauri()) return invoke("capture_gap_notice");
+    const seen = loadWebState().captureGapNoticeSeenUntil;
+    return seen && seen >= demoCaptureGapNotice.end ? null : demoCaptureGapNotice;
+  },
+
+  async dismissCaptureGapNotice(until: string): Promise<void> {
+    if (isTauri()) return invoke("dismiss_capture_gap_notice", { until });
+    const state = loadWebState();
+    state.captureGapNoticeSeenUntil = until;
+    saveWebState(state);
   },
 
   async requestAccessibilityPermission(): Promise<void> {

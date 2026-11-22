@@ -2,6 +2,7 @@ mod activitywatch;
 mod blueprint;
 #[cfg(test)]
 mod calibration;
+mod capture_gaps;
 mod capture_health;
 mod case_refs;
 mod commands;
@@ -17,6 +18,7 @@ mod models;
 mod native_copy;
 mod ocel;
 mod process_context;
+mod runtime_sessions;
 mod screen_ocr;
 mod storage;
 
@@ -149,6 +151,8 @@ pub fn run() {
             commands::apply_review_group,
             commands::list_unlabeled_episodes,
             commands::label_episode,
+            commands::capture_gap_notice,
+            commands::dismiss_capture_gap_notice,
             commands::undo_review_operation,
             commands::save_session_classification,
             commands::clear_session_classification,
@@ -195,6 +199,11 @@ pub fn run() {
     app.run(|app, event| {
         if let RunEvent::ExitRequested { .. } | RunEvent::Exit = event {
             if let Some(state) = app.try_state::<AppState>() {
+                if let Err(error) =
+                    runtime_sessions::close_session(&state.store, chrono::Utc::now())
+                {
+                    eprintln!("Ensō Time uptime log: {error}");
+                }
                 if let Err(error) = state.activity.request_shutdown() {
                     eprintln!("Ensō Time capture cancellation: {error}");
                 }

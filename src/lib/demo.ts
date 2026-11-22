@@ -99,6 +99,23 @@ export const demoCaptureHealth = {
   browserSeconds: 2 * 3600,
   browserDomainShare: 0,
   browserConnector: "not-paired" as const,
+  coverage: {
+    trackingSince: "2026-11-20T13:00:00Z",
+    schedule: { captured: 30 * 3600, idle: 3600, asleep: 2 * 3600, quit: 1800, closedOrOff: 6 * 3600, watcherDown: 3600, paused: 0 },
+    all: { captured: 34 * 3600, idle: 2 * 3600, asleep: 40 * 3600, quit: 1800, closedOrOff: 20 * 3600, watcherDown: 3600, paused: 0 },
+    gaps: [
+      { start: "2026-11-18T13:30:00Z", end: "2026-11-18T19:30:00Z", reason: "closed-or-off" as const, inferred: true, scheduleSeconds: 6 * 3600 },
+      { start: "2026-11-21T15:00:00Z", end: "2026-11-21T16:00:00Z", reason: "watcher-down" as const, inferred: false, scheduleSeconds: 3600 },
+    ],
+  },
+};
+
+export const demoCaptureGapNotice = {
+  start: "2026-11-21T14:00:00Z",
+  end: "2026-11-21T16:30:00Z",
+  reason: "closed-or-off" as const,
+  inferred: false,
+  scheduleSeconds: 9000,
 };
 
 export const demoHandoffs = [
