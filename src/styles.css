@@ -217,6 +217,14 @@ input:hover, select:hover, textarea:hover { border-color: var(--border-strong); 
 .workflow-cta small { max-width: 280px; color: var(--text-secondary); font-size: 10px; line-height: 1.4; }
 .observed-evidence { margin-top: 18px; padding: 12px 14px; border-left: 2px solid var(--blue); background: var(--surface); display: grid; gap: 4px; font-size: 12px; color: var(--text-secondary); line-height: 1.45; overflow-wrap: anywhere; }
 .observed-evidence strong { color: var(--text); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+.capture-health { margin-top: 48px; display: grid; grid-template-columns: 1fr 2fr; gap: 44px; }
+.capture-health p { color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+.capture-health ul { list-style: none; margin: 0; padding: 0; }
+.capture-health li { display: grid; gap: 6px; border-top: 1px solid var(--border); padding: 14px 0 14px 14px; font-size: 13px; overflow-wrap: anywhere; border-left: 2px solid var(--border); }
+.capture-health li[data-status="warn"] { border-left-color: var(--danger); }
+.capture-health li:last-child { border-bottom: 1px solid var(--border); }
+.capture-health li small { color: var(--text-secondary); }
+.capture-health li button { justify-self: start; }
 .handoffs { margin-top: 48px; display: grid; grid-template-columns: 1fr 2fr; gap: 44px; }
 .handoffs p { color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
 .handoffs ol { list-style: none; margin: 0; padding: 0; }
@@ -414,7 +422,7 @@ input:hover, select:hover, textarea:hover { border-color: var(--border-strong); 
   .sidebar nav button b { position: absolute; margin: -30px 0 0 27px; }
   .today-layout { grid-template-columns: 1fr; }
   .day-summary { border-left: 0; border-top: 1px solid var(--border); padding: 30px 0 0; }
-  .settings-group, .recommendations, .handoffs, .period-section, .workflow-section, .blueprint-evidence, .blueprint-estimates { grid-template-columns: 1fr; gap: 24px; }
+  .settings-group, .recommendations, .capture-health, .handoffs, .period-section, .workflow-section, .blueprint-evidence, .blueprint-estimates { grid-template-columns: 1fr; gap: 24px; }
 }
 @media (max-width: 620px) {
   .app-shell { display: block; }

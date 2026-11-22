@@ -1021,7 +1021,12 @@ pub fn generate_diagnostic(state: State<'_, AppState>, days: u16) -> Result<Diag
         blocks
     };
     operation.ensure_current()?;
-    let diagnostic = create_diagnostic(&blocks, &checkins, observed, &settings, &workflows);
+    let mut diagnostic = create_diagnostic(&blocks, &checkins, observed, &settings, &workflows);
+    diagnostic.capture_health = Some(crate::capture_health::capture_health(
+        &blocks,
+        settings.capture_window_titles,
+        &state.connector_gateway.list_clients()?,
+    ));
     let cached = diagnostic
         .candidates
         .iter()

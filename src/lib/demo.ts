@@ -89,6 +89,17 @@ export const demoObserved = {
   cases: 3,
 };
 
+export const demoCaptureHealth = {
+  activeSeconds: 6 * 3600,
+  unknownShare: 0.42,
+  topUnknown: [{ app: "google chrome", seconds: 2 * 3600 }, { app: "notes", seconds: 600 }],
+  titles: "missing" as const,
+  titledShare: 0,
+  browserSeconds: 2 * 3600,
+  browserDomainShare: 0,
+  browserConnector: "not-paired" as const,
+};
+
 export const demoHandoffs = [
   { from: "mail.google.com", to: "excel", count: 4 },
   { from: "excel", to: "app.hubspot.com", count: 3 },
