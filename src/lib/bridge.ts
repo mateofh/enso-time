@@ -610,9 +610,9 @@ export const bridge = {
     return bridge.getTrackingStatus();
   },
 
-  async exportData(format: "json" | "csv"): Promise<string> {
+  async exportData(format: "json" | "csv" | "ocel"): Promise<string> {
     if (isTauri()) return invoke("export_data", { format });
-    return `preview://enso-time-export.${format}`;
+    return `preview://enso-time-export.${format === "ocel" ? "ocel.json" : format}`;
   },
 
   async deleteAllData(): Promise<void> {

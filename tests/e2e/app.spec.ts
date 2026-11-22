@@ -391,6 +391,8 @@ test("saves settings, exports both formats, and deletes local data", async ({ pa
   await expect(page.getByText("Exportado en preview://enso-time-export.json")).toBeVisible();
   await page.getByRole("button", { name: "Exportar CSV" }).click();
   await expect(page.getByText("Exportado en preview://enso-time-export.csv")).toBeVisible();
+  await page.getByRole("button", { name: "Exportar OCEL (process mining)" }).click();
+  await expect(page.getByText("Exportado en preview://enso-time-export.ocel.json")).toBeVisible();
 
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "Borrar todo" }).click();

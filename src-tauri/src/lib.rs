@@ -11,6 +11,7 @@ mod intelligence;
 mod macos_capture;
 mod models;
 mod native_copy;
+mod ocel;
 mod process_context;
 mod screen_ocr;
 mod storage;

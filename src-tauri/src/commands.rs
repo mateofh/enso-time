@@ -1612,8 +1612,8 @@ pub(crate) fn resume_tracking_inner(state: &AppState) -> Result<TrackingStatus, 
 #[tauri::command]
 pub fn export_data(state: State<'_, AppState>, format: String) -> Result<String, String> {
     let operation = state.capture_gate.operation()?;
-    if !matches!(format.as_str(), "json" | "csv") {
-        return Err("El formato de exportación debe ser json o csv".into());
+    if !matches!(format.as_str(), "json" | "csv" | "ocel") {
+        return Err("El formato de exportación debe ser json, csv u ocel".into());
     }
     let settings = state.store.settings()?;
     let now = Utc::now();
@@ -1652,11 +1652,16 @@ pub fn export_data(state: State<'_, AppState>, format: String) -> Result<String,
     )?;
     let export_dir = state.app_data_dir.join("exports");
     create_private_directory(&export_dir)?;
+    let extension = if format == "ocel" {
+        "ocel.json"
+    } else {
+        format.as_str()
+    };
     let filename = format!(
         "enso-time-{}-{}.{}",
         now.format("%Y%m%d-%H%M%S"),
         Uuid::new_v4(),
-        format
+        extension
     );
     let path = export_dir.join(filename);
     operation.ensure_current()?;
@@ -1671,6 +1676,11 @@ pub fn export_data(state: State<'_, AppState>, format: String) -> Result<String,
             &classification_overrides,
             &now,
         )?
+    } else if format == "ocel" {
+        serde_json::to_string_pretty(&crate::ocel::ocel_export(&crate::episodes::build_episodes(
+            &timeline,
+        )))
+        .map_err(|error| error.to_string())?
     } else {
         timeline_csv(&timeline)
     };
