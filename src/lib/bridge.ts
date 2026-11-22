@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { demoCheckIns, demoSettings, demoStudy, demoTimeline, demoTrackingStatus } from "./demo";
+import { demoCheckIns, demoHandoffs, demoObserved, demoSettings, demoStudy, demoTimeline, demoTrackingStatus } from "./demo";
 import { buildPrompt, createDiagnostic } from "./diagnostics";
 import { migrateWorkflowIntakes, upsertWorkflowIntake } from "./workflowIntakes";
 import { buildPreviewBlueprint, emptyBlueprintDraft } from "./blueprints";
@@ -389,8 +389,9 @@ export const bridge = {
   async generateDiagnostic(days: 7 | 14 | 28): Promise<DiagnosticV1> {
     if (isTauri()) return invoke("generate_diagnostic", { days });
     const state = loadWebState();
-    const diagnostic = createDiagnostic(demoTimeline, state.checkIns, Math.min(days, 5), state.settings.role, state.settings.goals, state.settings.locale);
-    return enrichPreviewDiagnostic(diagnostic, state);
+    const diagnostic = enrichPreviewDiagnostic(createDiagnostic(demoTimeline, state.checkIns, Math.min(days, 5), state.settings.role, state.settings.goals, state.settings.locale), state);
+    const [top, ...rest] = diagnostic.candidates;
+    return { ...diagnostic, candidates: top ? [{ ...top, observed: demoObserved }, ...rest] : [], handoffs: demoHandoffs };
   },
 
   async saveOpenRouterApiKey(apiKey: string): Promise<void> {

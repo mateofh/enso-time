@@ -250,8 +250,14 @@ test("maps, saves, resumes, and enriches the top candidate workflow", async ({ p
 
   await page.getByRole("button", { name: "Automatizar" }).click();
   await expect(page.getByRole("heading", { name: "Qué automatizar primero." })).toBeVisible();
+  await expect(page.getByText("Observado por Ensō Time")).toBeVisible();
+  await expect(page.getByText("4 ejecuciones en 3 días · mediana 14 min")).toBeVisible();
+  await expect(page.getByText("2 variantes · la principal cubre 75%")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Traspasos más repetidos" })).toBeVisible();
+  await expect(page.getByText("mail.google.com → excel", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Levantar workflow" }).click();
   await expect(page.getByRole("heading", { name: "Describe cómo ocurre hoy." })).toBeVisible();
+  await expect(page.getByText(/Ensō Time observó este recorrido: mail\.google\.com → excel → app\.hubspot\.com/)).toBeVisible();
 
   await page.getByRole("button", { name: "Guardar levantamiento" }).click();
   await expect(page.getByText("Completa los campos requeridos antes de guardar.")).toBeVisible();

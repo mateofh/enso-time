@@ -665,6 +665,9 @@ pub struct AutomationCandidateV1 {
     pub risk_score: i32,
     pub priority_score: i32,
     pub evidence: Vec<String>,
+    /// What the capture observed for this task, separate from declared evidence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed: Option<crate::episodes::ObservedEvidenceV1>,
 }
 
 pub fn canonicalize_candidate_label(label: &str) -> String {
@@ -866,6 +869,8 @@ pub struct DiagnosticV1 {
     pub metrics: Vec<MetricValue>,
     pub recommendations: Vec<String>,
     pub candidates: Vec<AutomationCandidateV1>,
+    /// Most repeated app/site handoffs inside work episodes.
+    pub handoffs: Vec<crate::episodes::HandoffV1>,
     pub prompt: String,
     pub preliminary: bool,
     pub generated_at: String,

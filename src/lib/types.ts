@@ -234,6 +234,24 @@ export interface AutomationCandidateV1 {
   riskScore: number;
   priorityScore: number;
   evidence: string[];
+  /** Observed by the capture (work episodes), kept apart from declared evidence. */
+  observed?: ObservedEvidenceV1;
+}
+
+export interface ObservedEvidenceV1 {
+  episodes: number;
+  observedDays: number;
+  medianMinutes: number;
+  /** Present only once the task has at least three observed episodes. */
+  variants?: number;
+  topVariantShare?: number;
+  topVariantSteps?: string[];
+}
+
+export interface HandoffV1 {
+  from: string;
+  to: string;
+  count: number;
 }
 
 export interface WorkflowIntakeV1 {
@@ -345,6 +363,8 @@ export interface DiagnosticV1 {
   metrics: MetricValue[];
   recommendations: string[];
   candidates: AutomationCandidateV1[];
+  /** Most repeated app/site handoffs inside work episodes. Absent in older payloads. */
+  handoffs?: HandoffV1[];
   prompt: string;
   preliminary: boolean;
   generatedAt: string;

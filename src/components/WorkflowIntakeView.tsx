@@ -117,6 +117,14 @@ export function WorkflowIntakeView({ candidate, locale, onBack, onSaved }: {
     return <section className="workflow-empty" role="alert"><AlertCircle size={28} aria-hidden="true" /><h1>{copy.errorTitle}</h1><p>{saveError || copy.loadError}</p><div className="data-actions"><button type="button" className="secondary-button" onClick={onBack}><ArrowLeft size={16} aria-hidden="true" />{copy.back}</button><button type="button" className="primary-button" onClick={() => void load()}><RefreshCw size={16} aria-hidden="true" />{copy.retry}</button></div></section>;
   }
 
+  // Observed path is offered, never saved on its own: saving bumps the intake and would
+  // stale a blueprint built from it.
+  const observedSteps = candidate.observed?.topVariantSteps ?? [];
+  const draftIsBlank = draft.tools.every((item) => !item.trim()) && draft.steps.every((item) => !item.trim());
+  function useObservedPath() {
+    setDraft((current) => current ? { ...current, tools: [...observedSteps], steps: observedSteps.map((step) => step) } : current);
+  }
+
   const set = <K extends keyof WorkflowIntakeV1>(key: K, value: WorkflowIntakeV1[K]) => setDraft((current) => current ? { ...current, [key]: value } : current);
 
   return (
@@ -143,6 +151,7 @@ export function WorkflowIntakeView({ candidate, locale, onBack, onSaved }: {
         <section className="workflow-section" aria-labelledby="workflow-tools-title">
           <div><span>02</span><h2 id="workflow-tools-title">{copy.toolsTitle}</h2><p>{copy.toolsHint}</p></div>
           <div className="workflow-fields dynamic-list">
+            {observedSteps.length > 0 && draftIsBlank && <div className="observed-suggestion"><p>{copy.observedSuggestion(observedSteps.join(" → "))}</p><button type="button" className="secondary-button" onClick={useObservedPath}>{copy.useObserved}</button></div>}
             {draft.tools.map((tool, index) => <div className="dynamic-row" key={`tool-${index}`}><label>{copy.tool(index + 1)}<input required value={tool} onChange={(event) => updateList("tools", index, event.target.value)} placeholder={copy.toolPlaceholder} /></label>{draft.tools.length > 1 && <button type="button" className="icon-button" aria-label={copy.removeTool(index + 1)} onClick={() => removeListItem("tools", index)}><X size={16} aria-hidden="true" /></button>}</div>)}
             <button type="button" className="text-button add-row" onClick={() => addListItem("tools")}><Plus size={16} aria-hidden="true" />{copy.addTool}</button>
           </div>
