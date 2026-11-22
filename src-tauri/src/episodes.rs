@@ -79,7 +79,7 @@ impl Run {
         (self.end - self.start).num_seconds()
     }
 
-    /// AFK and excluded apps end an episode and are never steps.
+    /// AFK, declared breaks and excluded apps end an episode and are never steps.
     fn is_break(&self) -> bool {
         self.step.is_none()
     }
@@ -94,7 +94,11 @@ struct Draft {
 }
 
 fn step_identity(block: &TimelineBlockV1) -> Option<String> {
-    if block.afk || block.app == crate::process_context::EXCLUDED_APP_LABEL {
+    // A break declared by the person (check-in or correction) ends work like AFK does.
+    if block.afk
+        || block.category == "break"
+        || block.app == crate::process_context::EXCLUDED_APP_LABEL
+    {
         return None;
     }
     block
@@ -511,6 +515,23 @@ mod tests {
         ]));
         assert_eq!(episodes.len(), 1);
         assert_eq!(episodes[0].steps, vec!["excel"]);
+        // The merged 6 s visit survived: the episode starts at 0, not at the long block.
+        assert_eq!(episodes[0].start, crate::models::parse_utc(&at(0)).unwrap());
+        assert_eq!(episodes[0].touch_seconds, 198);
+    }
+
+    #[test]
+    fn a_declared_break_splits_one_task_into_two_runs() {
+        let mut items = blocks(&[
+            b("Excel", 0, 600).label("Facturar"),
+            b("Excel", 600, 1200),
+            b("Excel", 1200, 1800).label("Facturar"),
+        ]);
+        items[1].category = "break".into();
+        items[1].classification_source = "checkin".into();
+        let episodes = build_episodes(&items);
+        assert_eq!(episodes.len(), 2);
+        assert!(episodes.iter().all(|episode| episode.touch_seconds == 600));
     }
 
     #[test]
