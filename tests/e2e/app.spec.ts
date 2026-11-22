@@ -332,6 +332,12 @@ test("maps, saves, resumes, and enriches the top candidate workflow", async ({ p
   await expect(prompt).toContainText("No inventes datos ni trates el intake autodeclarado como evidencia observada");
   await expect(prompt).toContainText("No generes código, credenciales ni configuración ejecutable");
   await expect(prompt).toContainText("no construyas ni despliegues ningún flujo");
+  await page.getByTestId("blueprint-entry").click();
+  const observedEpisodes = page.getByTestId("blueprint-observed-episodes");
+  await expect(observedEpisodes).toContainText("Observado por Ensō Time");
+  await expect(observedEpisodes).toContainText("4 ejecuciones en 3 días · mediana 14 min");
+  await expect(observedEpisodes).toContainText("no cambia la confianza ni el estado del blueprint");
+  await page.getByRole("button", { name: "Automatizar" }).click();
   await page.getByRole("button", { name: "Levantar workflow" }).click();
   await expect(page.getByLabel("¿Qué dispara este workflow?")).toHaveValue("Llega el cierre semanal de ventas");
   await expect(page.getByRole("textbox", { name: "Herramienta 2", exact: true })).toHaveValue("Slack");

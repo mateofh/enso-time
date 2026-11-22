@@ -923,9 +923,21 @@ pub fn generate_diagnostic(state: State<'_, AppState>, days: u16) -> Result<Diag
     )?;
     let observed = ((now - start).num_seconds().max(0) as f64 / 86_400.0).min(f64::from(days));
     operation.ensure_current()?;
-    Ok(create_diagnostic(
-        &blocks, &checkins, observed, &settings, &workflows,
-    ))
+    let diagnostic = create_diagnostic(&blocks, &checkins, observed, &settings, &workflows);
+    let cached = diagnostic
+        .candidates
+        .iter()
+        .filter_map(|candidate| {
+            candidate
+                .observed
+                .clone()
+                .map(|evidence| (candidate.id.clone(), evidence))
+        })
+        .collect::<Vec<_>>();
+    state
+        .store
+        .replace_candidate_observed_evidence(&cached, &diagnostic.generated_at)?;
+    Ok(diagnostic)
 }
 
 fn intelligence_bundle(
@@ -1211,17 +1223,31 @@ fn assess_stored_blueprint(
     let intake = store
         .workflow_intake_for_candidate(&draft.candidate_id)?
         .ok_or_else(|| "El intake fuente ya no existe".to_string())?;
+    assess_with_store(store, draft, &intake, locale)
+}
+
+/// Assesses a draft with the check-in evidence and, as information only, the cached
+/// work episodes from the latest diagnostic.
+fn assess_with_store(
+    store: &LocalStore,
+    draft: crate::blueprint::AutomationBlueprintDraftV1,
+    intake: &WorkflowIntakeV1,
+    locale: &str,
+) -> Result<AutomationBlueprintV1, String> {
     let observed = store.blueprint_observation_counts(&draft.candidate_id)?;
-    assess_blueprint(
+    let observed_episodes = store.candidate_observed_evidence(&draft.candidate_id)?;
+    let mut blueprint = assess_blueprint(
         draft,
-        &intake,
+        intake,
         observed.total,
         observed.repeated,
         observed.observed_days,
         observed.declared_repeated_days,
         observed.rules_quality,
         locale,
-    )
+    )?;
+    blueprint.evidence.observed_episodes = observed_episodes;
+    Ok(blueprint)
 }
 
 fn get_automation_blueprint_inner(
@@ -1239,18 +1265,7 @@ fn get_automation_blueprint_inner(
     let draft = store
         .automation_blueprint_draft(candidate_id)?
         .unwrap_or_else(|| ephemeral_draft(&intake));
-    let observed = store.blueprint_observation_counts(candidate_id)?;
-    assess_blueprint(
-        draft,
-        &intake,
-        observed.total,
-        observed.repeated,
-        observed.observed_days,
-        observed.declared_repeated_days,
-        observed.rules_quality,
-        locale,
-    )
-    .map(Some)
+    assess_with_store(store, draft, &intake, locale).map(Some)
 }
 
 #[tauri::command]
@@ -2251,6 +2266,62 @@ mod tests {
         gate.generation.fetch_add(1, Ordering::AcqRel);
         assert!(record_native_action_error(&store, &gate, original_generation).is_err());
         assert!(store.get_value("native_action_error").unwrap().is_none());
+    }
+
+    #[test]
+    fn cached_observed_episodes_reach_the_blueprint_without_opening_the_gate() {
+        let (_directory, store, intake) = blueprint_command_fixture();
+        let candidate_id = intake.candidate_id.clone();
+        let before =
+            get_automation_blueprint_inner(&store, &CaptureGate::new(), &candidate_id, "es-419")
+                .unwrap()
+                .unwrap();
+        assert!(before.evidence.observed_episodes.is_none());
+
+        let evidence = crate::episodes::ObservedEvidenceV1 {
+            episodes: 12,
+            observed_days: 5,
+            median_minutes: 14.0,
+            variants: Some(2),
+            top_variant_share: Some(0.75),
+            top_variant_steps: vec!["mail.google.com".into(), "excel".into()],
+        };
+        store
+            .replace_candidate_observed_evidence(
+                &[(candidate_id.clone(), evidence.clone())],
+                "2026-11-21T12:00:00Z",
+            )
+            .unwrap();
+        let after =
+            get_automation_blueprint_inner(&store, &CaptureGate::new(), &candidate_id, "es-419")
+                .unwrap()
+                .unwrap();
+        let cached = after.evidence.observed_episodes.as_ref().unwrap();
+        assert_eq!(cached.evidence, evidence);
+        assert_eq!(cached.computed_at, "2026-11-21T12:00:00Z");
+        // Observed episodes are informational: status, confidence and the gate are unchanged.
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.estimates.confidence, before.estimates.confidence);
+        assert_eq!(after.evidence.observed, before.evidence.observed);
+
+        store
+            .replace_candidate_observed_evidence(&[], "2026-11-22T12:00:00Z")
+            .unwrap();
+        assert!(store
+            .candidate_observed_evidence(&candidate_id)
+            .unwrap()
+            .is_none());
+        store
+            .replace_candidate_observed_evidence(
+                &[(candidate_id.clone(), evidence)],
+                "2026-11-22T12:00:00Z",
+            )
+            .unwrap();
+        store.delete_all().unwrap();
+        assert!(store
+            .candidate_observed_evidence(&candidate_id)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

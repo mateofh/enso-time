@@ -185,7 +185,7 @@ export function AutomationBlueprintView({ candidate, locale, onBack, onMapWorkfl
 
     <section className="blueprint-evidence" aria-labelledby="evidence-title">
       <div><p className="section-note">{copy.evidenceLabel}</p><h2 id="evidence-title">{copy.sourceTitle}</h2><p>{copy.sourceHint}</p></div>
-      <div className="source-map" data-testid="blueprint-source-map"><dl><dt>{copy.trigger}</dt><dd>{blueprint.source.trigger}</dd><dt>{copy.inputs}</dt><dd>{blueprint.source.inputs}</dd><dt>{copy.output}</dt><dd>{blueprint.source.desiredOutput}</dd><dt>{copy.tools}</dt><dd>{blueprint.source.tools.join(" · ")}</dd><dt>{copy.declared}</dt><dd>{blueprint.source.humanDecisions}</dd></dl><div className="evidence-columns"><div><strong>{copy.observed}</strong><ul>{blueprint.evidence.observed.map((item) => <li key={item}>{item}</li>)}</ul><small data-testid="blueprint-evidence-count">{blueprint.evidence.repeatedObservations}</small></div><div><strong>{copy.declared}</strong><ul>{blueprint.evidence.declared.map((item) => <li key={item}>{item}</li>)}</ul></div></div></div>
+      <div className="source-map" data-testid="blueprint-source-map"><dl><dt>{copy.trigger}</dt><dd>{blueprint.source.trigger}</dd><dt>{copy.inputs}</dt><dd>{blueprint.source.inputs}</dd><dt>{copy.output}</dt><dd>{blueprint.source.desiredOutput}</dd><dt>{copy.tools}</dt><dd>{blueprint.source.tools.join(" · ")}</dd><dt>{copy.declared}</dt><dd>{blueprint.source.humanDecisions}</dd></dl><div className="evidence-columns"><div><strong>{copy.observed}</strong><ul>{blueprint.evidence.observed.map((item, index) => <li key={`${index}-${item}`}>{item}</li>)}</ul><small data-testid="blueprint-evidence-count">{blueprint.evidence.repeatedObservations}</small></div><div><strong>{copy.declared}</strong><ul>{blueprint.evidence.declared.map((item, index) => <li key={`${index}-${item}`}>{item}</li>)}</ul></div></div>{blueprint.evidence.observedEpisodes && <ObservedEpisodes episodes={blueprint.evidence.observedEpisodes} locale={locale} />}</div>
     </section>
 
     <form className="blueprint-form" onSubmit={(event) => { event.preventDefault(); void save(); }}>
@@ -198,4 +198,18 @@ export function AutomationBlueprintView({ candidate, locale, onBack, onMapWorkfl
     <section className="blueprint-export" aria-labelledby="export-title"><div><h2 id="export-title">{copy.exportTitle}</h2><p>{copy.exportHint}</p></div><div className="data-actions"><button type="button" className="secondary-button" data-testid="blueprint-copy" disabled={!isReady || busy} onClick={() => void copyBlueprint()}><Clipboard size={16} aria-hidden="true" />{copy.copy}</button><button type="button" className="secondary-button" data-testid="blueprint-export" disabled={!isReady || busy} onClick={() => void exportBlueprint("markdown")}><Download size={16} aria-hidden="true" />{copy.exportMarkdown}</button><button type="button" className="secondary-button" disabled={!isReady || busy} onClick={() => void exportBlueprint("json")}><Download size={16} aria-hidden="true" />{copy.exportJson}</button><button type="button" className="text-button" ref={deleteActivator} data-testid="blueprint-delete-preview" onClick={() => setShowDeletePreview(true)}>{copy.deletePreview}</button></div></section>
     {showDeletePreview && <div className="blueprint-dialog-backdrop"><section className="blueprint-dialog" ref={deleteDialog} role="dialog" aria-modal="true" aria-labelledby="blueprint-delete-title" aria-describedby="blueprint-delete-copy" onKeyDown={trapDeleteDialog}><h2 id="blueprint-delete-title">{copy.deleteTitle}</h2><p id="blueprint-delete-copy">{copy.deleteCopy}</p>{error && <p className="blueprint-dialog-error" role="alert">{copy.errors[error] ?? copy.deleteError}</p>}<div className="data-actions"><button type="button" className="secondary-button" ref={deleteCancel} disabled={busy} onClick={closeDeletePreview}>{copy.cancel}</button><button type="button" className="danger-button" disabled={busy} onClick={() => void deleteBlueprint()}>{copy.confirmDelete}</button></div></section></div>}
   </section>;
+}
+
+function ObservedEpisodes({ episodes, locale }: { episodes: NonNullable<AutomationBlueprintV1["evidence"]["observedEpisodes"]>; locale: Locale }) {
+  const copy = messages(locale).blueprint;
+  const computed = new Date(episodes.computedAt).toLocaleDateString(locale, { day: "numeric", month: "short" });
+  return (
+    <div className="blueprint-episodes" data-testid="blueprint-observed-episodes">
+      <strong>{copy.episodesTitle}</strong>
+      <span>{copy.episodesSummary(episodes.episodes, episodes.observedDays, episodes.medianMinutes.toLocaleString(locale))}</span>
+      {episodes.variants !== undefined && episodes.topVariantShare !== undefined && <span>{copy.episodesVariants(episodes.variants, Math.round(episodes.topVariantShare * 100))}</span>}
+      {episodes.topVariantSteps?.length ? <span>{copy.episodesPath}: {episodes.topVariantSteps.join(" → ")}</span> : null}
+      <small>{copy.episodesComputed(computed)} · {copy.episodesHint}</small>
+    </div>
+  );
 }

@@ -113,6 +113,18 @@ pub struct BlueprintEvidenceV1 {
     /// Kept for v1 wire compatibility. This is the weekly rate of repetitions
     /// explicitly confirmed by the user, not an independently observed rate.
     pub observed_weekly_frequency: f64,
+    /// Work episodes the capture observed for this candidate, from the latest diagnostic.
+    /// Informational only: it never changes confidence or the `ready` gate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_episodes: Option<ObservedEpisodesV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObservedEpisodesV1 {
+    #[serde(flatten)]
+    pub evidence: crate::episodes::ObservedEvidenceV1,
+    pub computed_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -470,6 +482,7 @@ pub fn assess_blueprint(
         declared_repeated_days,
         rules_quality,
         observed_weekly_frequency: confirmed_weekly_frequency,
+        observed_episodes: None,
     };
     let estimates = estimates(&draft, intake, &evidence);
     let assumptions = assumptions(&draft, locale);
@@ -941,6 +954,7 @@ mod tests {
             rules_quality,
             observed_weekly_frequency: f64::from(repeated_observations) * 7.0
                 / declared_repeated_days.max(1.0),
+            observed_episodes: None,
         }
     }
 

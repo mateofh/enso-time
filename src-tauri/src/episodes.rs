@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Local, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::models::{canonicalize_candidate_label, TimelineBlockV1};
 
@@ -49,18 +49,18 @@ pub struct HandoffV1 {
 }
 
 /// What the capture observed for one candidate, kept apart from what the person declared.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ObservedEvidenceV1 {
     pub episodes: usize,
     pub observed_days: usize,
     pub median_minutes: f64,
     /// Present only from `MIN_EPISODES_FOR_VARIANTS` episodes on.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variants: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_variant_share: Option<f64>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub top_variant_steps: Vec<String>,
 }
 

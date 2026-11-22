@@ -50,6 +50,8 @@ interface WebState {
   automationBlueprints?: AutomationBlueprintDraftV1[];
   automationBlueprintError?: string | null;
   automationBlueprintConflict?: { currentRevision: number } | null;
+  /** Mirrors the desktop cache of observed evidence written by the latest diagnostic. */
+  observedEvidence?: Record<string, NonNullable<BlueprintEvidenceV1["observedEpisodes"]>>;
   classificationRules?: ClassificationRuleV1[];
   classificationOverrides?: Record<string, { category: CategoryId; activityLabel?: string }>;
   aiReports?: EvaluationReportV1[];
@@ -391,6 +393,10 @@ export const bridge = {
     const state = loadWebState();
     const diagnostic = enrichPreviewDiagnostic(createDiagnostic(demoTimeline, state.checkIns, Math.min(days, 5), state.settings.role, state.settings.goals, state.settings.locale), state);
     const [top, ...rest] = diagnostic.candidates;
+    if (top) {
+      state.observedEvidence = { [top.id]: { ...demoObserved, computedAt: diagnostic.generatedAt } };
+      saveWebState(state);
+    }
     return { ...diagnostic, candidates: top ? [{ ...top, observed: demoObserved }, ...rest] : [], handoffs: demoHandoffs };
   },
 
@@ -504,7 +510,8 @@ export const bridge = {
     const raw = state.automationBlueprints?.find((item) => item.candidateId === candidateId);
     const base = emptyBlueprintDraft(intake);
     const draft: AutomationBlueprintDraftV1 = raw ? { ...base, ...raw, candidateId, workflowIntakeId: raw.workflowIntakeId ?? intake.id, sourceIntakeUpdatedAt: raw.sourceIntakeUpdatedAt ?? intake.updatedAt, revision: raw.revision ?? 0, stepBoundaries: raw.stepBoundaries ?? base.stepBoundaries } : base;
-    const evidence = previewBlueprintEvidence(intake, state.checkIns, locale);
+    const observedEpisodes = state.observedEvidence?.[candidateId];
+    const evidence = { ...previewBlueprintEvidence(intake, state.checkIns, locale), ...(observedEpisodes ? { observedEpisodes } : {}) };
     return { ...buildPreviewBlueprint(intake, draft, evidence), conflict: state.automationBlueprintConflict ?? undefined };
   },
 
