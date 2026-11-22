@@ -51,9 +51,22 @@ async function visibleText(tabId) {
   return result;
 }
 
+const KNOWN_BRANDS = ["Microsoft Edge", "Brave", "Opera", "Vivaldi", "Google Chrome"];
+
+// Ensō matches observations to the frontmost window by browser brand, so a background
+// Chrome tab is never attributed to Edge, Brave or another Chromium browser.
+function browserBrand() {
+  const brands = (navigator.userAgentData?.brands || []).map((entry) => entry.brand);
+  return KNOWN_BRANDS.find((brand) => brands.includes(brand)) || "Chromium";
+}
+
 async function observe() {
   const current = await settings();
   if (!current.enabled || !current.token || !current.port) return;
+  // Only report while this browser has OS focus; otherwise the alarm would keep sending
+  // a background tab while the person works in another app or browser.
+  const focusedWindow = await chrome.windows.getLastFocused().catch(() => null);
+  if (!focusedWindow?.focused) return;
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   if (!tab?.id || !tab.url || tab.incognito || !/^https?:/.test(tab.url)) return;
   const domain = normalizedHost(tab.url);
@@ -69,7 +82,7 @@ async function observe() {
     source: "browser",
     observedAt: now,
     durationSeconds: 0,
-    app: "Chromium",
+    app: browserBrand(),
     title: String(tab.title || "").slice(0, 500) || null,
     domain,
     project: null,

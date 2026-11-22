@@ -246,6 +246,9 @@ pub fn save_settings(
     settings.validate()?;
     configure_autostart(&app, settings.onboarding_completed && settings.autostart)?;
     state.store.save_settings(&settings)?;
+    state
+        .activity
+        .set_excluded_apps(&settings.deep_capture.excluded_apps);
     crate::update_tray_locale(&app, &settings.locale)?;
     if previous.onboarding_completed && !settings.onboarding_completed {
         state.activity.stop_watchers()?;
@@ -331,9 +334,10 @@ pub fn get_timeline(
     let checkins = state.store.checkins_between(&from, &to)?;
     let rules = state.store.classification_rules()?;
     let overrides = state.store.classification_overrides_between(&from, &to)?;
-    state
-        .activity
-        .timeline(from_date, to_date, &settings, &checkins, &rules, &overrides)
+    let context = crate::intelligence::timeline_context_between(&state.store, &from, &to)?;
+    state.activity.timeline_with_context(
+        from_date, to_date, &settings, &checkins, &rules, &overrides, &context,
+    )
 }
 
 #[tauri::command]
@@ -370,13 +374,21 @@ pub fn list_review_groups(
         .into_iter()
         .filter(|block| block.category == "unknown" && block.correctable)
     {
-        let title_pattern = review_title_pattern(&block);
+        let domain = review_domain(&block);
+        let title_pattern = if domain.is_some() {
+            None
+        } else {
+            review_title_pattern(&block)
+        };
         let normalized_app = crate::activitywatch::normalize_match_text(&block.app);
         let normalized_pattern = title_pattern
             .as_deref()
             .map(crate::activitywatch::normalize_match_text)
             .unwrap_or_default();
-        let id = format!("{normalized_app}::{normalized_pattern}");
+        let id = match domain.as_deref() {
+            Some(domain) => format!("domain::{domain}"),
+            None => format!("{normalized_app}::{normalized_pattern}"),
+        };
         let entry = groups.entry(id.clone()).or_insert_with(|| ReviewGroupV1 {
             id,
             app: block.app.clone(),
@@ -387,7 +399,9 @@ pub fn list_review_groups(
             first_seen: block.start.clone(),
             last_seen: block.end.clone(),
             browser_fallback: crate::activitywatch::is_browser(&normalized_app)
-                && title_pattern.is_none(),
+                && title_pattern.is_none()
+                && domain.is_none(),
+            domain: domain.clone(),
         });
         entry.sessions += 1;
         entry.duration_seconds += block.duration_seconds;
@@ -432,12 +446,16 @@ pub fn apply_review_group(
     let matching = blocks
         .into_iter()
         .filter(|block| block.category == "unknown" && block.correctable)
-        .filter(|block| crate::activitywatch::normalize_match_text(&block.app) == normalized_app)
-        .filter(|block| {
-            review_title_pattern(block)
-                .as_deref()
-                .map(crate::activitywatch::normalize_match_text)
-                == normalized_pattern
+        .filter(|block| match input.domain.as_deref() {
+            Some(domain) => review_domain(block).as_deref() == Some(domain),
+            None => {
+                review_domain(block).is_none()
+                    && crate::activitywatch::normalize_match_text(&block.app) == normalized_app
+                    && review_title_pattern(block)
+                        .as_deref()
+                        .map(crate::activitywatch::normalize_match_text)
+                        == normalized_pattern
+            }
         })
         .collect::<Vec<_>>();
     if matching.is_empty() {
@@ -446,15 +464,15 @@ pub fn apply_review_group(
     let operation_id = Uuid::new_v4().to_string();
     if input.mode == "rule" {
         let now = iso_now();
-        let scope = if input.title_pattern.is_some() {
-            "app-title"
-        } else {
-            "app"
+        let (scope, rule_app) = match input.domain {
+            Some(domain) => ("domain", domain),
+            None if input.title_pattern.is_some() => ("app-title", input.app),
+            None => ("app", input.app),
         };
         let rule = ClassificationRuleV1 {
             id: Uuid::new_v4().to_string(),
             scope: scope.into(),
-            app: input.app,
+            app: rule_app,
             title_pattern: input.title_pattern,
             category: input.category,
             activity_label: input.activity_label,
@@ -523,9 +541,19 @@ fn timeline_for_review(
     let checkins = state.store.checkins_between(from, to)?;
     let rules = state.store.classification_rules()?;
     let overrides = state.store.classification_overrides_between(from, to)?;
-    state
-        .activity
-        .timeline(from_date, to_date, &settings, &checkins, &rules, &overrides)
+    let context = crate::intelligence::timeline_context_between(&state.store, from, to)?;
+    state.activity.timeline_with_context(
+        from_date, to_date, &settings, &checkins, &rules, &overrides, &context,
+    )
+}
+
+/// Browser sessions with connector context are reviewed per domain, across browsers.
+fn review_domain(block: &TimelineBlockV1) -> Option<String> {
+    block
+        .context_domain
+        .clone()
+        .filter(|_| crate::process_context::accepts_browser_context(&block.app))
+        .filter(|domain| crate::models::validate_rule_domain(domain).is_ok())
 }
 
 fn review_title_pattern(block: &TimelineBlockV1) -> Option<String> {
@@ -663,15 +691,30 @@ fn classification_block(state: &AppState, block_id: &str) -> Result<TimelineBloc
     let checkins = state.store.checkins_between(&from, &to)?;
     let rules = state.store.classification_rules()?;
     let overrides = state.store.classification_overrides_between(&from, &to)?;
+    let context = crate::intelligence::timeline_context_between(&state.store, &from, &to)?;
     state
         .activity
-        .timeline(start, end, &settings, &checkins, &rules, &overrides)?
+        .timeline_with_context(
+            start, end, &settings, &checkins, &rules, &overrides, &context,
+        )?
         .into_iter()
         .find(|block| block.id == block_id)
         .ok_or_else(|| "La sesión ya no está disponible".into())
 }
 
 fn suggested_rule(block: &TimelineBlockV1, now: &str) -> Option<ClassificationRuleV1> {
+    if let Some(domain) = review_domain(block) {
+        return Some(ClassificationRuleV1 {
+            id: Uuid::new_v4().to_string(),
+            scope: "domain".into(),
+            app: domain,
+            title_pattern: None,
+            category: block.category.clone(),
+            activity_label: block.activity_label.clone(),
+            created_at: now.into(),
+            updated_at: now.into(),
+        });
+    }
     let normalized_app = crate::activitywatch::normalize_match_text(&block.app);
     let (scope, title_pattern) = if crate::activitywatch::is_browser(&normalized_app) {
         match block
@@ -738,22 +781,29 @@ fn classification_rule_impact(
     let checkins = state.store.checkins_between(&from, &to)?;
     let overrides = state.store.classification_overrides_between(&from, &to)?;
     let current_rules = state.store.classification_rules()?;
-    let current =
-        state
-            .activity
-            .timeline(start, now, &settings, &checkins, &current_rules, &overrides)?;
+    let context = crate::intelligence::timeline_context_between(&state.store, &from, &to)?;
+    let current = state.activity.timeline_with_context(
+        start,
+        now,
+        &settings,
+        &checkins,
+        &current_rules,
+        &overrides,
+        &context,
+    )?;
     let mut proposed_rules = current_rules
         .into_iter()
         .filter(|item| item.id != rule.id)
         .collect::<Vec<_>>();
     proposed_rules.insert(0, rule.clone());
-    let proposed = state.activity.timeline(
+    let proposed = state.activity.timeline_with_context(
         start,
         now,
         &settings,
         &checkins,
         &proposed_rules,
         &overrides,
+        &context,
     )?;
     let current_by_id = current
         .into_iter()
@@ -801,9 +851,14 @@ pub fn get_study_progress(state: State<'_, AppState>) -> Result<StudyProgress, S
     let overrides = state
         .store
         .classification_overrides_between(&start.to_rfc3339(), &now.to_rfc3339())?;
-    let timeline = state
-        .activity
-        .timeline(start, now, &settings, &checkins, &rules, &overrides)?;
+    let context = crate::intelligence::timeline_context_between(
+        &state.store,
+        &start.to_rfc3339(),
+        &now.to_rfc3339(),
+    )?;
+    let timeline = state.activity.timeline_with_context(
+        start, now, &settings, &checkins, &rules, &overrides, &context,
+    )?;
     let tracked_seconds: i64 = timeline
         .iter()
         .filter(|block| !block.afk)
@@ -858,9 +913,14 @@ pub fn generate_diagnostic(state: State<'_, AppState>, days: u16) -> Result<Diag
     let overrides = state
         .store
         .classification_overrides_between(&start.to_rfc3339(), &now.to_rfc3339())?;
-    let blocks = state
-        .activity
-        .timeline(start, now, &settings, &checkins, &rules, &overrides)?;
+    let context = crate::intelligence::timeline_context_between(
+        &state.store,
+        &start.to_rfc3339(),
+        &now.to_rfc3339(),
+    )?;
+    let blocks = state.activity.timeline_with_context(
+        start, now, &settings, &checkins, &rules, &overrides, &context,
+    )?;
     let observed = ((now - start).num_seconds().max(0) as f64 / 86_400.0).min(f64::from(days));
     operation.ensure_current()?;
     Ok(create_diagnostic(
@@ -911,7 +971,10 @@ fn intelligence_bundle_from(
     let workflows = store.list_workflow_intakes()?;
     let rules = store.classification_rules()?;
     let overrides = store.classification_overrides_between(&from, &to)?;
-    let blocks = activity.timeline(start, now, &settings, &checkins, &rules, &overrides)?;
+    let context = crate::intelligence::timeline_context_between(store, &from, &to)?;
+    let blocks = activity.timeline_with_context(
+        start, now, &settings, &checkins, &rules, &overrides, &context,
+    )?;
     let observed = ((now - start).num_seconds().max(0) as f64 / 86_400.0).min(f64::from(days));
     let diagnostic = create_diagnostic(&blocks, &checkins, observed, &settings, &workflows);
     let observations = crate::intelligence::context_observations_between(store, &from, &to)?;
@@ -1483,13 +1546,19 @@ pub fn export_data(state: State<'_, AppState>, format: String) -> Result<String,
             &settings.locale,
         )?);
     }
-    let timeline = state.activity.timeline(
+    let context = crate::intelligence::timeline_context_between(
+        &state.store,
+        &start.to_rfc3339(),
+        &now.to_rfc3339(),
+    )?;
+    let timeline = state.activity.timeline_with_context(
         start,
         now,
         &settings,
         &checkins,
         &classification_rules,
         &classification_overrides,
+        &context,
     )?;
     let export_dir = state.app_data_dir.join("exports");
     create_private_directory(&export_dir)?;
@@ -1747,7 +1816,12 @@ fn scheduler_tick(
     schedule_screen_ocr_if_due(store, capture_gate, &settings)?;
     let (start, end) = completed_interval(Utc::now(), settings.cadence_minutes);
     let rules = store.classification_rules()?;
-    let Some(reason) = activity.interval_reason(start, end, &settings, &rules)? else {
+    let context = crate::intelligence::timeline_context_between(
+        store,
+        &start.to_rfc3339(),
+        &end.to_rfc3339(),
+    )?;
+    let Some(reason) = activity.interval_reason(start, end, &settings, &rules, &context)? else {
         return Ok(());
     };
     let checkin = CheckInV1 {
@@ -2621,6 +2695,8 @@ mod tests {
             classification_source: "builtin".into(),
             rule_id: None,
             correctable: true,
+            context_domain: None,
+            context_project: None,
         };
         let exported = json_export(
             &SettingsV1::default(),

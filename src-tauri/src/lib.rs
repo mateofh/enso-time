@@ -10,6 +10,7 @@ mod intelligence;
 mod macos_capture;
 mod models;
 mod native_copy;
+mod process_context;
 mod screen_ocr;
 mod storage;
 
@@ -78,6 +79,7 @@ pub fn run() {
                 Arc::clone(&connector_gateway),
             )?);
             let settings = store.settings()?;
+            activity.set_excluded_apps(&settings.deep_capture.excluded_apps);
             if settings.onboarding_completed && settings.autostart {
                 use tauri_plugin_autostart::ManagerExt;
                 if let Err(error) = app.autolaunch().enable() {

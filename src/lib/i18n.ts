@@ -86,6 +86,7 @@ interface UiCopy {
     scope: string;
     appScope: string;
     titleScope: string;
+    domainScope: string;
     pattern: string;
     impact: (sessions: number, duration: string) => string;
     createRule: string;
@@ -363,6 +364,7 @@ const copy: Record<Locale, UiCopy> = {
       scope: "Coincidencia",
       appScope: "Toda la aplicación",
       titleScope: "Aplicación y título",
+      domainScope: "Sitio web (cualquier navegador)",
       pattern: "El título contiene",
       impact: (sessions, duration) => `${sessions} sesiones · ${duration} retenidos`,
       createRule: "Crear regla",
@@ -512,6 +514,7 @@ const copy: Record<Locale, UiCopy> = {
       scope: "Match",
       appScope: "Entire app",
       titleScope: "App and title",
+      domainScope: "Website (any browser)",
       pattern: "Title contains",
       impact: (sessions, duration) => `${sessions} sessions · ${duration} retained`,
       createRule: "Create rule",

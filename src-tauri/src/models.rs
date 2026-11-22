@@ -150,11 +150,16 @@ pub struct ClassificationRuleV1 {
 impl ClassificationRuleV1 {
     pub fn validate(&self) -> Result<(), String> {
         validate_identifier(&self.id, "El id de la regla")?;
-        if !matches!(self.scope.as_str(), "app" | "app-title" | "legacy") {
+        if !matches!(
+            self.scope.as_str(),
+            "app" | "app-title" | "domain" | "legacy"
+        ) {
             return Err("El alcance de la regla no es válido".into());
         }
         validate_required_text(&self.app, 256, "La aplicación de la regla")?;
         match (self.scope.as_str(), self.title_pattern.as_deref()) {
+            ("domain", None) => validate_rule_domain(&self.app)?,
+            ("domain", Some(_)) => return Err("Una regla de dominio no debe incluir título".into()),
             ("app", None) => {}
             ("legacy", None) => {}
             ("app-title", Some(pattern)) => {
@@ -250,6 +255,9 @@ pub struct ReviewGroupV1 {
     pub first_seen: String,
     pub last_seen: String,
     pub browser_fallback: bool,
+    /// Present when browser sessions are grouped by connector domain instead of title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -262,6 +270,8 @@ pub struct ApplyReviewGroupInputV1 {
     pub category: String,
     pub activity_label: Option<String>,
     pub mode: String,
+    #[serde(default)]
+    pub domain: Option<String>,
 }
 
 impl ApplyReviewGroupInputV1 {
@@ -274,6 +284,12 @@ impl ApplyReviewGroupInputV1 {
         validate_required_text(&self.app, 256, "La aplicación")?;
         if let Some(pattern) = self.title_pattern.as_deref() {
             validate_required_text(pattern, 256, "El patrón de título")?;
+        }
+        if let Some(domain) = self.domain.as_deref() {
+            validate_rule_domain(domain)?;
+            if self.title_pattern.is_some() {
+                return Err("Un grupo por dominio no debe incluir título".into());
+            }
         }
         if !matches!(self.mode.as_str(), "sessions" | "rule") {
             return Err("La acción de revisión no es válida".into());
@@ -312,6 +328,25 @@ pub fn validate_session_category(value: &str) -> Result<(), String> {
         return Err("La categoría de clasificación no es válida".into());
     }
     Ok(())
+}
+
+/// A domain rule stores a bare host (optionally `*.`-prefixed) in `app`.
+pub fn validate_rule_domain(value: &str) -> Result<(), String> {
+    let host = value.strip_prefix("*.").unwrap_or(value);
+    let valid = (3..=253).contains(&host.len())
+        && host.contains('.')
+        && !host.starts_with(['.', '-'])
+        && !host.ends_with(['.', '-'])
+        && host.chars().all(|character| {
+            character.is_ascii_lowercase()
+                || character.is_ascii_digit()
+                || matches!(character, '.' | '-')
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err("El dominio de la regla no es válido".into())
+    }
 }
 
 pub fn validate_rule_category(value: &str) -> Result<(), String> {
@@ -573,6 +608,12 @@ pub struct TimelineBlockV1 {
     pub classification_source: String,
     pub rule_id: Option<String>,
     pub correctable: bool,
+    /// Browser domain from the paired connector that covered most of this block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_domain: Option<String>,
+    /// Editor or shell project from the paired connector that covered most of this block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_project: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

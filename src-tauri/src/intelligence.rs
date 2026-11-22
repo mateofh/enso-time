@@ -477,6 +477,61 @@ pub fn context_observations_between(
         .map_err(|error| error.to_string())
 }
 
+/// Upper bound for timeline enrichment: one observation per connector per minute over the
+/// longest diagnostic range stays well below this.
+const MAX_TIMELINE_CONTEXT_ROWS: i64 = 60_000;
+
+/// Lean read of connector context for timeline enrichment: no titles, excerpts or OCR.
+/// Newest rows win when the cap is hit; callers sort by time.
+pub fn timeline_context_between(
+    store: &LocalStore,
+    from: &str,
+    to: &str,
+) -> Result<Vec<ContextObservationV2>, String> {
+    // A block's context may come from an observation sent shortly before it started.
+    let from = (crate::models::parse_utc(from)?
+        - chrono::Duration::seconds(crate::process_context::CONTEXT_LOOKBACK_SECONDS))
+    .to_rfc3339();
+    crate::models::parse_utc(to)?;
+    let connection = store.connection()?;
+    // Rows without domain or project are kept: they mark a context change (e.g. the
+    // editor left a project) and must end the previous context's attribution.
+    let mut statement = connection
+        .prepare(
+            "SELECT id, source, observed_at, app, domain, project, repository
+             FROM context_observations
+             WHERE observed_at >= ?1 AND observed_at <= ?2
+             ORDER BY observed_at DESC LIMIT ?3",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![from, to, MAX_TIMELINE_CONTEXT_ROWS], |row| {
+            let observed_at: String = row.get(2)?;
+            Ok(ContextObservationV2 {
+                schema_version: 2,
+                id: row.get(0)?,
+                source: row.get(1)?,
+                observed_at: observed_at.clone(),
+                duration_seconds: 0,
+                app: row.get(3)?,
+                title: None,
+                domain: row.get(4)?,
+                project: row.get(5)?,
+                repository: row.get(6)?,
+                branch: None,
+                file_type: None,
+                text_excerpt: None,
+                ocr_terms: Vec::new(),
+                sensitivity: "normal".into(),
+                client_id: None,
+                created_at: observed_at,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
 pub fn build_evidence_bundle(
     settings: &SettingsV1,
     blocks: &[TimelineBlockV1],
@@ -1389,17 +1444,23 @@ fn normalize_domain(value: Option<String>) -> Result<Option<String>, String> {
     Ok(Some(value))
 }
 
-pub fn redact_sensitive_text(value: &str) -> String {
-    let mut redacted = value.to_string();
-    for pattern in [
+/// Compiled once: redaction now runs on every window title read, not only at ingest.
+static SENSITIVE_PATTERNS: std::sync::LazyLock<Vec<Regex>> = std::sync::LazyLock::new(|| {
+    [
         r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
         r"\b(?:\d[ -]*?){13,19}\b",
         r"(?i)\b(?:sk|pk|api|token|secret)[-_][A-Z0-9_-]{12,}\b",
         r"\b(?:\+?\d[\d .()-]{8,}\d)\b",
-    ] {
-        if let Ok(regex) = Regex::new(pattern) {
-            redacted = regex.replace_all(&redacted, "[REDACTED]").into_owned();
-        }
+    ]
+    .iter()
+    .map(|pattern| Regex::new(pattern).expect("built-in redaction pattern is valid"))
+    .collect()
+});
+
+pub fn redact_sensitive_text(value: &str) -> String {
+    let mut redacted = value.to_string();
+    for regex in SENSITIVE_PATTERNS.iter() {
+        redacted = regex.replace_all(&redacted, "[REDACTED]").into_owned();
     }
     redacted
         .chars()
@@ -1463,6 +1524,8 @@ mod tests {
             classification_source: if afk { "afk" } else { "unknown" }.into(),
             rule_id: None,
             correctable: true,
+            context_domain: None,
+            context_project: None,
         };
         let bundle = build_evidence_bundle(
             &SettingsV1::default(),
@@ -1475,6 +1538,50 @@ mod tests {
             1.0,
         );
         assert!(bundle.evidence.is_empty());
+    }
+
+    #[test]
+    fn timeline_context_reaches_back_before_the_range_and_keeps_empty_rows() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = LocalStore::open(&temp.path().join("enso.sqlite")).unwrap();
+        for (id, at, domain) in [
+            ("before", "2026-11-21T11:59:30Z", Some("app.hubspot.com")),
+            ("empty", "2026-11-21T12:00:20Z", None),
+            ("too-old", "2026-11-21T11:55:00Z", Some("old.example.com")),
+        ] {
+            save_context_observation(
+                &store,
+                ContextObservationV2 {
+                    schema_version: 2,
+                    id: id.into(),
+                    source: "browser".into(),
+                    observed_at: at.into(),
+                    duration_seconds: 0,
+                    app: Some("Google Chrome".into()),
+                    title: Some("secret title".into()),
+                    domain: domain.map(Into::into),
+                    project: None,
+                    repository: None,
+                    branch: None,
+                    file_type: None,
+                    text_excerpt: None,
+                    ocr_terms: Vec::new(),
+                    sensitivity: "normal".into(),
+                    client_id: None,
+                    created_at: at.into(),
+                },
+            )
+            .unwrap();
+        }
+        let rows = timeline_context_between(&store, "2026-11-21T12:00:00Z", "2026-11-21T12:05:00Z")
+            .unwrap();
+        let mut ids = rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["before", "empty"]);
+        assert!(rows.iter().all(|row| row.title.is_none()));
+        assert!(rows
+            .iter()
+            .all(|row| row.app.as_deref() == Some("Google Chrome")));
     }
 
     #[test]

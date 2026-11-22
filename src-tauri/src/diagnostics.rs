@@ -265,11 +265,8 @@ fn score_candidates(
             let impact_score = (estimated_weekly_hours * 5.0 + weekly_frequency * 1.5)
                 .round()
                 .min(40.0) as i32;
-            let clear_ratio = items
-                .iter()
-                .filter(|item| item.rules_clear)
-                .count() as f64
-                / items.len() as f64;
+            let clear_ratio =
+                items.iter().filter(|item| item.rules_clear).count() as f64 / items.len() as f64;
             let corrections = items
                 .iter()
                 .filter(|item| item.source == "corrección")
@@ -290,36 +287,14 @@ fn score_candidates(
                 feasibility_score,
                 risk_score,
                 priority_score: (impact_score + feasibility_score - risk_score).clamp(0, 100),
-                evidence: vec![
-                    if english { format!("{} sessions: {corrections} corrections, {rules} rules and {checkins} check-ins", items.len()) }
-                    else { format!("{} sesiones: {corrections} correcciones, {rules} reglas y {checkins} check-ins", items.len()) },
-                    if english { format!("{weekly_frequency} estimated repetitions per week") } else { format!("{weekly_frequency} repeticiones estimadas por semana") },
-                    if english { format!("{estimated_weekly_hours} estimated hours per week") } else { format!("{estimated_weekly_hours} horas estimadas por semana") },
-                    if clear_ratio > 0.6 {
-                        (if english { "Most repetitions follow clear rules" } else { "La mayoría sigue reglas claras" }).into()
-                    } else {
-                        format!("{} registros durante el periodo", items.len())
-                    },
-                    if english {
-                        format!("{weekly_frequency} estimated repetitions per week")
-                    } else {
-                        if english { format!("{weekly_frequency} estimated repetitions per week") } else { format!("{weekly_frequency} repeticiones estimadas por semana") }
-                    },
-                    if clear_ratio > 0.6 {
-                        if english {
-                            "Most repetitions follow clear rules"
-                        } else {
-                            (if english { "Most repetitions follow clear rules" } else { "La mayoría sigue reglas claras" }).into()
-                        }
-                    } else {
-                        if english {
-                            "Clarify rules before automating"
-                        } else {
-                            if english { "Clarify rules before automating" } else { "Necesita aclarar reglas antes de automatizar" }
-                        }
-                    }
-                    .into(),
-                ],
+                evidence: candidate_evidence(
+                    english,
+                    items.len(),
+                    (corrections, rules, checkins),
+                    weekly_frequency,
+                    estimated_weekly_hours,
+                    clear_ratio > 0.6,
+                ),
             }
         })
         .collect();
@@ -442,6 +417,37 @@ fn build_english_prompt(
 fn round(value: f64, digits: i32) -> f64 {
     let factor = 10_f64.powi(digits);
     (value * factor).round() / factor
+}
+
+fn candidate_evidence(
+    english: bool,
+    sessions: usize,
+    (corrections, rules, checkins): (usize, usize, usize),
+    weekly_frequency: f64,
+    estimated_weekly_hours: f64,
+    rules_clear: bool,
+) -> Vec<String> {
+    let rules_line = match (english, rules_clear) {
+        (true, true) => "Most repetitions follow clear rules",
+        (true, false) => "Clarify rules before automating",
+        (false, true) => "La mayoría sigue reglas claras",
+        (false, false) => "Necesita aclarar reglas antes de automatizar",
+    };
+    if english {
+        vec![
+            format!("{sessions} sessions: {corrections} corrections, {rules} rules and {checkins} check-ins"),
+            format!("{weekly_frequency} estimated repetitions per week"),
+            format!("{estimated_weekly_hours} estimated hours per week"),
+            rules_line.into(),
+        ]
+    } else {
+        vec![
+            format!("{sessions} sesiones: {corrections} correcciones, {rules} reglas y {checkins} check-ins"),
+            format!("{weekly_frequency} repeticiones estimadas por semana"),
+            format!("{estimated_weekly_hours} horas estimadas por semana"),
+            rules_line.into(),
+        ]
+    }
 }
 
 #[cfg(test)]
@@ -586,6 +592,8 @@ mod tests {
             classification_source: source.into(),
             rule_id: (source == "rule").then(|| "rule-1".into()),
             correctable: true,
+            context_domain: None,
+            context_project: None,
         };
         let candidates = score_candidates(
             &[block("one", "override"), block("two", "rule")],

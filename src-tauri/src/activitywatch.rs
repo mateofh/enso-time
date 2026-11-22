@@ -15,7 +15,7 @@ use std::process::Stdio;
 use std::process::{Child, Command, ExitStatus};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration as StdDuration, Instant};
 use uuid::Uuid;
@@ -259,6 +259,7 @@ pub struct ActivityWatchRuntime {
     server_thread: Mutex<Option<JoinHandle<()>>>,
     capture_issue: Arc<Mutex<Option<CaptureIssueCode>>>,
     capture_titles: Arc<AtomicBool>,
+    excluded_apps: Arc<RwLock<Vec<String>>>,
     window_capture_mode: Arc<Mutex<WindowCaptureMode>>,
     watcher_retry: Mutex<WatcherRetryState>,
     capture_generation: AtomicU64,
@@ -368,6 +369,9 @@ impl ActivityWatchRuntime {
             server_thread: Mutex::new(None),
             capture_issue,
             capture_titles: Arc::new(AtomicBool::new(false)),
+            excluded_apps: Arc::new(RwLock::new(
+                crate::models::DeepCaptureSettingsV2::default().excluded_apps,
+            )),
             window_capture_mode: Arc::new(Mutex::new(WindowCaptureMode::Stopped)),
             watcher_retry: Mutex::new(WatcherRetryState::new()),
             capture_generation: AtomicU64::new(0),
@@ -502,6 +506,13 @@ impl ActivityWatchRuntime {
             )
             .then_some(CaptureIssueCode::AccessibilityPermissionRequired)
         })
+    }
+
+    /// Apps whose name and title must never reach the window bucket.
+    pub fn set_excluded_apps(&self, apps: &[String]) {
+        if let Ok(mut current) = self.excluded_apps.write() {
+            *current = apps.to_vec();
+        }
     }
 
     pub fn start_watchers(&self, capture_titles: bool) -> Result<(), String> {
@@ -907,6 +918,7 @@ impl ActivityWatchRuntime {
         let worker_stop = Arc::clone(&stop);
         let worker_running = Arc::clone(&running);
         let capture_titles = Arc::clone(&self.capture_titles);
+        let excluded_apps = Arc::clone(&self.excluded_apps);
         let capture_issue = Arc::clone(&self.capture_issue);
         let window_mode = Arc::clone(&self.window_capture_mode);
         let cancellation = Arc::clone(&self.cancellation);
@@ -934,13 +946,25 @@ impl ActivityWatchRuntime {
                             *issue = None;
                         }
                     }
+                    let excluded = excluded_apps.read().is_ok_and(|apps| {
+                        crate::process_context::is_excluded_app(&observation.app, &apps)
+                    });
+                    let (app, title) = if excluded {
+                        (crate::process_context::EXCLUDED_APP_LABEL.to_string(), None)
+                    } else {
+                        (
+                            observation.app,
+                            observation
+                                .title
+                                .as_deref()
+                                .map(crate::process_context::sanitize_window_title),
+                        )
+                    };
                     let mut data = serde_json::Map::new();
-                    data.insert("app".into(), serde_json::Value::String(observation.app));
+                    data.insert("app".into(), serde_json::Value::String(app));
                     data.insert(
                         "title".into(),
-                        serde_json::Value::String(
-                            observation.title.unwrap_or_else(|| "excluded".into()),
-                        ),
+                        serde_json::Value::String(title.unwrap_or_else(|| "excluded".into())),
                     );
                     let event = Event::new(Utc::now(), Duration::zero(), data);
                     if safe_datastore(|| {
@@ -1229,6 +1253,7 @@ impl ActivityWatchRuntime {
         (window.status, afk.status)
     }
 
+    /// Timeline without connector context.
     pub fn timeline(
         &self,
         from: DateTime<Utc>,
@@ -1238,6 +1263,22 @@ impl ActivityWatchRuntime {
         rules: &[ClassificationRuleV1],
         overrides: &[ClassificationOverrideV1],
     ) -> Result<Vec<TimelineBlockV1>, String> {
+        self.timeline_with_context(from, to, settings, checkins, rules, overrides, &[])
+    }
+
+    /// Timeline enriched with connector context (browser domain, editor/shell project).
+    #[allow(clippy::too_many_arguments)]
+    pub fn timeline_with_context(
+        &self,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+        settings: &SettingsV1,
+        checkins: &[CheckInV1],
+        rules: &[ClassificationRuleV1],
+        overrides: &[ClassificationOverrideV1],
+        observations: &[crate::intelligence::ContextObservationV2],
+    ) -> Result<Vec<TimelineBlockV1>, String> {
+        let observations = crate::process_context::parse_observations(observations);
         if to <= from {
             return Err("El fin del rango debe ser posterior al inicio".into());
         }
@@ -1306,10 +1347,25 @@ impl ActivityWatchRuntime {
             if event_end <= event_start {
                 continue;
             }
-            let app =
+            let raw_app =
                 string_field(&event, "app").unwrap_or_else(|| "Aplicación desconocida".into());
-            let title = if settings.capture_window_titles {
-                string_field(&event, "title").filter(|title| title != "excluded")
+            // Read-time guard: Windows (bundled aw-watcher-window) and data captured before
+            // this filter existed can still hold excluded apps and unredacted titles.
+            let excluded = raw_app == crate::process_context::EXCLUDED_APP_LABEL
+                || crate::process_context::is_excluded_app(
+                    &raw_app,
+                    &settings.deep_capture.excluded_apps,
+                );
+            let app = if excluded {
+                crate::process_context::EXCLUDED_APP_LABEL.to_string()
+            } else {
+                raw_app
+            };
+            let title = if settings.capture_window_titles && !excluded {
+                string_field(&event, "title")
+                    .filter(|title| title != "excluded")
+                    .map(|title| crate::process_context::sanitize_window_title(&title))
+                    .filter(|title| !title.is_empty())
             } else {
                 None
             };
@@ -1320,7 +1376,6 @@ impl ActivityWatchRuntime {
                     .id
                     .unwrap_or_else(|| event.timestamp.timestamp_millis())
             );
-            let automatic = classify(&app, title.as_deref(), rules, &settings.app_rules);
 
             let afk_start = afk_intervals.partition_point(|(_, end)| *end <= event_start);
             let relevant_afk = afk_intervals[afk_start..]
@@ -1392,6 +1447,27 @@ impl ActivityWatchRuntime {
                 let is_afk = relevant_afk
                     .iter()
                     .any(|(start, end)| ranges_overlap(*start, *end, segment_start, segment_end));
+                let context = if excluded {
+                    crate::process_context::BlockContext::default()
+                } else {
+                    crate::process_context::dominant_context(
+                        &app,
+                        segment_start,
+                        segment_end,
+                        &observations,
+                    )
+                };
+                let automatic = if excluded {
+                    excluded_match()
+                } else {
+                    classify(
+                        &app,
+                        title.as_deref(),
+                        context.domain.as_deref(),
+                        rules,
+                        &settings.app_rules,
+                    )
+                };
                 let (
                     category,
                     activity_label,
@@ -1456,7 +1532,9 @@ impl ActivityWatchRuntime {
                     check_in_id,
                     classification_source,
                     rule_id,
-                    correctable: true,
+                    correctable: !excluded,
+                    context_domain: context.domain,
+                    context_project: context.project,
                 });
             }
         }
@@ -1485,6 +1563,8 @@ impl ActivityWatchRuntime {
                         classification_source: "checkin".into(),
                         rule_id: None,
                         correctable: false,
+                        context_domain: None,
+                        context_project: None,
                     });
                 }
             }
@@ -1538,14 +1618,18 @@ impl ActivityWatchRuntime {
         Ok((event.timestamp, event_end))
     }
 
+    /// Built-in domain guesses stay below the ambiguity threshold, so browser intervals
+    /// keep prompting; an explicit user domain rule silences them like any other rule.
     pub fn interval_reason(
         &self,
         from: DateTime<Utc>,
         to: DateTime<Utc>,
         settings: &SettingsV1,
         rules: &[ClassificationRuleV1],
+        observations: &[crate::intelligence::ContextObservationV2],
     ) -> Result<Option<String>, String> {
-        let blocks = self.timeline(from, to, settings, &[], rules, &[])?;
+        let blocks =
+            self.timeline_with_context(from, to, settings, &[], rules, &[], observations)?;
         let interval_seconds = (to - from).num_seconds().max(1);
         let tracked: i64 = blocks.iter().map(|block| block.duration_seconds).sum();
         let afk: i64 = blocks
@@ -2678,17 +2762,32 @@ struct ClassificationMatch {
     rule_id: Option<String>,
 }
 
+const BUILT_IN_DOMAIN_CONFIDENCE: f64 = 0.45;
+
+/// Excluded apps are private by definition: never analysed, never offered for review.
+fn excluded_match() -> ClassificationMatch {
+    ClassificationMatch {
+        category: "personal".into(),
+        activity_label: None,
+        confidence: 1.0,
+        source: "builtin".into(),
+        rule_id: None,
+    }
+}
+
 fn classify(
     app: &str,
     title: Option<&str>,
+    domain: Option<&str>,
     rules: &[ClassificationRuleV1],
     legacy_settings_rules: &[AppRule],
 ) -> ClassificationMatch {
     let normalized_app = normalize_match_text(app);
     let normalized_title = title.map(normalize_match_text).unwrap_or_default();
     let searchable = format!("{normalized_app} {normalized_title}");
+    let browser_domain = domain.filter(|_| crate::process_context::accepts_browser_context(app));
 
-    for scope in ["app-title", "app", "legacy"] {
+    for scope in ["app-title", "domain", "app", "legacy"] {
         if let Some(rule) = rules
             .iter()
             .filter(|rule| {
@@ -2702,24 +2801,17 @@ fn classify(
                                 normalized_title.contains(&normalize_match_text(pattern))
                             })
                     }
+                    "domain" => browser_domain.is_some_and(|domain| {
+                        crate::process_context::domain_matches(domain, &rule.app)
+                    }),
                     "app" => normalize_match_text(&rule.app) == normalized_app,
                     "legacy" => searchable.contains(&normalize_match_text(&rule.app)),
                     _ => false,
                 }
             })
             .max_by(|left, right| {
-                let left_specificity = left
-                    .title_pattern
-                    .as_deref()
-                    .map(normalize_match_text)
-                    .map(|value| value.chars().count())
-                    .unwrap_or_default();
-                let right_specificity = right
-                    .title_pattern
-                    .as_deref()
-                    .map(normalize_match_text)
-                    .map(|value| value.chars().count())
-                    .unwrap_or_default();
+                let left_specificity = rule_specificity(left);
+                let right_specificity = rule_specificity(right);
                 left_specificity
                     .cmp(&right_specificity)
                     .then_with(|| left.updated_at.cmp(&right.updated_at))
@@ -2749,6 +2841,19 @@ fn classify(
         };
     }
 
+    if let Some(category) =
+        browser_domain.and_then(crate::process_context::built_in_domain_category)
+    {
+        return ClassificationMatch {
+            category: category.into(),
+            activity_label: None,
+            // Below the 0.5 check-in threshold on purpose: a guessed category for a
+            // browser interval must not silence the prompt that collects real evidence.
+            confidence: BUILT_IN_DOMAIN_CONFIDENCE,
+            source: "builtin".into(),
+            rule_id: None,
+        };
+    }
     let category = built_in_category(&normalized_app, &normalized_title);
     ClassificationMatch {
         category: category.into(),
@@ -2762,6 +2867,17 @@ fn classify(
         .into(),
         rule_id: None,
     }
+}
+
+fn rule_specificity(rule: &ClassificationRuleV1) -> usize {
+    if rule.scope == "domain" {
+        return rule.app.chars().count();
+    }
+    rule.title_pattern
+        .as_deref()
+        .map(normalize_match_text)
+        .map(|value| value.chars().count())
+        .unwrap_or_default()
 }
 
 fn built_in_category(app: &str, title: &str) -> &'static str {
@@ -3204,6 +3320,257 @@ mod tests {
         assert!(corrected.afk);
     }
 
+    fn runtime_with_window_events(
+        temp: &TempDir,
+        start: DateTime<Utc>,
+        events: &[(&str, &str, i64)],
+    ) -> ActivityWatchRuntime {
+        let runtime = ActivityWatchRuntime::start(
+            &temp.path().join("data"),
+            temp.path().join("empty-resources"),
+        )
+        .unwrap();
+        let datastore = runtime.datastore().unwrap();
+        datastore
+            .create_bucket(&aw_models::Bucket {
+                bid: None,
+                id: "context-window".into(),
+                _type: "currentwindow".into(),
+                client: "aw-watcher-window".into(),
+                hostname: "test".into(),
+                created: Some(start),
+                data: Map::new(),
+                metadata: aw_models::BucketMetadata::default(),
+                events: None,
+                last_updated: None,
+            })
+            .unwrap();
+        let mut offset = 0;
+        let mut stored = Vec::new();
+        for (app, title, minutes) in events {
+            let mut data = Map::new();
+            data.insert("app".into(), serde_json::Value::String((*app).into()));
+            data.insert("title".into(), serde_json::Value::String((*title).into()));
+            stored.push(Event::new(
+                start + Duration::minutes(offset),
+                Duration::minutes(*minutes),
+                data,
+            ));
+            offset += minutes;
+        }
+        datastore.insert_events("context-window", &stored).unwrap();
+        runtime
+    }
+
+    fn browser_observation(
+        at: DateTime<Utc>,
+        domain: &str,
+    ) -> crate::intelligence::ContextObservationV2 {
+        crate::intelligence::ContextObservationV2 {
+            schema_version: 2,
+            id: format!("obs-{}", at.timestamp()),
+            source: "browser".into(),
+            observed_at: at.to_rfc3339(),
+            duration_seconds: 0,
+            app: Some("Chromium".into()),
+            title: None,
+            domain: Some(domain.into()),
+            project: None,
+            repository: None,
+            branch: None,
+            file_type: None,
+            text_excerpt: None,
+            ocr_terms: Vec::new(),
+            sensitivity: "normal".into(),
+            client_id: None,
+            created_at: at.to_rfc3339(),
+        }
+    }
+
+    #[test]
+    fn connector_domain_classifies_browser_blocks_but_check_ins_still_fire() {
+        let temp = TempDir::new().unwrap();
+        let start = DateTime::parse_from_rfc3339("2026-11-21T12:00:00Z")
+            .unwrap()
+            .to_utc();
+        let runtime =
+            runtime_with_window_events(&temp, start, &[("Google Chrome", "Contacts", 15)]);
+        let observations = (0..15)
+            .map(|minute| browser_observation(start + Duration::minutes(minute), "app.hubspot.com"))
+            .collect::<Vec<_>>();
+        let settings = SettingsV1::default();
+        let end = start + Duration::minutes(15);
+
+        let enriched = runtime
+            .timeline_with_context(start, end, &settings, &[], &[], &[], &observations)
+            .unwrap();
+        assert_eq!(enriched.len(), 1);
+        assert_eq!(
+            enriched[0].context_domain.as_deref(),
+            Some("app.hubspot.com")
+        );
+        assert_eq!(enriched[0].category, "admin");
+        assert_eq!(enriched[0].classification_source, "builtin");
+
+        let plain = runtime
+            .timeline(start, end, &settings, &[], &[], &[])
+            .unwrap();
+        assert_eq!(plain[0].category, "unknown");
+        assert_eq!(plain[0].context_domain, None);
+        // The blueprint's evidence comes from answered check-ins, so domain enrichment
+        // must not silence the prompt for browser-heavy intervals.
+        assert_eq!(
+            runtime
+                .interval_reason(start, end, &settings, &[], &observations)
+                .unwrap()
+                .as_deref(),
+            Some("ambiguous")
+        );
+
+        let now = "2026-11-21T11:00:00Z".to_string();
+        let rules = vec![
+            ClassificationRuleV1 {
+                id: "chrome".into(),
+                scope: "app".into(),
+                app: "Google Chrome".into(),
+                title_pattern: None,
+                category: "personal".into(),
+                activity_label: None,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            },
+            ClassificationRuleV1 {
+                id: "crm".into(),
+                scope: "domain".into(),
+                app: "hubspot.com".into(),
+                title_pattern: None,
+                category: "communication".into(),
+                activity_label: Some("Seguimiento CRM".into()),
+                created_at: now.clone(),
+                updated_at: now,
+            },
+        ];
+        let ruled = runtime
+            .timeline_with_context(start, end, &settings, &[], &rules, &[], &observations)
+            .unwrap();
+        assert_eq!(ruled[0].rule_id.as_deref(), Some("crm"));
+        assert_eq!(ruled[0].activity_label.as_deref(), Some("Seguimiento CRM"));
+        // An explicit user domain rule is confirmed knowledge and silences the prompt.
+        assert_eq!(
+            runtime
+                .interval_reason(start, end, &settings, &rules, &observations)
+                .unwrap(),
+            None
+        );
+    }
+
+    /// Manual timing check: `cargo test --release timeline_context_scales -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn timeline_context_scales_to_weeks_of_events_and_observations() {
+        let temp = TempDir::new().unwrap();
+        let start = DateTime::parse_from_rfc3339("2026-11-01T00:00:00Z")
+            .unwrap()
+            .to_utc();
+        let runtime = ActivityWatchRuntime::start(
+            &temp.path().join("data"),
+            temp.path().join("empty-resources"),
+        )
+        .unwrap();
+        let datastore = runtime.datastore().unwrap();
+        datastore
+            .create_bucket(&aw_models::Bucket {
+                bid: None,
+                id: "bench-window".into(),
+                _type: "currentwindow".into(),
+                client: "aw-watcher-window".into(),
+                hostname: "test".into(),
+                created: Some(start),
+                data: Map::new(),
+                metadata: aw_models::BucketMetadata::default(),
+                events: None,
+                last_updated: None,
+            })
+            .unwrap();
+        let apps = ["Google Chrome", "Slack", "Cursor", "Mail"];
+        let events = (0..20_000)
+            .map(|index| {
+                let mut data = Map::new();
+                data.insert(
+                    "app".into(),
+                    serde_json::Value::String(apps[index % 4].into()),
+                );
+                data.insert(
+                    "title".into(),
+                    serde_json::Value::String(format!("Ticket #{index} — cliente{index}@acme.com")),
+                );
+                Event::new(
+                    start + Duration::seconds(index as i64 * 60),
+                    Duration::seconds(55),
+                    data,
+                )
+            })
+            .collect::<Vec<_>>();
+        datastore.insert_events("bench-window", &events).unwrap();
+        let observations = (0..20_000)
+            .map(|index| {
+                browser_observation(
+                    start + Duration::seconds(index as i64 * 60 + 5),
+                    "app.hubspot.com",
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut settings = SettingsV1::default();
+        settings.capture_window_titles = true;
+        let end = start + Duration::days(14);
+        let began = std::time::Instant::now();
+        let blocks = runtime
+            .timeline_with_context(start, end, &settings, &[], &[], &[], &observations)
+            .unwrap();
+        let elapsed = began.elapsed();
+        println!(
+            "timeline_with_context: {} blocks in {:?}",
+            blocks.len(),
+            elapsed
+        );
+        assert!(blocks.len() >= 19_000);
+        assert!(elapsed < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn excluded_apps_and_sensitive_titles_are_scrubbed_when_reading_stored_events() {
+        let temp = TempDir::new().unwrap();
+        let start = DateTime::parse_from_rfc3339("2026-11-21T12:00:00Z")
+            .unwrap()
+            .to_utc();
+        let runtime = runtime_with_window_events(
+            &temp,
+            start,
+            &[
+                ("1Password", "Banco — Login", 2),
+                ("Mail", "Factura de ana@cliente.com", 3),
+            ],
+        );
+        let mut settings = SettingsV1::default();
+        settings.capture_window_titles = true;
+        let blocks = runtime
+            .timeline(
+                start,
+                start + Duration::minutes(5),
+                &settings,
+                &[],
+                &[],
+                &[],
+            )
+            .unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].app, crate::process_context::EXCLUDED_APP_LABEL);
+        assert_eq!(blocks[0].title, None);
+        assert!(!blocks[0].correctable);
+        assert_ne!(blocks[0].category, "unknown");
+        assert_eq!(blocks[1].title.as_deref(), Some("Factura de [REDACTED]"));
+    }
+
     #[test]
     fn explicit_rules_win_over_defaults() {
         let rules = vec![AppRule {
@@ -3212,7 +3579,7 @@ mod tests {
             category: "focus".into(),
             activity_label: None,
         }];
-        let classified = classify("Notion", None, &[], &rules);
+        let classified = classify("Notion", None, None, &[], &rules);
         assert_eq!(classified.category, "focus");
         assert_eq!(classified.confidence, 1.0);
     }
@@ -3245,6 +3612,7 @@ mod tests {
         let classified = classify(
             "Google Chrome",
             Some("Overview — CLIENT   PORTAL"),
+            None,
             &rules,
             &[],
         );
@@ -3258,10 +3626,16 @@ mod tests {
 
     #[test]
     fn multipurpose_browsers_stay_unknown_without_a_useful_title_signal() {
-        let classified = classify("Google Chrome", None, &[], &[]);
+        let classified = classify("Google Chrome", None, None, &[], &[]);
         assert_eq!(classified.category, "unknown");
         assert_eq!(classified.source, "unknown");
-        let meeting = classify("Google Chrome", Some("Weekly sync — Google Meet"), &[], &[]);
+        let meeting = classify(
+            "Google Chrome",
+            Some("Weekly sync — Google Meet"),
+            None,
+            &[],
+            &[],
+        );
         assert_eq!(meeting.category, "meetings");
     }
 

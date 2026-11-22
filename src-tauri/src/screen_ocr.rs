@@ -46,10 +46,7 @@ mod platform {
         excluded_apps: &[String],
     ) -> Result<(String, Vec<String>), String> {
         let active = crate::macos_capture::current_window(false).app;
-        if excluded_apps
-            .iter()
-            .any(|excluded| excluded.eq_ignore_ascii_case(&active))
-        {
+        if crate::process_context::is_excluded_app(&active, excluded_apps) {
             return Err("excluded-app".into());
         }
         if !CGPreflightScreenCaptureAccess() {

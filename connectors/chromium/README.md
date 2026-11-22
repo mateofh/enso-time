@@ -6,7 +6,9 @@
 4. Abre las opciones de la extensión e introduce el código de ocho dígitos.
 
 Por defecto se envían una vez por minuto únicamente el título y dominio de la pestaña
-activa. Las pestañas de incógnito y las URL no HTTP(S) se ignoran. Para compartir texto
+activa, y solo mientras el navegador tiene el foco. Cada envío indica la marca del
+navegador (Chrome, Edge, Brave, Opera o Vivaldi), así Ensō Time no atribuye una pestaña
+de Chrome a otra ventana. Las pestañas de incógnito y las URL no HTTP(S) se ignoran. Para compartir texto
 visible de un sitio, añádelo tanto a la lista de la extensión como a la lista autorizada
 de Ensō Time; Chrome solicitará el permiso de sitio correspondiente.
 

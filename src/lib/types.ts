@@ -61,7 +61,8 @@ export interface AiSettingsV2 {
   weeklyHour: number;
 }
 
-export type ClassificationRuleScope = "app" | "app-title" | "legacy";
+/** `domain` rules store a bare host in `app` and match browser sessions with connector context. */
+export type ClassificationRuleScope = "app" | "app-title" | "domain" | "legacy";
 export type ClassificationSource = "afk" | "override" | "checkin" | "rule" | "builtin" | "unknown";
 
 export interface ClassificationRuleV1 {
@@ -106,6 +107,8 @@ export interface ReviewGroupV1 {
   firstSeen: string;
   lastSeen: string;
   browserFallback: boolean;
+  /** Set when browser sessions are grouped by connector domain instead of title. */
+  domain?: string;
 }
 
 export interface ApplyReviewGroupInputV1 {
@@ -116,6 +119,7 @@ export interface ApplyReviewGroupInputV1 {
   category: CategoryId;
   activityLabel?: string;
   mode: "sessions" | "rule";
+  domain?: string;
 }
 
 export interface ReviewOperationV1 {
@@ -183,6 +187,10 @@ export interface TimelineBlockV1 {
   classificationSource?: ClassificationSource;
   ruleId?: string;
   correctable?: boolean;
+  /** Browser domain from a paired connector that covered most of the block. */
+  contextDomain?: string;
+  /** Editor or shell project from a paired connector that covered most of the block. */
+  contextProject?: string;
 }
 
 export interface CheckInV1 {
