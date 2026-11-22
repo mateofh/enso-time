@@ -1026,6 +1026,7 @@ pub fn generate_diagnostic(state: State<'_, AppState>, days: u16) -> Result<Diag
         &blocks,
         settings.capture_window_titles,
         &state.connector_gateway.list_clients()?,
+        &crate::process_context::parse_observations(&context),
     ));
     let cached = diagnostic
         .candidates

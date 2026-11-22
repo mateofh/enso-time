@@ -638,18 +638,19 @@ function AiEvaluationSection({ days, locale, enabled }: { days: 7 | 14 | 28; loc
 function CaptureHealthSection({ health, locale }: { health: CaptureHealthV1; locale: Locale }) {
   const copy = messages(locale).automate;
   const [opening, setOpening] = useState(false);
+  const [error, setError] = useState<string>();
   const percent = (value: number) => Math.round(value * 100);
   const apps = health.topUnknown.map((item) => item.app).join(", ");
   const titlesNeedFix = health.titles === "missing";
   const browserNeedsFix = health.browserConnector === "not-paired" || health.browserConnector === "not-reporting";
   async function openAccessibility() {
-    setOpening(true);
-    try { await bridge.requestAccessibilityPermission(); } catch { /* the capture banner reports permission errors */ } finally { setOpening(false); }
+    setOpening(true); setError(undefined);
+    try { await bridge.requestAccessibilityPermission(); } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); } finally { setOpening(false); }
   }
   return <section className="capture-health" aria-labelledby="capture-health-title">
     <div><h2 id="capture-health-title">{copy.healthTitle}</h2><p>{copy.healthHint}</p></div>
     <ul>
-      <li data-status={titlesNeedFix || health.titles === "off" ? "warn" : "ok"}><strong>{copy.healthTitles}</strong><span>{copy.healthTitlesStatus[health.titles]}</span>{titlesNeedFix && <><small>{copy.healthTitlesFix}</small><button type="button" className="secondary-button" disabled={opening} onClick={() => void openAccessibility()}>{copy.healthAccessibility}</button></>}</li>
+      <li data-status={titlesNeedFix || health.titles === "off" ? "warn" : "ok"}><strong>{copy.healthTitles}</strong><span>{copy.healthTitlesStatus[health.titles]}</span>{titlesNeedFix && health.accessibilityFix && <><small>{copy.healthTitlesFix}</small><button type="button" className="secondary-button" disabled={opening} onClick={() => void openAccessibility()}>{copy.healthAccessibility}</button>{error && <small role="alert" className="capture-health-error">{error}</small>}</>}</li>
       <li data-status={browserNeedsFix ? "warn" : "ok"}><strong>{copy.healthBrowser}</strong><span>{copy.healthBrowserStatus(health.browserConnector, percent(health.browserDomainShare))}</span>{browserNeedsFix && <small>{copy.healthBrowserFix}</small>}</li>
       <li data-status={health.unknownShare >= 0.2 ? "warn" : "ok"}><strong>{copy.healthUnknown}</strong><span>{copy.healthUnknownStatus(percent(health.unknownShare), apps)}</span></li>
     </ul>

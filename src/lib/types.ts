@@ -274,6 +274,8 @@ export interface CaptureHealthV1 {
   topUnknown: { app: string; seconds: number }[];
   titles: "off" | "missing" | "ok" | "insufficient";
   titledShare: number;
+  /** Missing titles are fixed by granting Accessibility (macOS only). */
+  accessibilityFix: boolean;
   browserSeconds: number;
   browserDomainShare: number;
   browserConnector: "not-paired" | "not-reporting" | "ok" | "insufficient";

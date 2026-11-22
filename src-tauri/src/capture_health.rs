@@ -8,6 +8,7 @@ use serde::Serialize;
 
 use crate::connectors::ConnectorClientV1;
 use crate::models::TimelineBlockV1;
+use crate::process_context::ParsedObservation;
 
 /// Below this share of titled window time, titles are considered missing.
 const MIN_TITLED_SHARE: f64 = 0.1;
@@ -36,6 +37,8 @@ pub struct CaptureHealthV1 {
     /// `off` (setting disabled), `missing` (enabled but not arriving), `ok`, `insufficient`.
     pub titles: String,
     pub titled_share: f64,
+    /// Missing titles are fixed by granting Accessibility (macOS only).
+    pub accessibility_fix: bool,
     pub browser_seconds: i64,
     pub browser_domain_share: f64,
     /// `not-paired`, `not-reporting`, `ok`, `insufficient` (too little browser time).
@@ -56,10 +59,23 @@ fn is_window_activity(block: &TimelineBlockV1) -> bool {
         && block.app != crate::process_context::EXCLUDED_APP_LABEL
 }
 
+/// Only time covered by a live observation counts: the block's dominant domain may come
+/// from a single report.
+fn covered_seconds(block: &TimelineBlockV1, observations: &[ParsedObservation<'_>]) -> i64 {
+    let (Ok(start), Ok(end)) = (
+        crate::models::parse_utc(&block.start),
+        crate::models::parse_utc(&block.end),
+    ) else {
+        return 0;
+    };
+    crate::process_context::context_covered_seconds(&block.app, start, end, observations)
+}
+
 pub fn capture_health(
     blocks: &[TimelineBlockV1],
     capture_titles: bool,
     connectors: &[ConnectorClientV1],
+    observations: &[ParsedObservation<'_>],
 ) -> CaptureHealthV1 {
     let mut active = 0;
     let mut titled = 0;
@@ -81,9 +97,7 @@ pub fn capture_health(
         }
         if crate::process_context::accepts_browser_context(&block.app) {
             browser += seconds;
-            if block.context_domain.is_some() {
-                browser_with_domain += seconds;
-            }
+            browser_with_domain += covered_seconds(block, observations).min(seconds);
         }
     }
     let mut top_unknown = unknown_by_app
@@ -127,6 +141,7 @@ pub fn capture_health(
         top_unknown,
         titles: titles.into(),
         titled_share,
+        accessibility_fix: cfg!(target_os = "macos") && titles == "missing",
         browser_seconds: browser,
         browser_domain_share,
         browser_connector: browser_connector.into(),
@@ -141,7 +156,9 @@ mod tests {
         TimelineBlockV1 {
             id: format!("{app}-{seconds}-{category}"),
             start: "2026-11-21T10:00:00Z".into(),
-            end: "2026-11-21T10:00:00Z".into(),
+            end: (crate::models::parse_utc("2026-11-21T10:00:00Z").unwrap()
+                + chrono::Duration::seconds(seconds))
+            .to_rfc3339(),
             duration_seconds: seconds,
             app: app.into(),
             title: None,
@@ -158,6 +175,36 @@ mod tests {
             context_project: None,
             case_refs: Vec::new(),
         }
+    }
+
+    /// One browser report per minute from `from_minute` for `minutes`, like extension 0.2.0.
+    fn reports(from_minute: i64, minutes: i64) -> Vec<crate::intelligence::ContextObservationV2> {
+        (from_minute..from_minute + minutes)
+            .map(|minute| {
+                let at = (crate::models::parse_utc("2026-11-21T10:00:00Z").unwrap()
+                    + chrono::Duration::minutes(minute))
+                .to_rfc3339();
+                crate::intelligence::ContextObservationV2 {
+                    schema_version: 2,
+                    id: format!("browser-{minute}"),
+                    source: "browser".into(),
+                    observed_at: at.clone(),
+                    duration_seconds: 0,
+                    app: Some("Google Chrome".into()),
+                    title: None,
+                    domain: Some("mail.google.com".into()),
+                    project: None,
+                    repository: None,
+                    branch: None,
+                    file_type: None,
+                    text_excerpt: None,
+                    ocr_terms: Vec::new(),
+                    sensitivity: "normal".into(),
+                    client_id: None,
+                    created_at: at,
+                }
+            })
+            .collect()
     }
 
     fn browser_client(revoked: bool) -> ConnectorClientV1 {
@@ -179,8 +226,9 @@ mod tests {
             block("Figma", 1_800, "creation"),
             block("Notes", 600, "unknown"),
         ];
-        let health = capture_health(&blocks, true, &[browser_client(true)]);
+        let health = capture_health(&blocks, true, &[browser_client(true)], &[]);
         assert_eq!(health.titles, "missing");
+        assert_eq!(health.accessibility_fix, cfg!(target_os = "macos"));
         assert_eq!(health.browser_connector, "not-paired");
         assert_eq!(health.active_seconds, 6_000);
         assert!((health.unknown_share - 0.7).abs() < 1e-9);
@@ -196,19 +244,28 @@ mod tests {
         let mut figma = block("Figma", 1_800, "creation");
         figma.title = Some("Diseño".into());
         let blocks = vec![chrome, figma];
-        let health = capture_health(&blocks, true, &[browser_client(false)]);
+        let observed = reports(0, 60);
+        let parsed = crate::process_context::parse_observations(&observed);
+        let health = capture_health(&blocks, true, &[browser_client(false)], &parsed);
         assert_eq!(health.titles, "ok");
+        assert!(health.browser_domain_share > 0.99);
         assert_eq!(health.browser_connector, "ok");
         assert!(health.top_unknown.is_empty());
-        assert_eq!(capture_health(&blocks, false, &[]).titles, "off");
+        assert_eq!(capture_health(&blocks, false, &[], &[]).titles, "off");
     }
 
     #[test]
     fn paired_connector_without_sites_is_not_reporting_and_small_samples_are_insufficient() {
-        let blocks = vec![block("Google Chrome", 3_600, "unknown")];
-        let health = capture_health(&blocks, true, &[browser_client(false)]);
+        let mut chrome = block("Google Chrome", 3_600, "unknown");
+        // The timeline assigns the block's domain from a single report…
+        chrome.context_domain = Some("mail.google.com".into());
+        let observed = reports(0, 1);
+        let parsed = crate::process_context::parse_observations(&observed);
+        let health = capture_health(&[chrome], true, &[browser_client(false)], &parsed);
+        // …but that report only covers its hold window, not the whole hour.
         assert_eq!(health.browser_connector, "not-reporting");
-        let small = capture_health(&[block("Google Chrome", 60, "unknown")], true, &[]);
+        assert!(health.browser_domain_share < 0.05);
+        let small = capture_health(&[block("Google Chrome", 60, "unknown")], true, &[], &[]);
         assert_eq!(small.browser_connector, "insufficient");
         assert_eq!(small.titles, "insufficient");
     }
@@ -220,7 +277,7 @@ mod tests {
         let mut manual = block("Figma", 9_000, "admin");
         manual.id = "manual-1".into();
         let excluded = block(crate::process_context::EXCLUDED_APP_LABEL, 9_000, "unknown");
-        let health = capture_health(&[away, manual, excluded], true, &[]);
+        let health = capture_health(&[away, manual, excluded], true, &[], &[]);
         assert_eq!(health.active_seconds, 0);
         assert!(health.top_unknown.is_empty());
     }

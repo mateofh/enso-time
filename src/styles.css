@@ -225,6 +225,7 @@ input:hover, select:hover, textarea:hover { border-color: var(--border-strong); 
 .capture-health li:last-child { border-bottom: 1px solid var(--border); }
 .capture-health li small { color: var(--text-secondary); }
 .capture-health li button { justify-self: start; }
+.capture-health .capture-health-error { color: var(--danger); }
 .handoffs { margin-top: 48px; display: grid; grid-template-columns: 1fr 2fr; gap: 44px; }
 .handoffs p { color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
 .handoffs ol { list-style: none; margin: 0; padding: 0; }

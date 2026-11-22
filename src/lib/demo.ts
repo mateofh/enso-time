@@ -95,6 +95,7 @@ export const demoCaptureHealth = {
   topUnknown: [{ app: "google chrome", seconds: 2 * 3600 }, { app: "notes", seconds: 600 }],
   titles: "missing" as const,
   titledShare: 0,
+  accessibilityFix: true,
   browserSeconds: 2 * 3600,
   browserDomainShare: 0,
   browserConnector: "not-paired" as const,
