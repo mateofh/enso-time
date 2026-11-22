@@ -1575,6 +1575,35 @@ impl ActivityWatchRuntime {
         Ok(blocks)
     }
 
+    /// Every interval the AFK watcher reported, AFK or not: proof that capture was running.
+    pub fn presence_intervals(
+        &self,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<(DateTime<Utc>, DateTime<Utc>)>, String> {
+        if to <= from {
+            return Ok(Vec::new());
+        }
+        let datastore = self.datastore()?;
+        let buckets = safe_datastore(|| datastore.get_buckets())?;
+        let mut intervals = Vec::new();
+        for bucket in buckets
+            .values()
+            .filter(|bucket| bucket._type == "afkstatus")
+        {
+            let events =
+                safe_datastore(|| datastore.get_events(&bucket.id, Some(from), Some(to), None))?;
+            for event in events {
+                let start = event.timestamp.max(from);
+                let end = event.calculate_endtime().min(to);
+                if end > start {
+                    intervals.push((start, end));
+                }
+            }
+        }
+        Ok(intervals)
+    }
+
     pub fn window_event_interval(
         &self,
         block_id: &str,

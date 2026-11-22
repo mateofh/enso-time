@@ -282,6 +282,10 @@ test("maps, saves, resumes, and enriches the top candidate workflow", async ({ p
   await expect(health.getByRole("alert")).toHaveCount(0);
   await expect(health.getByText("La extensión no está emparejada: el navegador cuenta como una sola app.")).toBeVisible();
   await expect(health.getByText("31% del tiempo activo. Sobre todo: microsoft edge, preview.")).toBeVisible();
+  await expect(health.getByText("30 h 0 min capturadas · 6 h 30 min con Ensō cerrado o el equipo apagado · 1 h 0 min con la captura caída.")).toBeVisible();
+  await health.getByText("Huecos más largos").click();
+  await expect(health.getByText(/Ensō cerrado o equipo apagado · deducido · 6 h 0 min/)).toBeVisible();
+  await expect(health.getByText("Antes de esta versión, Ensō no distingue «cerrado» de «equipo apagado».")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Traspasos más repetidos" })).toBeVisible();
   await expect(page.getByText("mail.google.com → excel", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Levantar workflow" }).click();
@@ -567,4 +571,16 @@ test("previews, authorizes, and runs the independent AI evaluation", async ({ pa
   await page.getByRole("button", { name: "Autorizar esta política" }).click();
   await page.getByRole("button", { name: "Ejecutar evaluación" }).click();
   await expect(page.locator(".ai-report")).toContainText(/evaluador|oportunidad/i);
+});
+
+test("Today warns once about a stretch where Ensō stopped unexpectedly", async ({ page }) => {
+  await page.goto("/");
+  const notice = page.locator(".capture-gap-notice");
+  await expect(notice.getByText("Ensō no estuvo activo")).toBeVisible();
+  await expect(notice.getByRole("heading", { name: /≈ 2 h 30 min de tu horario/ })).toBeVisible();
+  await notice.getByRole("button", { name: "Entendido" }).click();
+  await expect(notice).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Hoy" })).toBeVisible();
+  await expect(page.locator(".capture-gap-notice")).toHaveCount(0);
 });

@@ -1022,12 +1022,21 @@ pub fn generate_diagnostic(state: State<'_, AppState>, days: u16) -> Result<Diag
     };
     operation.ensure_current()?;
     let mut diagnostic = create_diagnostic(&blocks, &checkins, observed, &settings, &workflows);
-    diagnostic.capture_health = Some(crate::capture_health::capture_health(
+    let mut health = crate::capture_health::capture_health(
         &blocks,
         settings.capture_window_titles,
         &state.connector_gateway.list_clients()?,
         &crate::process_context::parse_observations(&context),
-    ));
+    );
+    health.coverage = Some(capture_coverage(
+        &state.store,
+        &state.activity,
+        &settings,
+        &blocks,
+        start,
+        now,
+    )?);
+    diagnostic.capture_health = Some(health);
     let cached = diagnostic
         .candidates
         .iter()
@@ -1857,6 +1866,102 @@ pub fn open_external(app: AppHandle, url: String) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+fn capture_coverage(
+    store: &LocalStore,
+    activity: &ActivityWatchRuntime,
+    settings: &SettingsV1,
+    blocks: &[TimelineBlockV1],
+    from: chrono::DateTime<Utc>,
+    to: chrono::DateTime<Utc>,
+) -> Result<crate::capture_gaps::CaptureCoverageV1, String> {
+    let window = blocks
+        .iter()
+        .filter(|block| !block.id.starts_with("manual-"))
+        .filter_map(|block| Some((parse_utc(&block.start).ok()?, parse_utc(&block.end).ok()?)))
+        .collect::<Vec<_>>();
+    Ok(crate::capture_gaps::classify(
+        from,
+        to,
+        &crate::runtime_sessions::sessions_between(store, from, to)?,
+        crate::runtime_sessions::tracking_since(store)?,
+        &window,
+        &activity.presence_intervals(from, to)?,
+        &|moment| inside_work_schedule(settings, moment),
+    ))
+}
+
+const CAPTURE_GAP_NOTICE_KEY: &str = "capture_gap_notice_seen_until";
+/// Only gaps that cost at least this much of the work schedule are worth a notice.
+const MIN_CAPTURE_GAP_NOTICE_SECONDS: i64 = 3_600;
+/// Older parts of a very long gap are not measured.
+const MAX_CAPTURE_GAP_NOTICE_DAYS: i64 = 60;
+
+/// The last time Ensō stopped without its own exit path (crash, forced quit, power off),
+/// if it cost an hour or more of the schedule and was not dismissed yet.
+#[tauri::command]
+pub fn capture_gap_notice(
+    state: State<'_, AppState>,
+) -> Result<Option<crate::capture_gaps::CoverageGapV1>, String> {
+    capture_gap_notice_inner(&state.store)
+}
+
+fn capture_gap_notice_inner(
+    store: &LocalStore,
+) -> Result<Option<crate::capture_gaps::CoverageGapV1>, String> {
+    let Some((from, to)) = crate::runtime_sessions::last_lost_gap(store)? else {
+        return Ok(None);
+    };
+    let seen = store
+        .get_value(CAPTURE_GAP_NOTICE_KEY)?
+        .and_then(|value| parse_utc(&value).ok());
+    if seen.is_some_and(|seen| seen >= to) {
+        return Ok(None);
+    }
+    let settings = store.settings()?;
+    let measured_from = from.max(to - Duration::days(MAX_CAPTURE_GAP_NOTICE_DAYS));
+    let schedule_seconds =
+        crate::capture_gaps::schedule_seconds_between(measured_from, to, &|moment| {
+            inside_work_schedule(&settings, moment)
+        });
+    Ok(
+        (schedule_seconds >= MIN_CAPTURE_GAP_NOTICE_SECONDS).then(|| {
+            crate::capture_gaps::CoverageGapV1 {
+                start: from.to_rfc3339(),
+                end: to.to_rfc3339(),
+                reason: "closed-or-off".into(),
+                inferred: false,
+                schedule_seconds,
+            }
+        }),
+    )
+}
+
+#[tauri::command]
+pub fn dismiss_capture_gap_notice(state: State<'_, AppState>, until: String) -> Result<(), String> {
+    parse_utc(&until)?;
+    state.store.set_value(CAPTURE_GAP_NOTICE_KEY, &until)
+}
+
+/// The uptime log must never stop check-ins or capture: failures are only logged.
+fn record_heartbeat(
+    heartbeat: &mut crate::runtime_sessions::Heartbeat,
+    store: &LocalStore,
+    window_status: &str,
+    afk_status: &str,
+    capture_issue: Option<String>,
+    paused: bool,
+) {
+    let state = crate::runtime_sessions::RuntimeStateV1 {
+        window_status: window_status.into(),
+        afk_status: afk_status.into(),
+        capture_issue,
+        paused,
+    };
+    if let Err(error) = heartbeat.tick(store, Utc::now(), &state) {
+        eprintln!("Ensō Time uptime log: {error}");
+    }
+}
+
 pub fn start_scheduler(
     app: AppHandle,
     store: Arc<LocalStore>,
@@ -1864,8 +1969,18 @@ pub fn start_scheduler(
     capture_gate: Arc<CaptureGate>,
     app_data_dir: PathBuf,
 ) -> Result<SchedulerHandle, String> {
+    let mut heartbeat = crate::runtime_sessions::Heartbeat::default();
     spawn_scheduler(
-        move || scheduler_tick(&app, &store, &activity, &capture_gate, &app_data_dir),
+        move || {
+            scheduler_tick(
+                &app,
+                &store,
+                &activity,
+                &capture_gate,
+                &app_data_dir,
+                &mut heartbeat,
+            )
+        },
         std::time::Duration::from_secs(30),
     )
 }
@@ -1918,6 +2033,7 @@ fn scheduler_tick(
     activity: &Arc<ActivityWatchRuntime>,
     capture_gate: &Arc<CaptureGate>,
     app_data_dir: &std::path::Path,
+    heartbeat: &mut crate::runtime_sessions::Heartbeat,
 ) -> Result<(), String> {
     let operation = capture_gate.tracking_operation()?;
     let settings = store.settings()?;
@@ -1932,9 +2048,15 @@ fn scheduler_tick(
     }
     schedule_weekly_ai_if_due(app, store, activity, capture_gate, &settings)?;
     if !is_running(store)? {
+        record_heartbeat(heartbeat, store, "paused", "paused", None, true);
         return Ok(());
     }
     let (window_status, afk_status) = activity.watcher_statuses();
+    let issue = activity
+        .capture_issue()
+        .and_then(|code| serde_json::to_value(code).ok())
+        .and_then(|value| value.as_str().map(str::to_owned));
+    record_heartbeat(heartbeat, store, &window_status, &afk_status, issue, false);
     if window_status != "running" || afk_status != "running" {
         if operation.ensure_current().is_err() || activity.shutdown_requested() {
             return Ok(());
@@ -2384,6 +2506,45 @@ mod tests {
         gate.generation.fetch_add(1, Ordering::AcqRel);
         assert!(record_native_action_error(&store, &gate, original_generation).is_err());
         assert!(store.get_value("native_action_error").unwrap().is_none());
+    }
+
+    #[test]
+    fn capture_gap_notice_reports_a_lost_stretch_once_and_ignores_quits_and_short_gaps() {
+        use crate::runtime_sessions::{close_session, Heartbeat, RuntimeStateV1};
+        let directory = TempDir::new().unwrap();
+        let store = LocalStore::open(&directory.path().join("gaps.sqlite")).unwrap();
+        let mut settings = store.settings().unwrap();
+        settings.timezone = "UTC".into();
+        settings.work_schedule.start = "00:00".into();
+        settings.work_schedule.end = "23:59".into();
+        settings.work_schedule.days = (0..7).collect();
+        store.save_settings(&settings).unwrap();
+        let state = RuntimeStateV1 {
+            window_status: "running".into(),
+            afk_status: "running".into(),
+            capture_issue: None,
+            paused: false,
+        };
+        let at =
+            |minutes: i64| parse_utc("2026-11-23T10:00:00Z").unwrap() + Duration::minutes(minutes);
+        // A quit followed by a restart is deliberate: no notice.
+        Heartbeat::default().tick(&store, at(0), &state).unwrap();
+        close_session(&store, at(1)).unwrap();
+        Heartbeat::default().tick(&store, at(180), &state).unwrap();
+        assert!(capture_gap_notice_inner(&store).unwrap().is_none());
+        // The process dies without quitting (session left open); 30 min later: too short.
+        Heartbeat::default().tick(&store, at(210), &state).unwrap();
+        assert!(capture_gap_notice_inner(&store).unwrap().is_none());
+        // Dies again; two hours later the notice appears, until it is dismissed.
+        Heartbeat::default().tick(&store, at(330), &state).unwrap();
+        let notice = capture_gap_notice_inner(&store).unwrap().unwrap();
+        assert_eq!(notice.start, at(210).to_rfc3339());
+        assert_eq!(notice.end, at(330).to_rfc3339());
+        assert_eq!(notice.schedule_seconds, 7_200);
+        store
+            .set_value(CAPTURE_GAP_NOTICE_KEY, &notice.end)
+            .unwrap();
+        assert!(capture_gap_notice_inner(&store).unwrap().is_none());
     }
 
     #[test]

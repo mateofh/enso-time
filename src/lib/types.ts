@@ -268,6 +268,34 @@ export interface ObservedEvidenceV1 {
   cases?: number;
 }
 
+export interface CoverageTotalsV1 {
+  captured: number;
+  idle: number;
+  asleep: number;
+  quit: number;
+  closedOrOff: number;
+  watcherDown: number;
+  paused: number;
+}
+
+export type CoverageGapReason = "asleep" | "quit" | "closed-or-off" | "watcher-down" | "paused";
+
+export interface CoverageGapV1 {
+  start: string;
+  end: string;
+  reason: CoverageGapReason;
+  /** Before Ensō's uptime log existed: deduced from captured data only. */
+  inferred: boolean;
+  scheduleSeconds: number;
+}
+
+export interface CaptureCoverageV1 {
+  trackingSince?: string;
+  schedule: CoverageTotalsV1;
+  all: CoverageTotalsV1;
+  gaps: CoverageGapV1[];
+}
+
 export interface CaptureHealthV1 {
   activeSeconds: number;
   unknownShare: number;
@@ -279,6 +307,8 @@ export interface CaptureHealthV1 {
   browserSeconds: number;
   browserDomainShare: number;
   browserConnector: "not-paired" | "not-reporting" | "ok" | "insufficient";
+  /** Why time was not captured, from Ensō's uptime log. */
+  coverage?: CaptureCoverageV1;
 }
 
 export interface HandoffV1 {

@@ -35,7 +35,9 @@ import type {
   ClassificationRuleV1,
   CheckInAnswer,
   CheckInV1,
+  CaptureCoverageV1,
   CaptureHealthV1,
+  CoverageGapV1,
   CaptureIssue,
   DiagnosticV1,
   Locale,
@@ -635,6 +637,43 @@ function AiEvaluationSection({ days, locale, enabled }: { days: 7 | 14 | 28; loc
   );
 }
 
+function CoverageRow({ coverage, locale }: { coverage: CaptureCoverageV1; locale: Locale }) {
+  const copy = messages(locale).automate;
+  const totals = coverage.schedule;
+  const closed = totals.closedOrOff + totals.quit;
+  const missing = closed + totals.watcherDown;
+  const format = (seconds: number) => formatDuration(seconds, locale);
+  const when = (iso: string) => new Date(iso).toLocaleString(locale === "en" ? "en-US" : "es-419", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  return <li data-status={missing > 0.1 * (totals.captured + totals.idle + missing) ? "warn" : "ok"} className="capture-coverage">
+    <strong>{copy.healthCoverage}</strong>
+    <span>{copy.healthCoverageStatus(format(totals.captured), format(closed), format(totals.watcherDown))}</span>
+    {coverage.gaps.length > 0 && <details><summary>{copy.healthCoverageGaps}</summary><ol>{coverage.gaps.map((gap) => <li key={`${gap.start}-${gap.reason}`}><span>{when(gap.start)} → {when(gap.end)}</span><small>{copy.healthGapReason[gap.reason]}{gap.inferred ? ` · ${copy.healthGapInferred}` : ""} · {format(gap.scheduleSeconds)}</small></li>)}</ol></details>}
+    {coverage.gaps.some((gap) => gap.inferred) && <small>{copy.healthCoverageLimit}</small>}
+  </li>;
+}
+
+function CaptureGapNotice({ locale }: { locale: Locale }) {
+  const copy = messages(locale).automate;
+  const [notice, setNotice] = useState<CoverageGapV1 | null>(null);
+  useEffect(() => { void bridge.captureGapNotice().then(setNotice).catch(() => setNotice(null)); }, []);
+  if (!notice) return null;
+  const when = (iso: string) => new Date(iso).toLocaleString(locale === "en" ? "en-US" : "es-419", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  async function dismiss() {
+    if (!notice) return;
+    setNotice(null);
+    try { await bridge.dismissCaptureGapNotice(notice.end); } catch { /* shown again next time; nothing to lose */ }
+  }
+  return <section className="capture-issue capture-gap-notice" aria-labelledby="capture-gap-title" aria-live="polite">
+    <AlertCircle size={20} aria-hidden="true" />
+    <div>
+      <p>{copy.gapNoticeLabel}</p>
+      <h2 id="capture-gap-title">{copy.gapNoticeTitle(when(notice.start), when(notice.end), formatDuration(notice.scheduleSeconds, locale))}</h2>
+      <span>{copy.gapNoticeDetail}</span>
+    </div>
+    <div className="capture-issue-actions"><button type="button" className="secondary-button" onClick={() => void dismiss()}>{copy.gapNoticeDismiss}</button></div>
+  </section>;
+}
+
 function CaptureHealthSection({ health, locale }: { health: CaptureHealthV1; locale: Locale }) {
   const copy = messages(locale).automate;
   const [opening, setOpening] = useState(false);
@@ -653,6 +692,7 @@ function CaptureHealthSection({ health, locale }: { health: CaptureHealthV1; loc
       <li data-status={titlesNeedFix || health.titles === "off" ? "warn" : "ok"}><strong>{copy.healthTitles}</strong><span>{copy.healthTitlesStatus[health.titles]}</span>{titlesNeedFix && health.accessibilityFix && <><small>{copy.healthTitlesFix}</small><button type="button" className="secondary-button" disabled={opening} onClick={() => void openAccessibility()}>{copy.healthAccessibility}</button>{error && <small role="alert" className="capture-health-error">{error}</small>}</>}</li>
       <li data-status={browserNeedsFix ? "warn" : "ok"}><strong>{copy.healthBrowser}</strong><span>{copy.healthBrowserStatus(health.browserConnector, percent(health.browserDomainShare))}</span>{browserNeedsFix && <small>{copy.healthBrowserFix}</small>}</li>
       <li data-status={health.unknownShare >= 0.2 ? "warn" : "ok"}><strong>{copy.healthUnknown}</strong><span>{copy.healthUnknownStatus(percent(health.unknownShare), apps)}</span></li>
+      {health.coverage && <CoverageRow coverage={health.coverage} locale={locale} />}
     </ul>
   </section>;
 }
@@ -1020,6 +1060,7 @@ export default function App() {
         {status.nativeActionError && <section className="capture-issue" role="alert"><AlertCircle size={20} aria-hidden="true" /><p>{copy.common.trackingActionError}</p></section>}
         {refreshError && <section className="capture-issue" role="alert"><AlertCircle size={20} aria-hidden="true" /><p>{copy.common.refreshError}</p></section>}
         {status.captureIssue && <CaptureIssueBanner issue={status.captureIssue} locale={settings.locale} onRetry={() => action(async () => { setStatus(await bridge.retryCapture()); })} onRequestAccessibility={() => action(async () => { await bridge.requestAccessibilityPermission(); })} />}
+        {view === "today" && <CaptureGapNotice locale={settings.locale} />}
         {view === "today" && <TodayView settings={settings} status={visibleStatus} blocks={blocks} checkIns={checkIns} onNavigate={setView} onPause={() => action(async () => { setStatus(await bridge.pauseTracking(30)); }, copy.notices.paused)} onResume={() => action(async () => { setStatus(await bridge.resumeTracking()); }, copy.notices.resumed)} onClassify={classifySession} onClear={clearSessionClassification} onSaveRule={saveClassificationRule} onPreviewRule={bridge.previewClassificationRule} />}
         {view === "review" && <ReviewView settings={settings} onChanged={async () => { refreshEpoch.current += 1; try { const [nextRules, snapshot] = await Promise.all([bridge.listClassificationRules(), fetchTodaySnapshot()]); setClassificationRules(nextRules); setStatus(snapshot[0]); setBlocks(snapshot[1]); } finally { refreshEpoch.current += 1; } }} />}
         {view === "checkins" && <CheckInsView checkIns={checkIns} settings={settings} onAnswer={answer} />}

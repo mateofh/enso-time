@@ -43,6 +43,9 @@ pub struct CaptureHealthV1 {
     pub browser_domain_share: f64,
     /// `not-paired`, `not-reporting`, `ok`, `insufficient` (too little browser time).
     pub browser_connector: String,
+    /// Why time was not captured; set by the native command from the uptime log.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<crate::capture_gaps::CaptureCoverageV1>,
 }
 
 fn share(part: i64, total: i64) -> f64 {
@@ -145,6 +148,7 @@ pub fn capture_health(
         browser_seconds: browser,
         browser_domain_share,
         browser_connector: browser_connector.into(),
+        coverage: None,
     }
 }
 
