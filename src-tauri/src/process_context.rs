@@ -13,7 +13,7 @@ pub const EXCLUDED_APP_LABEL: &str = "Aplicación excluida";
 
 /// Connector observations are sent on tab/editor change and about once a minute, so the
 /// context active at a block's start may have been observed up to this long before it.
-const CONTEXT_LOOKBACK_SECONDS: i64 = 75;
+pub const CONTEXT_LOOKBACK_SECONDS: i64 = 75;
 
 /// A context observation stays in effect for at most this long without a newer one.
 const CONTEXT_MAX_HOLD_SECONDS: i64 = 150;
@@ -69,6 +69,22 @@ pub fn sanitize_window_title(title: &str) -> String {
         .to_string()
 }
 
+/// Matches the browser that sent an observation (its brand, from the extension) with the
+/// frontmost window. Extension 0.1.0 sent the generic `Chromium`; that stays accepted for
+/// any Chromium-family window until users update the extension.
+fn browser_emitter_matches(emitter: Option<&str>, app: &str) -> bool {
+    let identity = app_identity(app);
+    let family: &[&str] = match emitter.map(app_identity).as_deref() {
+        Some("google chrome") => &["google chrome", "chrome", "arc"],
+        Some("microsoft edge") => &["microsoft edge", "msedge"],
+        Some("brave") => &["brave browser", "brave"],
+        Some("opera") => &["opera"],
+        Some("vivaldi") => &["vivaldi"],
+        _ => return true,
+    };
+    family.contains(&identity.as_str())
+}
+
 fn context_source_for_app(app: &str) -> Option<&'static str> {
     let identity = app_identity(app);
     if accepts_browser_context(app) {
@@ -115,6 +131,9 @@ pub fn dominant_context(
     let relevant = observations[first..last.max(first)]
         .iter()
         .filter(|item| item.observation.source == source)
+        .filter(|item| {
+            source != "browser" || browser_emitter_matches(item.observation.app.as_deref(), app)
+        })
         .collect::<Vec<_>>();
     let mut totals: Vec<(&ContextObservationV2, i64)> = Vec::new();
     for (index, item) in relevant.iter().enumerate() {
@@ -424,6 +443,55 @@ mod tests {
             dominant_context("Slack", range.0, range.1, &parsed),
             BlockContext::default()
         );
+    }
+
+    #[test]
+    fn an_edge_window_ignores_observations_sent_by_chrome() {
+        let mut chrome = observation(
+            "browser",
+            "2026-11-21T12:00:05Z",
+            Some("app.hubspot.com"),
+            None,
+        );
+        chrome.app = Some("Google Chrome".into());
+        let mut edge = observation(
+            "browser",
+            "2026-11-21T12:00:06Z",
+            Some("mail.google.com"),
+            None,
+        );
+        edge.app = Some("Microsoft Edge".into());
+        let observations = vec![chrome, edge];
+        let parsed = parse_observations(&observations);
+        let (start, end) = (at("2026-11-21T12:00:00Z"), at("2026-11-21T12:02:00Z"));
+        assert_eq!(
+            dominant_context("msedge.exe", start, end, &parsed)
+                .domain
+                .as_deref(),
+            Some("mail.google.com")
+        );
+        assert_eq!(
+            dominant_context("Google Chrome", start, end, &parsed)
+                .domain
+                .as_deref(),
+            Some("app.hubspot.com")
+        );
+    }
+
+    #[test]
+    fn an_empty_observation_ends_the_previous_project() {
+        let observations = vec![
+            observation("editor", "2026-11-21T12:00:00Z", None, Some("old-project")),
+            observation("editor", "2026-11-21T12:00:20Z", None, None),
+        ];
+        let parsed = parse_observations(&observations);
+        let context = dominant_context(
+            "Cursor",
+            at("2026-11-21T12:00:00Z"),
+            at("2026-11-21T12:02:00Z"),
+            &parsed,
+        );
+        assert_eq!(context, BlockContext::default());
     }
 
     #[test]

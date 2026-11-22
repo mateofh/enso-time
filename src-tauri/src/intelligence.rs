@@ -488,15 +488,19 @@ pub fn timeline_context_between(
     from: &str,
     to: &str,
 ) -> Result<Vec<ContextObservationV2>, String> {
-    crate::models::parse_utc(from)?;
+    // A block's context may come from an observation sent shortly before it started.
+    let from = (crate::models::parse_utc(from)?
+        - chrono::Duration::seconds(crate::process_context::CONTEXT_LOOKBACK_SECONDS))
+    .to_rfc3339();
     crate::models::parse_utc(to)?;
     let connection = store.connection()?;
+    // Rows without domain or project are kept: they mark a context change (e.g. the
+    // editor left a project) and must end the previous context's attribution.
     let mut statement = connection
         .prepare(
-            "SELECT id, source, observed_at, domain, project, repository
+            "SELECT id, source, observed_at, app, domain, project, repository
              FROM context_observations
              WHERE observed_at >= ?1 AND observed_at <= ?2
-               AND (domain IS NOT NULL OR project IS NOT NULL OR repository IS NOT NULL)
              ORDER BY observed_at DESC LIMIT ?3",
         )
         .map_err(|error| error.to_string())?;
@@ -509,11 +513,11 @@ pub fn timeline_context_between(
                 source: row.get(1)?,
                 observed_at: observed_at.clone(),
                 duration_seconds: 0,
-                app: None,
+                app: row.get(3)?,
                 title: None,
-                domain: row.get(3)?,
-                project: row.get(4)?,
-                repository: row.get(5)?,
+                domain: row.get(4)?,
+                project: row.get(5)?,
+                repository: row.get(6)?,
                 branch: None,
                 file_type: None,
                 text_excerpt: None,
@@ -1534,6 +1538,50 @@ mod tests {
             1.0,
         );
         assert!(bundle.evidence.is_empty());
+    }
+
+    #[test]
+    fn timeline_context_reaches_back_before_the_range_and_keeps_empty_rows() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = LocalStore::open(&temp.path().join("enso.sqlite")).unwrap();
+        for (id, at, domain) in [
+            ("before", "2026-11-21T11:59:30Z", Some("app.hubspot.com")),
+            ("empty", "2026-11-21T12:00:20Z", None),
+            ("too-old", "2026-11-21T11:55:00Z", Some("old.example.com")),
+        ] {
+            save_context_observation(
+                &store,
+                ContextObservationV2 {
+                    schema_version: 2,
+                    id: id.into(),
+                    source: "browser".into(),
+                    observed_at: at.into(),
+                    duration_seconds: 0,
+                    app: Some("Google Chrome".into()),
+                    title: Some("secret title".into()),
+                    domain: domain.map(Into::into),
+                    project: None,
+                    repository: None,
+                    branch: None,
+                    file_type: None,
+                    text_excerpt: None,
+                    ocr_terms: Vec::new(),
+                    sensitivity: "normal".into(),
+                    client_id: None,
+                    created_at: at.into(),
+                },
+            )
+            .unwrap();
+        }
+        let rows = timeline_context_between(&store, "2026-11-21T12:00:00Z", "2026-11-21T12:05:00Z")
+            .unwrap();
+        let mut ids = rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["before", "empty"]);
+        assert!(rows.iter().all(|row| row.title.is_none()));
+        assert!(rows
+            .iter()
+            .all(|row| row.app.as_deref() == Some("Google Chrome")));
     }
 
     #[test]

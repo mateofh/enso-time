@@ -851,9 +851,14 @@ pub fn get_study_progress(state: State<'_, AppState>) -> Result<StudyProgress, S
     let overrides = state
         .store
         .classification_overrides_between(&start.to_rfc3339(), &now.to_rfc3339())?;
-    let timeline = state
-        .activity
-        .timeline(start, now, &settings, &checkins, &rules, &overrides)?;
+    let context = crate::intelligence::timeline_context_between(
+        &state.store,
+        &start.to_rfc3339(),
+        &now.to_rfc3339(),
+    )?;
+    let timeline = state.activity.timeline_with_context(
+        start, now, &settings, &checkins, &rules, &overrides, &context,
+    )?;
     let tracked_seconds: i64 = timeline
         .iter()
         .filter(|block| !block.afk)
@@ -966,7 +971,10 @@ fn intelligence_bundle_from(
     let workflows = store.list_workflow_intakes()?;
     let rules = store.classification_rules()?;
     let overrides = store.classification_overrides_between(&from, &to)?;
-    let blocks = activity.timeline(start, now, &settings, &checkins, &rules, &overrides)?;
+    let context = crate::intelligence::timeline_context_between(store, &from, &to)?;
+    let blocks = activity.timeline_with_context(
+        start, now, &settings, &checkins, &rules, &overrides, &context,
+    )?;
     let observed = ((now - start).num_seconds().max(0) as f64 / 86_400.0).min(f64::from(days));
     let diagnostic = create_diagnostic(&blocks, &checkins, observed, &settings, &workflows);
     let observations = crate::intelligence::context_observations_between(store, &from, &to)?;
@@ -1538,13 +1546,19 @@ pub fn export_data(state: State<'_, AppState>, format: String) -> Result<String,
             &settings.locale,
         )?);
     }
-    let timeline = state.activity.timeline(
+    let context = crate::intelligence::timeline_context_between(
+        &state.store,
+        &start.to_rfc3339(),
+        &now.to_rfc3339(),
+    )?;
+    let timeline = state.activity.timeline_with_context(
         start,
         now,
         &settings,
         &checkins,
         &classification_rules,
         &classification_overrides,
+        &context,
     )?;
     let export_dir = state.app_data_dir.join("exports");
     create_private_directory(&export_dir)?;
