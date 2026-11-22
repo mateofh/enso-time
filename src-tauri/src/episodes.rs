@@ -31,6 +31,8 @@ pub const MIN_HANDOFF_COUNT: usize = 2;
 /// End-of-day labeling offers only episodes at least this long, and at most this many.
 pub const MIN_LABEL_SUGGESTION_SECONDS: i64 = 300;
 pub const MAX_LABEL_SUGGESTIONS: usize = 5;
+/// Most window blocks one labeling request may carry; larger episodes are not offered.
+pub const MAX_EPISODE_LABEL_BLOCKS: usize = 5_000;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Episode {
@@ -308,6 +310,7 @@ pub fn unlabeled_suggestions(episodes: &[Episode]) -> Vec<&Episode> {
             episode.candidate_key.is_none()
                 && !episode.steps.is_empty()
                 && episode.touch_seconds >= MIN_LABEL_SUGGESTION_SECONDS
+                && episode.block_ids.len() <= MAX_EPISODE_LABEL_BLOCKS
         })
         .collect::<Vec<_>>();
     suggestions.sort_by(|left, right| {

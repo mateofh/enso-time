@@ -339,11 +339,18 @@ export const bridge = {
   async labelEpisode(input: LabelEpisodeInputV1): Promise<ReviewOperationV1> {
     if (isTauri()) return invoke("label_episode", { input });
     if (!input.activityLabel.trim()) throw new Error("La etiqueta de actividad es obligatoria");
+    // Like the desktop command, never overwrite a block that is already confirmed.
+    const confirmed = new Set(["override", "rule", "checkin"]);
+    const wanted = new Set(input.blockIds);
+    const blockIds = (await bridge.getTimeline(input.from, input.to))
+      .filter((block) => wanted.has(block.id) && block.correctable !== false && !confirmed.has(block.classificationSource ?? ""))
+      .map((block) => block.id);
+    if (!blockIds.length) throw new Error("Este episodio ya no está disponible");
     const state = loadWebState();
     state.classificationOverrides = { ...(state.classificationOverrides ?? {}) };
-    for (const blockId of input.blockIds) state.classificationOverrides[blockId] = { category: input.category, activityLabel: input.activityLabel.trim() };
+    for (const blockId of blockIds) state.classificationOverrides[blockId] = { category: input.category, activityLabel: input.activityLabel.trim() };
     saveWebState(state);
-    return { id: crypto.randomUUID(), mode: "sessions", affectedSessions: input.blockIds.length, blockIds: input.blockIds };
+    return { id: crypto.randomUUID(), mode: "sessions", affectedSessions: blockIds.length, blockIds };
   },
 
   async undoReviewOperation(input: UndoReviewOperationInputV1): Promise<void> {

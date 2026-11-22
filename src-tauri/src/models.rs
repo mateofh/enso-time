@@ -346,7 +346,7 @@ impl LabelEpisodeInputV1 {
             return Err("El periodo de revisión no es válido".into());
         }
         if self.block_ids.is_empty()
-            || self.block_ids.len() > 5_000
+            || self.block_ids.len() > crate::episodes::MAX_EPISODE_LABEL_BLOCKS
             || self
                 .block_ids
                 .iter()
