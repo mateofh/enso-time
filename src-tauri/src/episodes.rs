@@ -191,9 +191,13 @@ fn push_step(episode: &mut Episode, run: &Run) {
     episode.end = episode.end.max(run.end);
     episode.touch_seconds += run.seconds();
     episode.block_ids.extend(run.block_ids.iter().cloned());
-    add_unique(&mut episode.case_refs, &run.case_refs);
     if episode.candidate_key.is_none() {
         episode.candidate_key = run.candidate_key.clone();
+    }
+    // Cases count only for the episode's own confirmed task, never for an absorbed
+    // interruption that belongs to another task.
+    if run.candidate_key.is_some() && run.candidate_key == episode.candidate_key {
+        add_unique(&mut episode.case_refs, &run.case_refs);
     }
 }
 
@@ -206,7 +210,11 @@ fn merge_into(target: &mut Draft, next: Draft) {
     target.episode.end = target.episode.end.max(next.episode.end);
     target.episode.touch_seconds += next.episode.touch_seconds;
     target.episode.block_ids.extend(next.episode.block_ids);
-    add_unique(&mut target.episode.case_refs, &next.episode.case_refs);
+    if target.episode.candidate_key.is_none()
+        || target.episode.candidate_key == next.episode.candidate_key
+    {
+        add_unique(&mut target.episode.case_refs, &next.episode.case_refs);
+    }
     target.excursion_seconds += next.excursion_seconds;
     if target.task_key.is_none() {
         target.task_key = next.task_key;
@@ -663,6 +671,20 @@ mod tests {
         assert_eq!(episodes.len(), 2);
         assert_eq!(episodes[0].case_refs, vec!["invoice:aaa"]);
         assert_eq!(observed_evidence(&episodes)["facturar"].cases, Some(2));
+
+        // An absorbed interruption from another task does not lend its case.
+        let mut interrupted = blocks(&[
+            b("Excel", 0, 300).label("Facturar"),
+            b("Zendesk", 300, 360).label("Resolver ticket"),
+            b("Excel", 360, 600).label("Facturar"),
+        ]);
+        interrupted[0].case_refs = vec!["invoice:aaa".into()];
+        interrupted[1].case_refs = vec!["ticket:ccc".into()];
+        interrupted[2].case_refs = vec!["invoice:aaa".into()];
+        let merged = build_episodes(&interrupted);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].case_refs, vec!["invoice:aaa"]);
+        assert_eq!(observed_evidence(&merged)["facturar"].cases, Some(1));
 
         let without = blocks(&[b("Excel", 0, 300).label("Facturar")]);
         assert_eq!(

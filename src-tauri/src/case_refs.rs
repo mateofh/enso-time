@@ -64,7 +64,9 @@ pub fn extract(title: &str, salt: &str) -> Vec<String> {
             let Some(value) = captures.get(1) else {
                 continue;
             };
-            let normalized = value.as_str().replace(['-', '_'], "");
+            // Keep the group structure (series vs number): only the separator style is
+            // normalized, so INV-12-345 and INV-123-45 stay different cases.
+            let normalized = value.as_str().replace(['_', ' '], "-");
             let digest = hmac_sha256(salt.as_bytes(), format!("{kind}:{normalized}").as_bytes());
             let hex = digest
                 .iter()
@@ -118,12 +120,14 @@ mod tests {
     #[test]
     fn typed_references_hide_the_identifier_and_match_across_apps() {
         let gmail = extract("Re: Factura FAC-2024-0042 — Gmail", SALT);
-        let sheets = extract("FAC_20240042.xlsx", SALT);
+        let sheets = extract("FAC_2024_0042.xlsx", SALT);
         assert_eq!(gmail.len(), 1);
         assert!(gmail[0].starts_with("invoice:"));
         assert_eq!(gmail[0].len(), "invoice:".len() + HASH_HEX_CHARS);
-        // Separators are normalized, so the same invoice matches in both apps.
+        // Separator style is normalized, so the same invoice matches in both apps...
         assert_eq!(gmail, sheets);
+        // ...but group boundaries are kept, so different invoices never collide.
+        assert_ne!(extract("INV-12-345", SALT), extract("INV-123-45", SALT));
         assert!(!gmail[0].contains("2024") && !gmail[0].contains("0042"));
 
         let ticket = extract("Ticket #48213 – Zendesk", SALT);
