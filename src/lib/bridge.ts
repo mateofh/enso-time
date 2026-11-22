@@ -141,6 +141,11 @@ function reviewPattern(block: TimelineBlockV1): string | undefined {
 function ruleMatches(rule: ClassificationRuleV1, block: TimelineBlockV1): boolean {
   const app = normalizedMatch(block.app);
   if (rule.scope === "legacy") return `${app} ${normalizedMatch(block.title ?? "")}`.includes(normalizedMatch(rule.app));
+  if (rule.scope === "domain") {
+    const domain = block.contextDomain?.toLowerCase();
+    const host = rule.app.toLowerCase().replace(/^\*\./, "");
+    return isBrowserApp(block.app) && !!domain && (domain === host || domain.endsWith(`.${host}`));
+  }
   if (app !== normalizedMatch(rule.app)) return false;
   return rule.scope === "app" || normalizedMatch(block.title ?? "").includes(normalizedMatch(rule.titlePattern ?? ""));
 }

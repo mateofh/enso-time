@@ -282,7 +282,7 @@ function Timeline({ blocks, locale, onClassify, onClear, onSaveRule, onPreviewRu
           {editing === block.id && (
             <form className="classification-editor" onSubmit={(event) => void saveSession(event)}>
               {!suggestion ? <>
-                <div><strong>{classificationCopy.editorTitle}</strong><small>{block.app}{block.title ? ` · ${block.title}` : ""}</small></div>
+                <div><strong>{classificationCopy.editorTitle}</strong><small>{block.app}{block.contextDomain ? ` · ${block.contextDomain}` : ""}{block.title ? ` · ${block.title}` : ""}</small></div>
                 <div className="classification-fields">
                   <label>{classificationCopy.category}<select value={category} onChange={(event) => setCategory(event.target.value as CategoryId)}>{SESSION_CATEGORIES.map((item) => <option key={item} value={item}>{categoryLabel(locale, item)}</option>)}</select></label>
                   <label>{classificationCopy.activityLabel}<input value={activityLabel} maxLength={200} onChange={(event) => setActivityLabel(event.target.value)} placeholder={classificationCopy.activityPlaceholder} /></label>
@@ -292,7 +292,7 @@ function Timeline({ blocks, locale, onClassify, onClear, onSaveRule, onPreviewRu
               </> : ruleDraft && <>
                 <div><strong>{classificationCopy.suggestionTitle}</strong><small>{classificationCopy.suggestionCopy}</small></div>
                 <div className="classification-fields">
-                  <label>{classificationCopy.scope}<select value={ruleDraft.scope} onChange={(event) => setRuleDraft({ ...ruleDraft, scope: event.target.value as "app" | "app-title", titlePattern: event.target.value === "app" ? undefined : ruleDraft.titlePattern ?? block.title ?? "" })}><option value="app">{classificationCopy.appScope}</option><option value="app-title">{classificationCopy.titleScope}</option></select></label>
+                  <label>{classificationCopy.scope}<select value={ruleDraft.scope} onChange={(event) => { const scope = event.target.value as "app" | "app-title" | "domain"; setRuleDraft({ ...ruleDraft, scope, app: scope === "domain" ? block.contextDomain ?? ruleDraft.app : block.app, titlePattern: scope === "app-title" ? ruleDraft.titlePattern ?? block.title ?? "" : undefined }); }}>{block.contextDomain && <option value="domain">{`${classificationCopy.domainScope}: ${block.contextDomain}`}</option>}<option value="app">{classificationCopy.appScope}</option><option value="app-title">{classificationCopy.titleScope}</option></select></label>
                   {ruleDraft.scope === "app-title" && <label>{classificationCopy.pattern}<input value={ruleDraft.titlePattern ?? ""} maxLength={256} onChange={(event) => setRuleDraft({ ...ruleDraft, titlePattern: event.target.value })} onBlur={() => void refreshImpact()} /></label>}
                 </div>
                 {ruleDraft.scope === "app" && /chrome|safari|firefox|edge|arc|brave|orion/i.test(block.app) && <p className="review-warning"><AlertCircle size={15} aria-hidden="true" />{messages(locale).review.fallbackWarning}</p>}
@@ -335,7 +335,7 @@ function ReviewGroupCard({ group, locale, range, onApplied }: {
     setBusy(true); setError(undefined);
     try {
       const operation = await bridge.applyReviewGroup({
-        ...range, app: group.app, titlePattern: group.titlePattern, category,
+        ...range, app: group.app, titlePattern: group.titlePattern, domain: group.domain, category,
         activityLabel: activityLabel.trim() || undefined, mode,
       });
       onApplied(operation);
@@ -347,7 +347,7 @@ function ReviewGroupCard({ group, locale, range, onApplied }: {
   return (
     <article className="review-card">
       <div className="review-card-heading">
-        <div><h2>{group.app}</h2><p>{group.titlePattern || group.sampleTitle || copy.noTitle}</p></div>
+        <div><h2>{group.domain ?? group.app}</h2><p>{group.domain ? group.app : group.titlePattern || group.sampleTitle || copy.noTitle}</p></div>
         <strong>{formatDuration(group.durationSeconds, locale)}</strong>
       </div>
       <div className="review-meta"><span>{copy.sessions(group.sessions)}</span><span>{copy.period(formatTime(group.firstSeen, locale), formatTime(group.lastSeen, locale))}</span></div>
@@ -628,7 +628,7 @@ function ClassificationRulesSettings({ rules, locale, onSave, onDelete }: { rule
       <div className="settings-fields">
         {drafts.length === 0 ? <p className="inline-empty">{copy.noRules}</p> : drafts.map((rule) => (
           <div className="rule-settings-row" key={rule.id}>
-            <div className="rule-settings-heading"><strong>{rule.app}</strong><small>{rule.scope === "app" ? copy.appScope : rule.scope === "app-title" ? copy.titleScope : copy.legacyScope}</small></div>
+            <div className="rule-settings-heading"><strong>{rule.app}</strong><small>{rule.scope === "app" ? copy.appScope : rule.scope === "app-title" ? copy.titleScope : rule.scope === "domain" ? copy.domainScope : copy.legacyScope}</small></div>
             <div className="two-columns">
               {rule.scope === "app-title" && <label>{copy.pattern}<input value={rule.titlePattern ?? ""} maxLength={256} onChange={(event) => update(rule.id, { titlePattern: event.target.value })} /></label>}
               <label>{copy.category}<select value={rule.category} onChange={(event) => update(rule.id, { category: event.target.value as CategoryId })}>{RULE_CATEGORIES.map((category) => <option key={category} value={category}>{categoryLabel(locale, category)}</option>)}</select></label>

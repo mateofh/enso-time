@@ -477,6 +477,57 @@ pub fn context_observations_between(
         .map_err(|error| error.to_string())
 }
 
+/// Upper bound for timeline enrichment: one observation per connector per minute over the
+/// longest diagnostic range stays well below this.
+const MAX_TIMELINE_CONTEXT_ROWS: i64 = 60_000;
+
+/// Lean read of connector context for timeline enrichment: no titles, excerpts or OCR.
+/// Newest rows win when the cap is hit; callers sort by time.
+pub fn timeline_context_between(
+    store: &LocalStore,
+    from: &str,
+    to: &str,
+) -> Result<Vec<ContextObservationV2>, String> {
+    crate::models::parse_utc(from)?;
+    crate::models::parse_utc(to)?;
+    let connection = store.connection()?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, source, observed_at, domain, project, repository
+             FROM context_observations
+             WHERE observed_at >= ?1 AND observed_at <= ?2
+               AND (domain IS NOT NULL OR project IS NOT NULL OR repository IS NOT NULL)
+             ORDER BY observed_at DESC LIMIT ?3",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![from, to, MAX_TIMELINE_CONTEXT_ROWS], |row| {
+            let observed_at: String = row.get(2)?;
+            Ok(ContextObservationV2 {
+                schema_version: 2,
+                id: row.get(0)?,
+                source: row.get(1)?,
+                observed_at: observed_at.clone(),
+                duration_seconds: 0,
+                app: None,
+                title: None,
+                domain: row.get(3)?,
+                project: row.get(4)?,
+                repository: row.get(5)?,
+                branch: None,
+                file_type: None,
+                text_excerpt: None,
+                ocr_terms: Vec::new(),
+                sensitivity: "normal".into(),
+                client_id: None,
+                created_at: observed_at,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
 pub fn build_evidence_bundle(
     settings: &SettingsV1,
     blocks: &[TimelineBlockV1],
@@ -1463,6 +1514,8 @@ mod tests {
             classification_source: if afk { "afk" } else { "unknown" }.into(),
             rule_id: None,
             correctable: true,
+            context_domain: None,
+            context_project: None,
         };
         let bundle = build_evidence_bundle(
             &SettingsV1::default(),
