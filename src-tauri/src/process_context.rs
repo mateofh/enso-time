@@ -26,7 +26,7 @@ pub struct BlockContext {
 
 /// Normalized app identity that also matches Windows executable basenames
 /// (`aw-watcher-window` reports `chrome.exe`, `1Password.exe`, ...).
-fn app_identity(app: &str) -> String {
+pub(crate) fn app_identity(app: &str) -> String {
     let normalized = crate::activitywatch::normalize_match_text(app);
     normalized
         .strip_suffix(".exe")

@@ -154,6 +154,13 @@ interface UiCopy {
     copyPrompt: string;
     workflowAction: string;
     workflowHint: string;
+    observedTitle: string;
+    observedSummary: (episodes: number, days: number, minutes: string) => string;
+    observedVariants: (variants: number, share: number) => string;
+    observedPath: string;
+    handoffsTitle: string;
+    handoffsHint: string;
+    handoffCount: (count: number) => string;
     openChatGpt: string;
     openClaude: string;
     outboundNotice: string;
@@ -183,6 +190,8 @@ interface UiCopy {
     minutesPerRun: string;
     toolsTitle: string;
     toolsHint: string;
+    observedSuggestion: (steps: string) => string;
+    useObserved: string;
     tool: (index: number) => string;
     toolPlaceholder: string;
     addTool: string;
@@ -383,7 +392,15 @@ const copy: Record<Locale, UiCopy> = {
       title: "De actividad a evidencia.", intro: "Mientras más días observes, más confiable será la recomendación de automatización.", available: "Diagnóstico disponible", preliminary: "Diagnóstico preliminar", usefulSignal: "Ya hay una señal útil.", remaining: (days) => `Faltan ${days} días para una primera lectura.`, evidence: (hours, answers) => `Tenemos ${hours} horas observadas y ${answers} intervalos explicados por ti.`, coverage: "cobertura", tracked: "registradas", answers: "respuestas", periodTitle: "Elige el periodo de análisis", periods: { 7: "Primera señal", 14: "Patrones estables", 28: "Lectura profunda" }, days: "días",
     },
     automate: {
-      title: "Qué automatizar primero.", intro: "Una recomendación basada en lo que realmente repites, con supuestos visibles.", refresh: "Actualizar", preliminaryTitle: "Lectura preliminar", preliminaryCopy: (days) => `Hay ${days} días observados. Úsala como hipótesis, no como veredicto.`, candidate: "Primer candidato", signal: "señal", weeklyHours: "h/semana", repetitions: "repeticiones", impact: "Impacto", feasibility: "Facilidad", risk: "Riesgo", empty: "Aún no hay un candidato sólido.", emptyCopy: "Marca tareas repetitivas en tus check-ins para formar una señal.", recommendations: "Recomendaciones", promptTitle: "Prompt listo para conversar", promptIntro: "Lleva el diagnóstico contigo", copyPrompt: "Copiar prompt", workflowAction: "Levantar workflow", workflowHint: "Documenta el proceso antes de diseñar la automatización.", openChatGpt: "Abrir ChatGPT", openClaude: "Abrir Claude", outboundNotice: "Solo sale lo que tú copies",
+      title: "Qué automatizar primero.", intro: "Una recomendación basada en lo que realmente repites, con supuestos visibles.", refresh: "Actualizar", preliminaryTitle: "Lectura preliminar", preliminaryCopy: (days) => `Hay ${days} días observados. Úsala como hipótesis, no como veredicto.`, candidate: "Primer candidato", signal: "señal", weeklyHours: "h/semana", repetitions: "repeticiones", impact: "Impacto", feasibility: "Facilidad", risk: "Riesgo", empty: "Aún no hay un candidato sólido.", emptyCopy: "Marca tareas repetitivas en tus check-ins para formar una señal.", recommendations: "Recomendaciones", promptTitle: "Prompt listo para conversar", promptIntro: "Lleva el diagnóstico contigo", copyPrompt: "Copiar prompt", workflowAction: "Levantar workflow", workflowHint: "Documenta el proceso antes de diseñar la automatización.",
+      observedTitle: "Observado por Ensō Time",
+      observedSummary: (episodes, days, minutes) => `${episodes} ${episodes === 1 ? "ejecución" : "ejecuciones"} en ${days} ${days === 1 ? "día" : "días"} · mediana ${minutes} min`,
+      observedVariants: (variants, share) => `${variants} ${variants === 1 ? "variante" : "variantes"} · la principal cubre ${share}%`,
+      observedPath: "Recorrido más frecuente",
+      handoffsTitle: "Traspasos más repetidos",
+      handoffsHint: "Saltos entre aplicaciones o sitios dentro de una misma tarea. Son candidatos a integrar.",
+      handoffCount: (count) => `${count} veces`,
+      openChatGpt: "Abrir ChatGPT", openClaude: "Abrir Claude", outboundNotice: "Solo sale lo que tú copies",
     },
     workflow: {
       context: "Levantamiento de workflow",
@@ -410,6 +427,8 @@ const copy: Record<Locale, UiCopy> = {
       minutesPerRun: "Minutos por ejecución",
       toolsTitle: "Herramientas",
       toolsHint: "Incluye cada aplicación, archivo o canal que participa.",
+      observedSuggestion: (steps) => `Ensō Time observó este recorrido: ${steps}. Es una sugerencia; revísala antes de guardar.`,
+      useObserved: "Usar como borrador",
       tool: (index) => `Herramienta ${index}`,
       toolPlaceholder: "Ej. Google Sheets",
       addTool: "Agregar herramienta",
@@ -533,7 +552,15 @@ const copy: Record<Locale, UiCopy> = {
       title: "From activity to evidence.", intro: "The more days you observe, the more reliable the automation recommendation becomes.", available: "Diagnosis available", preliminary: "Preliminary diagnosis", usefulSignal: "There is a useful signal now.", remaining: (days) => `${days} days until the first reading.`, evidence: (hours, answers) => `We have ${hours} observed hours and ${answers} intervals explained by you.`, coverage: "coverage", tracked: "tracked", answers: "answers", periodTitle: "Choose the analysis period", periods: { 7: "First signal", 14: "Stable patterns", 28: "Deep reading" }, days: "days",
     },
     automate: {
-      title: "What to automate first.", intro: "A recommendation based on what you actually repeat, with visible assumptions.", refresh: "Refresh", preliminaryTitle: "Preliminary reading", preliminaryCopy: (days) => `${days} days have been observed. Use this as a hypothesis, not a verdict.`, candidate: "Top candidate", signal: "signal", weeklyHours: "hrs/week", repetitions: "repetitions", impact: "Impact", feasibility: "Feasibility", risk: "Risk", empty: "There isn't a strong candidate yet.", emptyCopy: "Mark repetitive tasks in your check-ins to build a signal.", recommendations: "Recommendations", promptTitle: "A ready-to-use prompt", promptIntro: "Take the diagnosis with you", copyPrompt: "Copy prompt", workflowAction: "Map workflow", workflowHint: "Document the process before designing an automation.", openChatGpt: "Open ChatGPT", openClaude: "Open Claude", outboundNotice: "Only what you copy leaves the app",
+      title: "What to automate first.", intro: "A recommendation based on what you actually repeat, with visible assumptions.", refresh: "Refresh", preliminaryTitle: "Preliminary reading", preliminaryCopy: (days) => `${days} days have been observed. Use this as a hypothesis, not a verdict.`, candidate: "Top candidate", signal: "signal", weeklyHours: "hrs/week", repetitions: "repetitions", impact: "Impact", feasibility: "Feasibility", risk: "Risk", empty: "There isn't a strong candidate yet.", emptyCopy: "Mark repetitive tasks in your check-ins to build a signal.", recommendations: "Recommendations", promptTitle: "A ready-to-use prompt", promptIntro: "Take the diagnosis with you", copyPrompt: "Copy prompt", workflowAction: "Map workflow", workflowHint: "Document the process before designing an automation.",
+      observedTitle: "Observed by Ensō Time",
+      observedSummary: (episodes, days, minutes) => `${episodes} ${episodes === 1 ? "run" : "runs"} over ${days} ${days === 1 ? "day" : "days"} · median ${minutes} min`,
+      observedVariants: (variants, share) => `${variants} ${variants === 1 ? "variant" : "variants"} · the main one covers ${share}%`,
+      observedPath: "Most frequent path",
+      handoffsTitle: "Most repeated handoffs",
+      handoffsHint: "Jumps between apps or sites within one task. They are integration candidates.",
+      handoffCount: (count) => `${count} times`,
+      openChatGpt: "Open ChatGPT", openClaude: "Open Claude", outboundNotice: "Only what you copy leaves the app",
     },
     workflow: {
       context: "Workflow intake",
@@ -560,6 +587,8 @@ const copy: Record<Locale, UiCopy> = {
       minutesPerRun: "Minutes per run",
       toolsTitle: "Tools",
       toolsHint: "Include every app, file, or channel involved.",
+      observedSuggestion: (steps) => `Ensō Time observed this path: ${steps}. It is a suggestion; review it before saving.`,
+      useObserved: "Use as draft",
       tool: (index) => `Tool ${index}`,
       toolPlaceholder: "E.g. Google Sheets",
       addTool: "Add tool",

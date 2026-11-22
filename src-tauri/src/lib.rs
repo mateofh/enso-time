@@ -3,6 +3,7 @@ mod blueprint;
 mod commands;
 mod connectors;
 mod diagnostics;
+mod episodes;
 mod features;
 mod installer_smoke;
 mod intelligence;

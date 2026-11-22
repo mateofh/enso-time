@@ -3534,6 +3534,20 @@ mod tests {
             elapsed
         );
         assert!(blocks.len() >= 19_000);
+        let began = std::time::Instant::now();
+        let episodes = crate::episodes::build_episodes(&blocks);
+        let longest = episodes
+            .iter()
+            .map(|episode| (episode.end - episode.start).num_minutes())
+            .max()
+            .unwrap_or_default();
+        println!(
+            "build_episodes: {} episodes (longest {longest} min) in {:?}",
+            episodes.len(),
+            began.elapsed()
+        );
+        // Rapid rotation across tasks must not chain into one endless episode.
+        assert!(longest < 60, "longest episode {longest} min");
         assert!(elapsed < std::time::Duration::from_secs(5));
     }
 

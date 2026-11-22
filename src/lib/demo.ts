@@ -77,3 +77,18 @@ export const demoStudy: StudyProgress = {
 };
 
 export const demoDiagnostic: DiagnosticV1 = createDiagnostic(demoTimeline, demoCheckIns, 5, demoSettings.role, demoSettings.goals);
+
+/** Preview-only stand-in for the desktop episode analysis (the web demo has no capture). */
+export const demoObserved = {
+  episodes: 4,
+  observedDays: 3,
+  medianMinutes: 14,
+  variants: 2,
+  topVariantShare: 0.75,
+  topVariantSteps: ["mail.google.com", "excel", "app.hubspot.com"],
+};
+
+export const demoHandoffs = [
+  { from: "mail.google.com", to: "excel", count: 4 },
+  { from: "excel", to: "app.hubspot.com", count: 3 },
+];

@@ -31,7 +31,14 @@ pub fn create_diagnostic(
         .iter()
         .filter(|item| item.status == "answered")
         .count();
-    let candidates = score_candidates(blocks, checkins, days_observed, &settings.locale);
+    let episodes = crate::episodes::build_episodes(blocks);
+    let mut candidates = score_candidates(blocks, checkins, days_observed, &settings.locale);
+    let mut observed = crate::episodes::observed_evidence(&episodes);
+    for candidate in &mut candidates {
+        candidate.observed =
+            observed.remove(&canonicalize_candidate_label(&candidate.activity_label));
+    }
+    let handoffs = crate::episodes::top_handoffs(&episodes);
     let top_intake = candidates.first().and_then(|candidate| {
         workflow_intakes
             .iter()
@@ -156,6 +163,7 @@ pub fn create_diagnostic(
             &settings.locale,
         ),
         candidates,
+        handoffs,
         preliminary: days_observed < 7.0,
         generated_at,
     }
@@ -185,21 +193,10 @@ fn score_candidates(
     // Human corrections and explicit rules are already stronger evidence than an
     // extra questionnaire. Treat them as first-class observations so the review
     // workflow directly improves automation discovery.
-    for block in blocks.iter().filter(|block| {
-        !block.afk
-            && !matches!(block.category.as_str(), "unknown" | "break")
-            && matches!(
-                block.classification_source.as_str(),
-                "override" | "rule" | "checkin"
-            )
-    }) {
-        let label = block
-            .activity_label
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned)
-            .unwrap_or_else(|| fallback_activity_label(&block.category, &block.app));
+    for (block, label) in blocks
+        .iter()
+        .filter_map(|block| candidate_label_for_block(block).map(|label| (block, label)))
+    {
         let source = match block.classification_source.as_str() {
             "override" => "corrección",
             "rule" => "regla",
@@ -295,6 +292,7 @@ fn score_candidates(
                     estimated_weekly_hours,
                     clear_ratio > 0.6,
                 ),
+                observed: None,
             }
         })
         .collect();
@@ -306,6 +304,27 @@ fn score_candidates(
             .then_with(|| left.activity_label.cmp(&right.activity_label))
     });
     candidates
+}
+
+/// The label under which a block counts toward an automation candidate, or `None` when
+/// the block is not confirmed evidence (AFK, unknown, or only a built-in guess).
+/// Shared with episode building so observed evidence joins the same candidate id.
+pub(crate) fn candidate_label_for_block(block: &TimelineBlockV1) -> Option<String> {
+    let eligible = !block.afk
+        && !matches!(block.category.as_str(), "unknown" | "break")
+        && matches!(
+            block.classification_source.as_str(),
+            "override" | "rule" | "checkin"
+        );
+    eligible.then(|| {
+        block
+            .activity_label
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| fallback_activity_label(&block.category, &block.app))
+    })
 }
 
 fn fallback_activity_label(category: &str, app: &str) -> String {
@@ -606,6 +625,60 @@ mod tests {
         assert_eq!(candidates[0].estimated_weekly_hours, 1.0);
         assert!(candidates[0].evidence[0].contains("1 correcciones"));
         assert!(candidates[0].evidence[0].contains("1 reglas"));
+    }
+
+    #[test]
+    fn diagnostic_attaches_observed_episodes_and_handoffs_to_the_candidate() {
+        let block =
+            |id: &str, start: &str, end: &str, app: &str, domain: Option<&str>| TimelineBlockV1 {
+                id: id.into(),
+                start: start.into(),
+                end: end.into(),
+                duration_seconds: (crate::models::parse_utc(end).unwrap()
+                    - crate::models::parse_utc(start).unwrap())
+                .num_seconds(),
+                app: app.into(),
+                title: None,
+                activity_label: Some("Conciliar pagos".into()),
+                category: "admin".into(),
+                confidence: 1.0,
+                afk: false,
+                source: "window".into(),
+                check_in_id: None,
+                classification_source: "rule".into(),
+                rule_id: Some("rule-1".into()),
+                correctable: true,
+                context_domain: domain.map(Into::into),
+                context_project: None,
+            };
+        let mut blocks = Vec::new();
+        for day in ["01", "02", "03"] {
+            blocks.push(block(
+                &format!("bank-{day}"),
+                &format!("2026-08-{day}T10:00:00Z"),
+                &format!("2026-08-{day}T10:05:00Z"),
+                "Google Chrome",
+                Some("banco.example.com"),
+            ));
+            blocks.push(block(
+                &format!("sheet-{day}"),
+                &format!("2026-08-{day}T10:05:00Z"),
+                &format!("2026-08-{day}T10:15:00Z"),
+                "Microsoft Excel",
+                None,
+            ));
+        }
+        let diagnostic = create_diagnostic(&blocks, &[], 3.0, &SettingsV1::default(), &[]);
+        let observed = diagnostic.candidates[0].observed.as_ref().unwrap();
+        assert_eq!(observed.episodes, 3);
+        assert_eq!(observed.median_minutes, 15.0);
+        assert_eq!(observed.variants, Some(1));
+        assert_eq!(
+            observed.top_variant_steps,
+            vec!["banco.example.com", "microsoft excel"]
+        );
+        assert_eq!(diagnostic.handoffs[0].count, 3);
+        assert_eq!(diagnostic.handoffs[0].from, "banco.example.com");
     }
 
     #[test]
