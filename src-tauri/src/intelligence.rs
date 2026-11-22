@@ -1526,6 +1526,7 @@ mod tests {
             correctable: true,
             context_domain: None,
             context_project: None,
+            case_refs: Vec::new(),
         };
         let bundle = build_evidence_bundle(
             &SettingsV1::default(),

@@ -163,6 +163,7 @@ interface UiCopy {
     observedSummary: (episodes: number, days: number, minutes: string) => string;
     observedVariants: (variants: number, share: number) => string;
     observedPath: string;
+    observedCases: (cases: number) => string;
     handoffsTitle: string;
     handoffsHint: string;
     handoffCount: (count: number) => string;
@@ -409,6 +410,7 @@ const copy: Record<Locale, UiCopy> = {
       observedSummary: (episodes, days, minutes) => `${episodes} ${episodes === 1 ? "ejecución" : "ejecuciones"} en ${days} ${days === 1 ? "día" : "días"} · mediana ${minutes} min`,
       observedVariants: (variants, share) => `${variants} ${variants === 1 ? "variante" : "variantes"} · la principal cubre ${share}%`,
       observedPath: "Recorrido más frecuente",
+      observedCases: (cases) => `${cases} ${cases === 1 ? "caso distinto" : "casos distintos"} (tickets, facturas u órdenes en los títulos)`,
       handoffsTitle: "Traspasos más repetidos",
       handoffsHint: "Saltos entre aplicaciones o sitios dentro de una misma tarea. Son candidatos a integrar.",
       handoffCount: (count) => `${count} veces`,
@@ -575,6 +577,7 @@ const copy: Record<Locale, UiCopy> = {
       observedSummary: (episodes, days, minutes) => `${episodes} ${episodes === 1 ? "run" : "runs"} over ${days} ${days === 1 ? "day" : "days"} · median ${minutes} min`,
       observedVariants: (variants, share) => `${variants} ${variants === 1 ? "variant" : "variants"} · the main one covers ${share}%`,
       observedPath: "Most frequent path",
+      observedCases: (cases) => `${cases} distinct ${cases === 1 ? "case" : "cases"} (tickets, invoices or orders in titles)`,
       handoffsTitle: "Most repeated handoffs",
       handoffsHint: "Jumps between apps or sites within one task. They are integration candidates.",
       handoffCount: (count) => `${count} times`,

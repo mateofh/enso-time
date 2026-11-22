@@ -264,6 +264,8 @@ export interface ObservedEvidenceV1 {
   variants?: number;
   topVariantShare?: number;
   topVariantSteps?: string[];
+  /** Distinct hashed tickets/invoices/orders seen in the task's episodes. */
+  cases?: number;
 }
 
 export interface HandoffV1 {

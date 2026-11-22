@@ -1014,6 +1014,12 @@ pub fn generate_diagnostic(state: State<'_, AppState>, days: u16) -> Result<Diag
         start, now, &settings, &checkins, &rules, &overrides, &context,
     )?;
     let observed = ((now - start).num_seconds().max(0) as f64 / 86_400.0).min(f64::from(days));
+    // Case ids come from titles the person chose to keep; they stay hashed in memory.
+    let blocks = if settings.capture_window_titles {
+        crate::case_refs::annotate(&blocks, &crate::case_refs::local_salt(&state.store)?)
+    } else {
+        blocks
+    };
     operation.ensure_current()?;
     let diagnostic = create_diagnostic(&blocks, &checkins, observed, &settings, &workflows);
     let cached = diagnostic
@@ -2396,6 +2402,7 @@ mod tests {
             correctable: true,
             context_domain: None,
             context_project: None,
+            case_refs: Vec::new(),
         };
         let prior = ClassificationOverrideV1 {
             block_id: "w2".into(),
@@ -2501,6 +2508,7 @@ mod tests {
             correctable: true,
             context_domain: None,
             context_project: None,
+            case_refs: Vec::new(),
         };
         let contents = ocel_contents(&[block]).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&contents).unwrap();
@@ -2541,6 +2549,7 @@ mod tests {
             variants: Some(1),
             top_variant_share: Some(1.0),
             top_variant_steps: vec!["mail.google.com".into(), "excel".into()],
+            cases: None,
         };
         store
             .replace_candidate_observed_evidence(
@@ -3068,6 +3077,7 @@ mod tests {
             correctable: true,
             context_domain: None,
             context_project: None,
+            case_refs: Vec::new(),
         };
         let exported = json_export(
             &SettingsV1::default(),

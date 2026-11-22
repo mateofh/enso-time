@@ -661,6 +661,9 @@ pub struct TimelineBlockV1 {
     /// Editor or shell project from the paired connector that covered most of this block.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_project: Option<String>,
+    /// Hashed case identifiers (`type:hash`) from the title; filled only for diagnosis.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub case_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

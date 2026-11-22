@@ -118,6 +118,7 @@ mod tests {
             correctable: true,
             context_domain: (app == "Google Chrome").then(|| "mail.google.com".into()),
             context_project: Some("proyecto-secreto".into()),
+            case_refs: Vec::new(),
         }
     }
 
