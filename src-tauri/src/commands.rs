@@ -1036,6 +1036,14 @@ pub fn generate_diagnostic(state: State<'_, AppState>, days: u16) -> Result<Diag
         start,
         now,
     )?);
+    diagnostic.readiness = Some(diagnostic_readiness(
+        &state.store,
+        &diagnostic,
+        &health,
+        &blocks,
+        &workflows,
+        &settings.locale,
+    )?);
     diagnostic.capture_health = Some(health);
     let cached = diagnostic
         .candidates
@@ -1887,6 +1895,67 @@ fn capture_coverage(
         &window,
         &activity.presence_intervals(from, to)?,
         &|moment| inside_work_schedule(settings, moment),
+    ))
+}
+
+fn diagnostic_readiness(
+    store: &LocalStore,
+    diagnostic: &DiagnosticV1,
+    health: &crate::capture_health::CaptureHealthV1,
+    blocks: &[TimelineBlockV1],
+    workflows: &[WorkflowIntakeV1],
+    locale: &str,
+) -> Result<crate::readiness::ReadinessV1, String> {
+    let named = diagnostic
+        .candidates
+        .iter()
+        .filter(|candidate| !candidate.app_usage_only)
+        .collect::<Vec<_>>();
+    let best = named
+        .iter()
+        .filter_map(|candidate| candidate.observed.as_ref())
+        .map(|observed| (observed.episodes, observed.observed_days))
+        .max()
+        .unwrap_or_default();
+    let declared = named
+        .iter()
+        .filter(|candidate| {
+            workflows
+                .iter()
+                .any(|intake| intake.candidate_id == candidate.id)
+        })
+        .collect::<Vec<_>>();
+    let mut blueprint_ready = false;
+    for candidate in &declared {
+        if let Some(draft) = store.automation_blueprint_draft(&candidate.id)? {
+            // The same gate the blueprint view uses; readiness never relaxes it.
+            if assess_stored_blueprint(store, draft, locale)?.status
+                == crate::blueprint::BlueprintStatusV1::Ready
+            {
+                blueprint_ready = true;
+                break;
+            }
+        }
+    }
+    let active_seconds = blocks
+        .iter()
+        .filter(|block| !block.afk && !block.id.starts_with("manual-"))
+        .map(|block| block.duration_seconds.max(0))
+        .sum();
+    Ok(crate::readiness::assess(
+        &crate::readiness::ReadinessInputs {
+            days_observed: diagnostic.days_observed,
+            active_seconds,
+            repeated_handoffs: diagnostic.handoffs.len(),
+            best_task_episodes: best.0,
+            best_task_days: best.1,
+            browser_seconds: health.browser_seconds,
+            browser_domain_share: health.browser_domain_share,
+            project_seconds: health.project_seconds,
+            project_share: health.project_share,
+            has_intake: !declared.is_empty(),
+            blueprint_ready,
+        },
     ))
 }
 

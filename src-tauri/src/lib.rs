@@ -18,6 +18,7 @@ mod models;
 mod native_copy;
 mod ocel;
 mod process_context;
+mod readiness;
 mod runtime_sessions;
 mod screen_ocr;
 mod storage;

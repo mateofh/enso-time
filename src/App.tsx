@@ -26,6 +26,7 @@ import {
 } from "lucide-react";
 import { bridge } from "./lib/bridge";
 import { WorkflowIntakeView } from "./components/WorkflowIntakeView";
+import { candidateId } from "./lib/candidateIdentity";
 import { AutomationBlueprintView } from "./components/AutomationBlueprintView";
 import { CATEGORY_ORDER, categoryColor } from "./lib/categories";
 import { categoryLabel, formatDuration, formatTime, messages } from "./lib/i18n";
@@ -36,6 +37,7 @@ import type {
   CheckInAnswer,
   CheckInV1,
   CaptureCoverageV1,
+  ReadinessV1,
   CaptureHealthV1,
   CoverageGapV1,
   CaptureIssue,
@@ -637,6 +639,41 @@ function AiEvaluationSection({ days, locale, enabled }: { days: 7 | 14 | 28; loc
   );
 }
 
+function ReadinessSection({ readiness, locale }: { readiness: ReadinessV1; locale: Locale }) {
+  const copy = messages(locale).automate;
+  const levels: readonly string[] = copy.readinessLevels;
+  const nextLevel = levels[readiness.level] ?? null;
+  return <section className="readiness" aria-labelledby="readiness-title">
+    <div><h2 id="readiness-title">{copy.readinessTitle}</h2><p>{copy.readinessHint}</p></div>
+    <div>
+      <ol className="readiness-levels">{copy.readinessLevels.map((name, index) => {
+        const level = index + 1;
+        const state = level <= readiness.level ? "done" : level === readiness.level + 1 ? "next" : "later";
+        return <li key={name} data-state={state} aria-current={level === readiness.level ? "step" : undefined}><span>{level}</span>{name}</li>;
+      })}</ol>
+      {readiness.level === 0 && <p className="readiness-gathering">{copy.readinessGathering}</p>}
+      {nextLevel && readiness.next.length > 0 && <div className="readiness-next"><strong>{copy.readinessNext(nextLevel)}</strong><ul>{readiness.next.map((item) => <li key={item.requirement} data-done={item.done}><span>{copy.readinessStep[item.requirement](item.current, item.target)}</span><small>{item.done ? copy.readinessDone : copy.readinessAction[item.requirement]}</small></li>)}</ul></div>}
+    </div>
+  </section>;
+}
+
+const MAX_HYPOTHESES = 3;
+
+function HypothesesSection({ diagnostic, locale, onMap }: { diagnostic: DiagnosticV1; locale: Locale; onMap: (candidate: AutomationCandidateV1) => void }) {
+  const copy = messages(locale).automate;
+  const days = Math.max(1, Math.round(diagnostic.daysObserved));
+  const hypotheses = [
+    ...(diagnostic.handoffs ?? []).slice(0, 2).map((handoff) => ({ key: `${handoff.from}->${handoff.to}`, text: copy.hypothesisHandoff(handoff.from, handoff.to, handoff.count, days), steps: [handoff.from, handoff.to], label: `${handoff.from} ⇄ ${handoff.to}` })),
+    ...(diagnostic.captureHealth?.topUnknown ?? []).slice(0, 1).map((item) => ({ key: `unknown-${item.app}`, text: copy.hypothesisUnknown(item.app), steps: [item.app], label: item.app })),
+  ].slice(0, MAX_HYPOTHESES);
+  if (!hypotheses.length) return null;
+  const toCandidate = (label: string, steps: string[]): AutomationCandidateV1 => ({ id: candidateId(label), activityLabel: label, estimatedWeeklyHours: 0, weeklyFrequency: 0, impactScore: 0, feasibilityScore: 0, riskScore: 0, priorityScore: 0, evidence: [], observed: { episodes: 0, observedDays: 0, medianMinutes: 0, topVariantSteps: steps } });
+  return <section className="hypotheses" aria-labelledby="hypotheses-title">
+    <div><h2 id="hypotheses-title">{copy.hypothesesTitle}</h2><p>{copy.hypothesesHint}</p></div>
+    <ol>{hypotheses.map((item) => <li key={item.key}><p>{item.text}</p><button type="button" className="secondary-button" onClick={() => onMap(toCandidate(item.label, item.steps))}>{copy.hypothesisMap}<ChevronRight size={16} aria-hidden="true" /></button></li>)}</ol>
+  </section>;
+}
+
 function CoverageRow({ coverage, locale }: { coverage: CaptureCoverageV1; locale: Locale }) {
   const copy = messages(locale).automate;
   const totals = coverage.schedule;
@@ -703,16 +740,18 @@ function AutomateView({ diagnostic, locale, busy, aiAvailable, aiEnabled, days, 
   return (
     <>
       <header className="page-header"><div><p className="page-context">{copy.candidate}</p><h1>{copy.title}</h1><p className="page-intro">{copy.intro}</p></div><button type="button" className="secondary-button" disabled={busy} onClick={() => void onGenerate()}><RefreshCw size={16} aria-hidden="true" />{copy.refresh}</button></header>
+      {diagnostic.readiness && <ReadinessSection readiness={diagnostic.readiness} locale={locale} />}
       {diagnostic.preliminary && <div className="preliminary-banner"><Gauge size={18} aria-hidden="true" /><span><strong>{copy.preliminaryTitle}</strong>{copy.preliminaryCopy(diagnostic.daysObserved.toFixed(1))}</span></div>}
       {candidate ? (
         <section className="candidate-section" aria-labelledby="candidate-title">
           <div className="candidate-rank"><span>{candidate.priorityScore}</span><small>/ 100</small></div>
-          <div className="candidate-main"><p className="section-note">{copy.candidate}</p><h2 id="candidate-title">{candidate.activityLabel}</h2><p>{candidate.evidence.join(" · ")}</p>{candidate.observed && <div className="observed-evidence"><strong>{copy.observedTitle}</strong><span>{copy.observedSummary(candidate.observed.episodes, candidate.observed.observedDays, candidate.observed.medianMinutes.toLocaleString(locale))}</span>{candidate.observed.variants !== undefined && candidate.observed.topVariantShare !== undefined && <span>{copy.observedVariants(candidate.observed.variants, Math.round(candidate.observed.topVariantShare * 100))}</span>}{candidate.observed.topVariantSteps?.length ? <span>{copy.observedPath}: {candidate.observed.topVariantSteps.join(" → ")}</span> : null}{candidate.observed.cases ? <span>{copy.observedCases(candidate.observed.cases)}</span> : null}</div>}<div className="score-line"><span><b>{candidate.priorityScore}</b>/100 {copy.signal}</span><span><b>{candidate.estimatedWeeklyHours}</b> {copy.weeklyHours}</span><span><b>{candidate.weeklyFrequency}</b> {copy.repetitions}</span></div><div className="workflow-cta"><button type="button" className="secondary-button" onClick={() => onMapWorkflow(candidate)}>{copy.workflowAction}<ChevronRight size={16} aria-hidden="true" /></button><small>{copy.workflowHint}</small></div></div>
+          <div className="candidate-main"><p className="section-note">{copy.candidate}</p><h2 id="candidate-title">{candidate.activityLabel}</h2>{candidate.appUsageOnly && <p className="app-usage-note">{copy.appUsageNote}</p>}<p>{candidate.evidence.join(" · ")}</p>{candidate.observed && <div className="observed-evidence"><strong>{copy.observedTitle}</strong><span>{copy.observedSummary(candidate.observed.episodes, candidate.observed.observedDays, candidate.observed.medianMinutes.toLocaleString(locale))}</span>{candidate.observed.variants !== undefined && candidate.observed.topVariantShare !== undefined && <span>{copy.observedVariants(candidate.observed.variants, Math.round(candidate.observed.topVariantShare * 100))}</span>}{candidate.observed.topVariantSteps?.length ? <span>{copy.observedPath}: {candidate.observed.topVariantSteps.join(" → ")}</span> : null}{candidate.observed.cases ? <span>{copy.observedCases(candidate.observed.cases)}</span> : null}</div>}<div className="score-line"><span><b>{candidate.priorityScore}</b>/100 {copy.signal}</span><span><b>{candidate.estimatedWeeklyHours}</b> {copy.weeklyHours}</span><span><b>{candidate.weeklyFrequency}</b> {copy.repetitions}</span></div><div className="workflow-cta"><button type="button" className="secondary-button" onClick={() => onMapWorkflow(candidate)}>{copy.workflowAction}<ChevronRight size={16} aria-hidden="true" /></button><small>{copy.workflowHint}</small></div></div>
           <div className="candidate-scores"><span><b>{candidate.impactScore}/40</b>{copy.impact}</span><span><b>{candidate.feasibilityScore}/35</b>{copy.feasibility}</span><span><b>{candidate.riskScore}/25</b>{copy.risk}</span></div>
         </section>
       ) : <section className="empty-state"><Target size={30} aria-hidden="true" /><h2>{copy.empty}</h2><p>{copy.emptyCopy}</p></section>}
       {diagnostic.captureHealth ? <CaptureHealthSection health={diagnostic.captureHealth} locale={locale} /> : null}
       {diagnostic.handoffs?.length ? <section className="handoffs" aria-labelledby="handoffs-title"><div><h2 id="handoffs-title">{copy.handoffsTitle}</h2><p>{copy.handoffsHint}</p></div><ol>{diagnostic.handoffs.map((handoff) => <li key={`${handoff.from}->${handoff.to}`}><span>{handoff.from} → {handoff.to}</span><small>{copy.handoffCount(handoff.count)}</small></li>)}</ol></section> : null}
+      {(diagnostic.readiness?.level ?? 0) < 4 && <HypothesesSection diagnostic={diagnostic} locale={locale} onMap={onMapWorkflow} />}
       <section className="recommendations"><h2>{copy.recommendations}</h2><ol>{diagnostic.recommendations.map((recommendation, index) => <li key={recommendation}><span>{String(index + 1).padStart(2, "0")}</span><p>{recommendation}</p></li>)}</ol></section>
       {aiAvailable && <AiEvaluationSection days={days} locale={locale} enabled={aiEnabled} />}
       <section className="prompt-section" aria-labelledby="prompt-title">

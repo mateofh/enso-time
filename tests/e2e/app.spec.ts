@@ -584,3 +584,22 @@ test("Today warns once about a stretch where Ensō stopped unexpectedly", async 
   await expect(page.getByRole("button", { name: "Hoy" })).toBeVisible();
   await expect(page.locator(".capture-gap-notice")).toHaveCount(0);
 });
+
+test("Automate states which answer the data supports and turns a hypothesis into an intake", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Automatizar" }).click();
+  const readiness = page.locator(".readiness");
+  await expect(readiness.getByRole("heading", { name: "Qué puede decirte Ensō hoy" })).toBeVisible();
+  await expect(readiness.locator('[aria-current="step"]')).toContainText("Fricción");
+  await expect(readiness.getByText("Para llegar a «Candidatos de flujo»")).toBeVisible();
+  await expect(readiness.getByText("1 de 3 episodios etiquetados de una misma tarea")).toBeVisible();
+  await expect(readiness.getByText("En Por revisar, etiqueta los episodios del día con el nombre de la tarea.")).toBeVisible();
+
+  const hypotheses = page.locator(".hypotheses");
+  await expect(hypotheses.getByRole("heading", { name: "Hipótesis para validar" })).toBeVisible();
+  await expect(hypotheses.getByText(/Pasaste de mail\.google\.com a excel 4 veces en 5 días/)).toBeVisible();
+  await expect(hypotheses.getByText("microsoft edge es lo que más tiempo queda sin clasificar. ¿Para qué lo usas?")).toBeVisible();
+  await hypotheses.getByRole("button", { name: "Mapear este flujo" }).first().click();
+  await expect(page.getByRole("heading", { name: "Describe cómo ocurre hoy." })).toBeVisible();
+  await expect(page.getByText(/Ensō Time observó este recorrido: mail\.google\.com → excel\./)).toBeVisible();
+});

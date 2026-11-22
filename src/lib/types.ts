@@ -254,6 +254,23 @@ export interface AutomationCandidateV1 {
   evidence: string[];
   /** Observed by the capture (work episodes), kept apart from declared evidence. */
   observed?: ObservedEvidenceV1;
+  /** The label is only "category · app": where time goes, not a named task. */
+  appUsageOnly?: boolean;
+}
+
+export type ReadinessRequirement = "captured-days" | "active-hours" | "repeated-handoff" | "labeled-episodes" | "labeled-days" | "step-context" | "workflow-intake" | "blueprint-ready";
+
+export interface ReadinessStepV1 {
+  requirement: ReadinessRequirement;
+  current: number;
+  target: number;
+  done: boolean;
+}
+
+export interface ReadinessV1 {
+  /** 0 = gathering data, 1 = time map, 2 = friction, 3 = workflow candidates, 4 = use case. */
+  level: 0 | 1 | 2 | 3 | 4;
+  next: ReadinessStepV1[];
 }
 
 export interface ObservedEvidenceV1 {
@@ -307,6 +324,8 @@ export interface CaptureHealthV1 {
   browserSeconds: number;
   browserDomainShare: number;
   browserConnector: "not-paired" | "not-reporting" | "ok" | "insufficient";
+  projectSeconds: number;
+  projectShare: number;
   /** Why time was not captured, from Ensō's uptime log. */
   coverage?: CaptureCoverageV1;
 }
@@ -432,6 +451,8 @@ export interface DiagnosticV1 {
   handoffs?: HandoffV1[];
   /** How complete the captured data is. Native only; absent in older payloads. */
   captureHealth?: CaptureHealthV1;
+  /** Which level of answer the data supports. Native only; absent in older payloads. */
+  readiness?: ReadinessV1;
   prompt: string;
   preliminary: boolean;
   generatedAt: string;

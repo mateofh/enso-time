@@ -99,6 +99,8 @@ export const demoCaptureHealth = {
   browserSeconds: 2 * 3600,
   browserDomainShare: 0,
   browserConnector: "not-paired" as const,
+  projectSeconds: 3 * 3600,
+  projectShare: 0,
   coverage: {
     trackingSince: "2026-11-20T13:00:00Z",
     schedule: { captured: 30 * 3600, idle: 3600, asleep: 2 * 3600, quit: 1800, closedOrOff: 6 * 3600, watcherDown: 3600, paused: 0 },
@@ -108,6 +110,15 @@ export const demoCaptureHealth = {
       { start: "2026-11-21T15:00:00Z", end: "2026-11-21T16:00:00Z", reason: "watcher-down" as const, inferred: false, scheduleSeconds: 3600 },
     ],
   },
+};
+
+export const demoReadiness = {
+  level: 2 as const,
+  next: [
+    { requirement: "labeled-episodes" as const, current: 1, target: 3, done: false },
+    { requirement: "labeled-days" as const, current: 1, target: 2, done: false },
+    { requirement: "step-context" as const, current: 20, target: 50, done: false },
+  ],
 };
 
 export const demoCaptureGapNotice = {

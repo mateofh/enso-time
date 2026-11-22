@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { demoCaptureGapNotice, demoCaptureHealth, demoCheckIns, demoHandoffs, demoObserved, demoSettings, demoStudy, demoTimeline, demoTrackingStatus } from "./demo";
+import { demoCaptureGapNotice, demoCaptureHealth, demoReadiness, demoCheckIns, demoHandoffs, demoObserved, demoSettings, demoStudy, demoTimeline, demoTrackingStatus } from "./demo";
 import { buildPrompt, createDiagnostic } from "./diagnostics";
 import { migrateWorkflowIntakes, upsertWorkflowIntake } from "./workflowIntakes";
 import { buildPreviewBlueprint, emptyBlueprintDraft } from "./blueprints";
@@ -451,7 +451,7 @@ export const bridge = {
       state.observedEvidence = { [top.id]: { ...demoObserved, computedAt: diagnostic.generatedAt } };
       saveWebState(state);
     }
-    return { ...diagnostic, candidates: top ? [{ ...top, observed: demoObserved }, ...rest] : [], handoffs: demoHandoffs, captureHealth: demoCaptureHealth };
+    return { ...diagnostic, candidates: top ? [{ ...top, observed: demoObserved }, ...rest] : [], handoffs: demoHandoffs, captureHealth: demoCaptureHealth, readiness: demoReadiness };
   },
 
   async saveOpenRouterApiKey(apiKey: string): Promise<void> {

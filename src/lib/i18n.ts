@@ -179,6 +179,20 @@ interface UiCopy {
     healthUnknownStatus: (share: number, apps: string) => string;
     healthAccessibility: string;
     healthCoverage: string;
+    readinessTitle: string;
+    readinessHint: string;
+    readinessLevels: [string, string, string, string];
+    readinessGathering: string;
+    readinessNext: (level: string) => string;
+    readinessDone: string;
+    readinessStep: Record<"captured-days" | "active-hours" | "repeated-handoff" | "labeled-episodes" | "labeled-days" | "step-context" | "workflow-intake" | "blueprint-ready", (current: number, target: number) => string>;
+    readinessAction: Record<"captured-days" | "active-hours" | "repeated-handoff" | "labeled-episodes" | "labeled-days" | "step-context" | "workflow-intake" | "blueprint-ready", string>;
+    appUsageNote: string;
+    hypothesesTitle: string;
+    hypothesesHint: string;
+    hypothesisHandoff: (from: string, to: string, count: number, days: number) => string;
+    hypothesisUnknown: (app: string) => string;
+    hypothesisMap: string;
     healthCoverageStatus: (captured: string, closed: string, down: string) => string;
     healthCoverageGaps: string;
     healthGapReason: Record<"asleep" | "quit" | "closed-or-off" | "watcher-down" | "paused", string>;
@@ -447,6 +461,38 @@ const copy: Record<Locale, UiCopy> = {
       healthUnknownStatus: (share, apps) => apps ? `${share}% del tiempo activo. Sobre todo: ${apps}.` : `${share}% del tiempo activo.`,
       healthAccessibility: "Abrir Accesibilidad",
       healthCoverage: "Cobertura en tu horario",
+      readinessTitle: "Qué puede decirte Ensō hoy",
+      readinessHint: "Cada nivel necesita más evidencia. Ensō no propone flujos que tus datos todavía no sostienen.",
+      readinessLevels: ["Mapa de tiempo", "Fricción", "Candidatos de flujo", "Caso de uso"],
+      readinessGathering: "Reuniendo datos",
+      readinessNext: (level) => `Para llegar a «${level}»`,
+      readinessDone: "Listo",
+      readinessStep: {
+        "captured-days": (current, target) => `${current} de ${target} días capturados`,
+        "active-hours": (current, target) => `${current} de ${target} h de actividad`,
+        "repeated-handoff": () => "Un salto repetido entre herramientas",
+        "labeled-episodes": (current, target) => `${current} de ${target} episodios etiquetados de una misma tarea`,
+        "labeled-days": (current, target) => `Esa tarea en ${current} de ${target} días distintos`,
+        "step-context": (current, target) => `${current}% de ${target}% del navegador, editor o terminal con sitio o proyecto`,
+        "workflow-intake": () => "Describir ese flujo en un levantamiento",
+        "blueprint-ready": () => "Un blueprint listo",
+      },
+      readinessAction: {
+        "captured-days": "Deja Ensō abierto durante tu jornada.",
+        "active-hours": "Deja Ensō abierto durante tu jornada.",
+        "repeated-handoff": "Sigue trabajando con normalidad; los saltos aparecen solos.",
+        "labeled-episodes": "En Por revisar, etiqueta los episodios del día con el nombre de la tarea.",
+        "labeled-days": "Etiqueta la misma tarea en otro día.",
+        "step-context": "Empareja la extensión del navegador y el conector de editor o terminal en Configuración.",
+        "workflow-intake": "Pulsa Levantar workflow en el candidato.",
+        "blueprint-ready": "Completa el blueprint y confirma al menos dos repeticiones.",
+      },
+      appUsageNote: "Esto es uso de una aplicación, no una tarea con nombre. Etiqueta episodios para convertirlo en un flujo.",
+      hypothesesTitle: "Hipótesis para validar",
+      hypothesesHint: "Patrones observados que podrían ser un flujo de trabajo. Confírmalo describiendo qué haces.",
+      hypothesisHandoff: (from, to, count, days) => `Pasaste de ${from} a ${to} ${count} ${count === 1 ? "vez" : "veces"} en ${days} ${days === 1 ? "día" : "días"}. ¿Qué haces en ese ir y venir?`,
+      hypothesisUnknown: (app) => `${app} es lo que más tiempo queda sin clasificar. ¿Para qué lo usas?`,
+      hypothesisMap: "Mapear este flujo",
       healthCoverageStatus: (captured, closed, down) => `${captured} capturadas · ${closed} con Ensō cerrado o el equipo apagado · ${down} con la captura caída.`,
       healthCoverageGaps: "Huecos más largos",
       healthGapReason: { asleep: "Equipo en reposo", quit: "Ensō cerrado por ti", "closed-or-off": "Ensō cerrado o equipo apagado", "watcher-down": "Captura caída", paused: "En pausa" },
@@ -635,6 +681,38 @@ const copy: Record<Locale, UiCopy> = {
       healthUnknownStatus: (share, apps) => apps ? `${share}% of active time. Mostly: ${apps}.` : `${share}% of active time.`,
       healthAccessibility: "Open Accessibility",
       healthCoverage: "Coverage in your schedule",
+      readinessTitle: "What Ensō can tell you today",
+      readinessHint: "Each level needs more evidence. Ensō does not propose workflows your data cannot support yet.",
+      readinessLevels: ["Time map", "Friction", "Workflow candidates", "Use case"],
+      readinessGathering: "Gathering data",
+      readinessNext: (level) => `To reach “${level}”`,
+      readinessDone: "Done",
+      readinessStep: {
+        "captured-days": (current, target) => `${current} of ${target} captured days`,
+        "active-hours": (current, target) => `${current} of ${target} h of activity`,
+        "repeated-handoff": () => "One repeated jump between tools",
+        "labeled-episodes": (current, target) => `${current} of ${target} labeled episodes of one task`,
+        "labeled-days": (current, target) => `That task on ${current} of ${target} different days`,
+        "step-context": (current, target) => `${current}% of ${target}% of browser, editor or terminal time with a site or project`,
+        "workflow-intake": () => "Describe that workflow in an intake",
+        "blueprint-ready": () => "A ready blueprint",
+      },
+      readinessAction: {
+        "captured-days": "Keep Ensō open during your workday.",
+        "active-hours": "Keep Ensō open during your workday.",
+        "repeated-handoff": "Keep working as usual; jumps show up on their own.",
+        "labeled-episodes": "In To review, label the day's episodes with the task name.",
+        "labeled-days": "Label the same task on another day.",
+        "step-context": "Pair the browser extension and the editor or terminal connector in Settings.",
+        "workflow-intake": "Press Map workflow on the candidate.",
+        "blueprint-ready": "Complete the blueprint and confirm at least two repetitions.",
+      },
+      appUsageNote: "This is app usage, not a named task. Label episodes to turn it into a workflow.",
+      hypothesesTitle: "Hypotheses to validate",
+      hypothesesHint: "Observed patterns that could be a workflow. Confirm it by describing what you do.",
+      hypothesisHandoff: (from, to, count, days) => `You moved from ${from} to ${to} ${count} ${count === 1 ? "time" : "times"} in ${days} ${days === 1 ? "day" : "days"}. What do you do in that loop?`,
+      hypothesisUnknown: (app) => `${app} is where most unclassified time goes. What do you use it for?`,
+      hypothesisMap: "Map this flow",
       healthCoverageStatus: (captured, closed, down) => `${captured} captured · ${closed} with Ensō closed or the computer off · ${down} with capture down.`,
       healthCoverageGaps: "Longest gaps",
       healthGapReason: { asleep: "Computer asleep", quit: "Ensō quit by you", "closed-or-off": "Ensō closed or computer off", "watcher-down": "Capture down", paused: "Paused" },

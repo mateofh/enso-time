@@ -92,7 +92,7 @@ fn browser_emitter_matches(emitter: Option<&str>, app: &str) -> bool {
     family.contains(&identity.as_str())
 }
 
-fn context_source_for_app(app: &str) -> Option<&'static str> {
+pub(crate) fn context_source_for_app(app: &str) -> Option<&'static str> {
     let identity = app_identity(app);
     if accepts_browser_context(app) {
         Some("browser")
