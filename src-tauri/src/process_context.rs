@@ -150,7 +150,11 @@ pub fn context_covered_seconds(
 ) -> i64 {
     context_totals(app, block_start, block_end, observations)
         .iter()
-        .filter(|(observation, _)| observation.domain.is_some() || observation.project.is_some())
+        .filter(|(observation, _)| {
+            observation.domain.is_some()
+                || observation.project.is_some()
+                || observation.repository.is_some()
+        })
         .map(|(_, total)| *total)
         .sum::<i64>()
         / 1000

@@ -19,7 +19,8 @@ const MIN_CONTEXT_TOOL_SECONDS: i64 = 30 * 60;
 
 #[derive(Debug, Clone, Default)]
 pub struct ReadinessInputs {
-    pub days_observed: f64,
+    /// Distinct days with captured (non-AFK) activity.
+    pub captured_days: usize,
     pub active_seconds: i64,
     /// Handoffs already filtered to the repeated ones.
     pub repeated_handoffs: usize,
@@ -81,7 +82,7 @@ fn requirements(level: u8, inputs: &ReadinessInputs) -> Vec<ReadinessStepV1> {
     match level {
         1 => vec![step(
             "captured-days",
-            (inputs.days_observed * 10.0).floor() / 10.0,
+            inputs.captured_days as f64,
             MIN_CAPTURED_DAYS,
         )],
         2 => vec![
@@ -129,6 +130,25 @@ fn requirements(level: u8, inputs: &ReadinessInputs) -> Vec<ReadinessStepV1> {
     }
 }
 
+/// The named task closest to level 3: one that already meets both minimums wins, then
+/// the one with most combined progress, so 8 episodes on one day never hide a task with
+/// 3 episodes on 2 days. Returns `(episodes, days)`.
+pub fn best_task(tasks: &[(usize, usize)]) -> (usize, usize) {
+    let progress = |(episodes, days): (usize, usize)| {
+        (episodes as f64 / MIN_LABELED_EPISODES).min(1.0)
+            + (days as f64 / MIN_LABELED_DAYS).min(1.0)
+    };
+    tasks
+        .iter()
+        .copied()
+        .max_by(|left, right| {
+            progress(*left)
+                .total_cmp(&progress(*right))
+                .then_with(|| left.cmp(right))
+        })
+        .unwrap_or_default()
+}
+
 pub fn assess(inputs: &ReadinessInputs) -> ReadinessV1 {
     let mut level = 0;
     for candidate in 1..=4 {
@@ -152,7 +172,7 @@ mod tests {
     /// no named tasks, no site or project context.
     fn friction_only() -> ReadinessInputs {
         ReadinessInputs {
-            days_observed: 26.0,
+            captured_days: 26,
             active_seconds: 100 * 3600,
             repeated_handoffs: 5,
             browser_seconds: 70 * 3600,
@@ -219,9 +239,16 @@ mod tests {
     }
 
     #[test]
+    fn the_task_that_meets_both_minimums_wins_over_more_episodes_on_one_day() {
+        assert_eq!(best_task(&[(8, 1), (3, 2)]), (3, 2));
+        assert_eq!(best_task(&[(1, 1), (2, 1)]), (2, 1));
+        assert_eq!(best_task(&[]), (0, 0));
+    }
+
+    #[test]
     fn early_days_start_at_zero_and_little_tool_time_needs_no_context() {
         let early = assess(&ReadinessInputs {
-            days_observed: 1.0,
+            captured_days: 1,
             ..ReadinessInputs::default()
         });
         assert_eq!(early.level, 0);

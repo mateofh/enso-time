@@ -1911,12 +1911,13 @@ fn diagnostic_readiness(
         .iter()
         .filter(|candidate| !candidate.app_usage_only)
         .collect::<Vec<_>>();
-    let best = named
-        .iter()
-        .filter_map(|candidate| candidate.observed.as_ref())
-        .map(|observed| (observed.episodes, observed.observed_days))
-        .max()
-        .unwrap_or_default();
+    let best = crate::readiness::best_task(
+        &named
+            .iter()
+            .filter_map(|candidate| candidate.observed.as_ref())
+            .map(|observed| (observed.episodes, observed.observed_days))
+            .collect::<Vec<_>>(),
+    );
     let declared = named
         .iter()
         .filter(|candidate| {
@@ -1925,26 +1926,35 @@ fn diagnostic_readiness(
                 .any(|intake| intake.candidate_id == candidate.id)
         })
         .collect::<Vec<_>>();
-    let mut blueprint_ready = false;
-    for candidate in &declared {
-        if let Some(draft) = store.automation_blueprint_draft(&candidate.id)? {
-            // The same gate the blueprint view uses; readiness never relaxes it.
-            if assess_stored_blueprint(store, draft, locale)?.status
-                == crate::blueprint::BlueprintStatusV1::Ready
-            {
-                blueprint_ready = true;
-                break;
-            }
-        }
-    }
-    let active_seconds = blocks
+    // The same gate the blueprint view uses; readiness never relaxes it. A blueprint
+    // that no longer matches its intake (stale) or fails to load is simply not ready:
+    // it must never break the diagnostic the app needs to open.
+    let blueprint_ready = declared.iter().any(|candidate| {
+        store
+            .automation_blueprint_draft(&candidate.id)
+            .ok()
+            .flatten()
+            .and_then(|draft| assess_stored_blueprint(store, draft, locale).ok())
+            .is_some_and(|blueprint| blueprint.status == crate::blueprint::BlueprintStatusV1::Ready)
+    });
+    let active = blocks
         .iter()
         .filter(|block| !block.afk && !block.id.starts_with("manual-"))
+        .collect::<Vec<_>>();
+    let active_seconds = active
+        .iter()
         .map(|block| block.duration_seconds.max(0))
         .sum();
+    // Days with real capture, not calendar time since the study started.
+    let captured_days = active
+        .iter()
+        .filter_map(|block| parse_utc(&block.start).ok())
+        .map(|start| start.with_timezone(&chrono::Local).date_naive())
+        .collect::<std::collections::HashSet<_>>()
+        .len();
     Ok(crate::readiness::assess(
         &crate::readiness::ReadinessInputs {
-            days_observed: diagnostic.days_observed,
+            captured_days,
             active_seconds,
             repeated_handoffs: diagnostic.handoffs.len(),
             best_task_episodes: best.0,
@@ -2516,6 +2526,62 @@ mod tests {
         };
         let intake = store.save_workflow_intake(intake).unwrap();
         (directory, store, intake)
+    }
+
+    #[test]
+    fn a_stale_blueprint_never_breaks_the_diagnostic_readiness() {
+        let (_directory, store, intake) = blueprint_command_fixture();
+        let input = SaveAutomationBlueprintInputV1 {
+            draft: ephemeral_draft(&intake),
+            expected_revision: None,
+        };
+        save_automation_blueprint_inner(&store, &CaptureGate::new(), input, "es-419").unwrap();
+        // The intake gains a step after the blueprint was saved: the blueprint is stale.
+        let mut edited = intake.clone();
+        edited.steps.push("Enviar reporte".into());
+        edited.updated_at = "2025-01-03T10:00:00Z".into();
+        let edited = store.save_workflow_intake(edited).unwrap();
+        let stale = store
+            .automation_blueprint_draft(&intake.candidate_id)
+            .unwrap()
+            .unwrap();
+        assert!(
+            assess_stored_blueprint(&store, stale, "es-419").is_err(),
+            "fixture must reproduce the stale-blueprint error"
+        );
+        let block = |id: &str, day: &str| TimelineBlockV1 {
+            id: id.into(),
+            start: format!("2026-08-{day}T10:00:00Z"),
+            end: format!("2026-08-{day}T10:30:00Z"),
+            duration_seconds: 1_800,
+            app: "Sheets".into(),
+            title: None,
+            activity_label: Some(intake.candidate_label.clone()),
+            category: "admin".into(),
+            confidence: 1.0,
+            afk: false,
+            source: "window".into(),
+            check_in_id: None,
+            classification_source: "rule".into(),
+            rule_id: Some("rule-1".into()),
+            correctable: true,
+            context_domain: None,
+            context_project: None,
+            case_refs: Vec::new(),
+        };
+        let blocks = vec![block("a", "01"), block("b", "02"), block("c", "03")];
+        let diagnostic = create_diagnostic(
+            &blocks,
+            &[],
+            3.0,
+            &SettingsV1::default(),
+            std::slice::from_ref(&edited),
+        );
+        let health = crate::capture_health::capture_health(&blocks, false, &[], &[]);
+        let readiness =
+            diagnostic_readiness(&store, &diagnostic, &health, &blocks, &[edited], "es-419")
+                .unwrap();
+        assert!(readiness.level < 4);
     }
 
     #[test]

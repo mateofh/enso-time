@@ -288,6 +288,24 @@ mod tests {
     }
 
     #[test]
+    fn editor_time_with_only_a_repository_counts_as_known_project() {
+        let observed = (0..60)
+            .map(|minute| {
+                let mut item = reports(minute, 1).remove(0);
+                item.source = "editor".into();
+                item.app = Some("Cursor".into());
+                item.domain = None;
+                item.repository = Some("enso-time".into());
+                item
+            })
+            .collect::<Vec<_>>();
+        let parsed = crate::process_context::parse_observations(&observed);
+        let health = capture_health(&[block("Cursor", 3_600, "creation")], true, &[], &parsed);
+        assert_eq!(health.project_seconds, 3_600);
+        assert!(health.project_share > 0.99);
+    }
+
+    #[test]
     fn afk_manual_and_excluded_time_do_not_count() {
         let mut away = block("Figma", 9_000, "unknown");
         away.afk = true;
