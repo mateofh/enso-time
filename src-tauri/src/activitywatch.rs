@@ -3372,9 +3372,10 @@ mod tests {
         }));
 
         std::fs::remove_file(temp.path().join("permission-granted")).unwrap();
-        std::thread::sleep(StdDuration::from_millis(200));
+        // The fixture exits on its next heartbeat loop; under CI load that can take longer
+        // than any fixed sleep, so wait for the observable state instead.
         assert_eq!(
-            runtime.watcher_statuses_with_timeout(StdDuration::from_secs(5)),
+            wait_for_statuses(&runtime, ("stopped", "running")),
             ("stopped".into(), "running".into())
         );
         assert_eq!(
@@ -3842,6 +3843,24 @@ fn main() {{
         #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
         let binary = directory.join(name);
         binary
+    }
+
+    /// Polls watcher status until it matches `expected` or a generous deadline passes;
+    /// returns the last status so a failure still shows what was observed.
+    fn wait_for_statuses(
+        runtime: &ActivityWatchRuntime,
+        expected: (&str, &str),
+    ) -> (String, String) {
+        let deadline = std::time::Instant::now() + StdDuration::from_secs(10);
+        loop {
+            let statuses = runtime.watcher_statuses_with_timeout(StdDuration::from_secs(5));
+            if (statuses.0.as_str(), statuses.1.as_str()) == expected
+                || std::time::Instant::now() >= deadline
+            {
+                return statuses;
+            }
+            std::thread::sleep(StdDuration::from_millis(50));
+        }
     }
 
     fn wait_until_ready(runtime: &ActivityWatchRuntime) -> u16 {
