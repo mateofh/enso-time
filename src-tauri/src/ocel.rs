@@ -14,10 +14,13 @@ use crate::episodes::Episode;
 
 const UNLABELED_EVENT_TYPE: &str = "unlabeled";
 
+/// The confirmed task when there is one, else the episode's category
+/// (`category:creation`), so unlabeled work is still distinguishable in a process map.
 fn event_type(episode: &Episode) -> String {
     episode
         .candidate_key
         .clone()
+        .or_else(|| episode.task_key.clone())
         .unwrap_or_else(|| UNLABELED_EVENT_TYPE.into())
 }
 
@@ -186,6 +189,19 @@ mod tests {
         assert!(object_ids.contains("tool:mail.google.com"));
         assert!(object_ids.contains("tool:excel"));
         assert_eq!(events[1]["type"], UNLABELED_EVENT_TYPE);
+
+        let mut categorized = block(
+            "d",
+            "2026-11-21T16:00:00Z",
+            "2026-11-21T16:20:00Z",
+            "Figma",
+            None,
+        );
+        categorized.category = "creation".into();
+        categorized.classification_source = "builtin".into();
+        let typed = ocel_export(&crate::episodes::build_episodes(&[categorized]));
+        assert_eq!(typed["events"][0]["type"], "category:creation");
+        assert_eq!(typed["eventTypes"][0]["name"], "category:creation");
 
         let text = ocel.to_string();
         for private in ["ana@cliente.com", "CONFIDENCIAL", "proyecto-secreto"] {

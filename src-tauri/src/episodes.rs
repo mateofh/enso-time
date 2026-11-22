@@ -34,6 +34,27 @@ pub const MAX_LABEL_SUGGESTIONS: usize = 5;
 /// Most window blocks one labeling request may carry; larger episodes are not offered.
 pub const MAX_EPISODE_LABEL_BLOCKS: usize = 5_000;
 
+/// Segmentation thresholds. `Default` is what the product uses; other values exist only
+/// to measure sensitivity against real data (see the ignored calibration test).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EpisodeParams {
+    pub min_dwell_seconds: i64,
+    pub max_gap_seconds: i64,
+    pub sustained_switch_seconds: i64,
+    pub max_excursion_share: f64,
+}
+
+impl Default for EpisodeParams {
+    fn default() -> Self {
+        Self {
+            min_dwell_seconds: MIN_DWELL_SECONDS,
+            max_gap_seconds: MAX_GAP_SECONDS,
+            sustained_switch_seconds: SUSTAINED_SWITCH_SECONDS,
+            max_excursion_share: MAX_EXCURSION_SHARE,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Episode {
     pub start: DateTime<Utc>,
@@ -127,7 +148,7 @@ fn step_identity(block: &TimelineBlockV1) -> Option<String> {
         .filter(|step| !step.is_empty())
 }
 
-fn runs_from_blocks(blocks: &[TimelineBlockV1]) -> Vec<Run> {
+fn runs_from_blocks(blocks: &[TimelineBlockV1], params: &EpisodeParams) -> Vec<Run> {
     let mut timed = blocks
         .iter()
         // Manual check-in blocks overlap window blocks in time; they are not a sequence.
@@ -170,7 +191,7 @@ fn runs_from_blocks(blocks: &[TimelineBlockV1]) -> Vec<Run> {
             task_key,
         });
     }
-    runs.retain(|run| run.is_break() || run.seconds() >= MIN_DWELL_SECONDS);
+    runs.retain(|run| run.is_break() || run.seconds() >= params.min_dwell_seconds);
     runs
 }
 
@@ -223,22 +244,26 @@ fn merge_into(target: &mut Draft, next: Draft) {
 }
 
 pub fn build_episodes(blocks: &[TimelineBlockV1]) -> Vec<Episode> {
+    build_episodes_with(blocks, &EpisodeParams::default())
+}
+
+pub fn build_episodes_with(blocks: &[TimelineBlockV1], params: &EpisodeParams) -> Vec<Episode> {
     let mut drafts: Vec<Draft> = Vec::new();
     let mut broken = true;
-    for run in runs_from_blocks(blocks) {
+    for run in runs_from_blocks(blocks, params) {
         if run.is_break() {
             broken = true;
             continue;
         }
         let continues = drafts.last().is_some_and(|current| {
             !broken
-                && (run.start - current.episode.end).num_seconds() <= MAX_GAP_SECONDS
+                && (run.start - current.episode.end).num_seconds() <= params.max_gap_seconds
                 && (run.task_key.is_none()
                     || current.task_key.is_none()
                     || current.task_key == run.task_key)
         });
         let gap_break = drafts.last().is_none_or(|current| {
-            (run.start - current.episode.end).num_seconds() > MAX_GAP_SECONDS
+            (run.start - current.episode.end).num_seconds() > params.max_gap_seconds
         });
         if continues {
             let current = drafts.last_mut().expect("checked above");
@@ -268,7 +293,7 @@ pub fn build_episodes(blocks: &[TimelineBlockV1]) -> Vec<Episode> {
         }
         broken = false;
     }
-    absorb_short_excursions(drafts)
+    absorb_short_excursions(drafts, params)
         .into_iter()
         .map(|draft| Episode {
             task_key: draft.task_key,
@@ -281,19 +306,19 @@ pub fn build_episodes(blocks: &[TimelineBlockV1]) -> Vec<Episode> {
 /// A different task shorter than `SUSTAINED_SWITCH_SECONDS` between two stretches of the
 /// same task is an excursion (A, B, A becomes one A episode). Only a true sandwich is
 /// absorbed: otherwise rapid switching would chain into one endless episode.
-fn absorb_short_excursions(drafts: Vec<Draft>) -> Vec<Draft> {
+fn absorb_short_excursions(drafts: Vec<Draft>, params: &EpisodeParams) -> Vec<Draft> {
     let mut merged: Vec<Draft> = Vec::new();
     for draft in drafts {
         if !draft.after_break && merged.len() >= 2 {
             let excursion = &merged[merged.len() - 1];
             let resumed = &merged[merged.len() - 2];
             let short = (excursion.episode.end - excursion.episode.start).num_seconds()
-                < SUSTAINED_SWITCH_SECONDS;
+                < params.sustained_switch_seconds;
             let foreign = resumed.excursion_seconds + excursion.episode.touch_seconds;
             let total = resumed.episode.touch_seconds
                 + excursion.episode.touch_seconds
                 + draft.episode.touch_seconds;
-            let minor = (foreign as f64) < total as f64 * MAX_EXCURSION_SHARE;
+            let minor = (foreign as f64) < total as f64 * params.max_excursion_share;
             if short && minor && !excursion.after_break && resumed.task_key == draft.task_key {
                 let excursion = merged.pop().expect("length checked");
                 let excursion_touch = excursion.episode.touch_seconds;
