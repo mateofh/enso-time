@@ -3548,6 +3548,16 @@ mod tests {
         );
         // Rapid rotation across tasks must not chain into one endless episode.
         assert!(longest < 60, "longest episode {longest} min");
+        let began = std::time::Instant::now();
+        let ocel = crate::ocel::ocel_export(&episodes);
+        let suggestions = crate::episodes::unlabeled_suggestions(&episodes);
+        println!(
+            "ocel_export + suggestions: {} events, {} suggestions in {:?}",
+            ocel["events"].as_array().map_or(0, Vec::len),
+            suggestions.len(),
+            began.elapsed()
+        );
+        assert!(began.elapsed() < std::time::Duration::from_secs(1));
         assert!(elapsed < std::time::Duration::from_secs(5));
     }
 

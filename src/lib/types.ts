@@ -130,6 +130,24 @@ export interface ReviewOperationV1 {
   ruleId?: string;
 }
 
+/** An episode with no confirmed label, offered for one-click labeling at day's end. */
+export interface EpisodeSuggestionV1 {
+  id: string;
+  start: string;
+  end: string;
+  steps: string[];
+  touchSeconds: number;
+  blockIds: string[];
+}
+
+export interface LabelEpisodeInputV1 {
+  from: string;
+  to: string;
+  blockIds: string[];
+  category: CategoryId;
+  activityLabel: string;
+}
+
 export interface UndoReviewOperationInputV1 {
   blockIds: string[];
   ruleId?: string;

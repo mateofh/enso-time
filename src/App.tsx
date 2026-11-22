@@ -40,6 +40,7 @@ import type {
   Locale,
   RuleImpactV1,
   ReviewGroupV1,
+  EpisodeSuggestionV1,
   ReviewOperationV1,
   SessionClassificationInputV1,
   SessionClassificationResultV1,
@@ -363,10 +364,48 @@ function ReviewGroupCard({ group, locale, range, onApplied }: {
   );
 }
 
+function EpisodeLabelCard({ episode, locale, range, onApplied }: {
+  episode: EpisodeSuggestionV1;
+  locale: Locale;
+  range: { from: string; to: string };
+  onApplied: (operation: ReviewOperationV1) => void;
+}) {
+  const copy = messages(locale).review;
+  const [category, setCategory] = useState<CategoryId>("admin");
+  const [activityLabel, setActivityLabel] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+
+  async function label() {
+    if (!activityLabel.trim()) { setError(copy.episodeLabelRequired); return; }
+    setBusy(true); setError(undefined);
+    try {
+      onApplied(await bridge.labelEpisode({ ...range, blockIds: episode.blockIds, category, activityLabel: activityLabel.trim() }));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : messages(locale).common.unexpectedError);
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <article className="episode-card" data-testid="episode-suggestion">
+      <div className="review-card-heading">
+        <div><h2>{episode.steps.join(" → ")}</h2><p>{copy.episodeMeta(formatTime(episode.start, locale), formatDuration(episode.touchSeconds, locale))}</p></div>
+      </div>
+      <div className="review-fields">
+        <label>{copy.category}<select value={category} onChange={(event) => setCategory(event.target.value as CategoryId)}>{SESSION_CATEGORIES.filter((item) => item !== "break").map((item) => <option key={item} value={item}>{categoryLabel(locale, item)}</option>)}</select></label>
+        <label>{copy.activity}<input value={activityLabel} maxLength={200} placeholder={copy.activityPlaceholder} onChange={(event) => setActivityLabel(event.target.value)} /></label>
+      </div>
+      {error && <p className="form-error" role="alert">{error}</p>}
+      <div className="button-row"><button type="button" className="secondary-button" disabled={busy} onClick={() => void label()}><Check size={15} />{copy.labelEpisode}</button></div>
+    </article>
+  );
+}
+
 function ReviewView({ settings, onChanged }: { settings: SettingsV1; onChanged: () => Promise<void> }) {
   const copy = messages(settings.locale).review;
   const [period, setPeriod] = useState<"1" | "7" | "30" | "all">("7");
   const [groups, setGroups] = useState<ReviewGroupV1[]>([]);
+  const [episodes, setEpisodes] = useState<EpisodeSuggestionV1[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
   const [lastOperation, setLastOperation] = useState<ReviewOperationV1>();
@@ -374,7 +413,11 @@ function ReviewView({ settings, onChanged }: { settings: SettingsV1; onChanged: 
 
   async function refresh() {
     setLoading(true); setError(undefined);
-    try { setGroups(await bridge.listReviewGroups(range.from, range.to)); }
+    try {
+      const [nextGroups, nextEpisodes] = await Promise.all([bridge.listReviewGroups(range.from, range.to), bridge.listUnlabeledEpisodes(range.from, range.to)]);
+      setGroups(nextGroups);
+      setEpisodes(nextEpisodes);
+    }
     catch (caught) { setError(caught instanceof Error ? caught.message : messages(settings.locale).common.unexpectedError); }
     finally { setLoading(false); }
   }
@@ -397,6 +440,7 @@ function ReviewView({ settings, onChanged }: { settings: SettingsV1; onChanged: 
     <>
       <header className="page-header"><div><p className="page-context">{copy.context}</p><h1>{copy.title}</h1><p className="page-intro">{copy.intro}</p></div><label className="review-range">{copy.range}<select value={period} onChange={(event) => setPeriod(event.target.value as typeof period)}>{Object.entries(copy.ranges).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label></header>
       {lastOperation && <div className="review-success" role="status"><span>{copy.applied(lastOperation.affectedSessions)}</span><button type="button" className="text-button" onClick={() => void undo()}><RefreshCw size={14} />{copy.undo}</button></div>}
+      {!loading && !error && episodes.length > 0 && <section className="episode-review" aria-labelledby="episodes-title"><div className="episode-review-heading"><h2 id="episodes-title">{copy.episodesTitle}</h2><p>{copy.episodesIntro}</p></div><div className="review-grid">{episodes.map((episode) => <EpisodeLabelCard key={episode.id} episode={episode} locale={settings.locale} range={range} onApplied={(operation) => void applied(operation)} />)}</div></section>}
       {loading ? <p className="inline-empty">{copy.loading}</p> : error ? <p className="form-error" role="alert">{error}</p> : groups.length === 0 ? <p className="inline-empty">{copy.empty}</p> : <div className="review-grid">{groups.map((group) => <ReviewGroupCard key={group.id} group={group} locale={settings.locale} range={range} onApplied={(operation) => void applied(operation)} />)}</div>}
     </>
   );
@@ -710,7 +754,7 @@ function IntelligenceSettings({ draft, saved, experimental, onChange }: { draft:
   </section>;
 }
 
-function SettingsView({ settings, status, classificationRules, onSave, onSaveRule, onDeleteRule, onExport, onDelete }: { settings: SettingsV1; status: TrackingStatus; classificationRules: ClassificationRuleV1[]; onSave: (value: SettingsV1) => Promise<void>; onSaveRule: (rule: ClassificationRuleV1) => Promise<void>; onDeleteRule: (id: string) => Promise<void>; onExport: (format: "json" | "csv") => Promise<void>; onDelete: () => Promise<void> }) {
+function SettingsView({ settings, status, classificationRules, onSave, onSaveRule, onDeleteRule, onExport, onDelete }: { settings: SettingsV1; status: TrackingStatus; classificationRules: ClassificationRuleV1[]; onSave: (value: SettingsV1) => Promise<void>; onSaveRule: (rule: ClassificationRuleV1) => Promise<void>; onDeleteRule: (id: string) => Promise<void>; onExport: (format: "json" | "csv" | "ocel") => Promise<void>; onDelete: () => Promise<void> }) {
   const [draft, setDraft] = useState(settings);
   const [saving, setSaving] = useState(false);
   const copy = messages(draft.locale).settings;
@@ -730,7 +774,7 @@ function SettingsView({ settings, status, classificationRules, onSave, onSaveRul
       <section className="settings-group"><div className="settings-intro"><Languages size={19} aria-hidden="true" /><div><h2>{copy.appearance}</h2><p>{copy.appearanceHint}</p></div></div><div className="settings-fields"><div className="two-columns"><label>{copy.language}<select value={draft.locale} onChange={(event) => set("locale", event.target.value as Locale)}><option value="es-419">Español (Latinoamérica)</option><option value="en">English</option></select></label><label>{copy.theme}<select value={draft.theme} onChange={(event) => set("theme", event.target.value as SettingsV1["theme"])}><option value="ink">{copy.ink}</option><option value="paper">{copy.paper}</option><option value="system">{copy.system}</option></select></label></div><p>{copy.updatesHint}</p></div></section>
       <IntelligenceSettings draft={draft} saved={settings} experimental={status.experimentalIntelligence} onChange={setDraft} />
       <ClassificationRulesSettings rules={classificationRules} locale={draft.locale} onSave={onSaveRule} onDelete={onDeleteRule} />
-      <section className="settings-group"><div className="settings-intro"><LockKeyhole size={19} aria-hidden="true" /><div><h2>{copy.data}</h2><p>{copy.localEngine(status.serverPort)}</p></div></div><div className="data-actions"><button type="button" className="secondary-button" onClick={() => void onExport("json")}><Download size={16} aria-hidden="true" />{copy.exportJson}</button><button type="button" className="secondary-button" onClick={() => void onExport("csv")}><Download size={16} aria-hidden="true" />{copy.exportCsv}</button><button type="button" className="danger-button" onClick={() => void onDelete()}><Trash2 size={16} aria-hidden="true" />{copy.delete}</button></div></section>
+      <section className="settings-group"><div className="settings-intro"><LockKeyhole size={19} aria-hidden="true" /><div><h2>{copy.data}</h2><p>{copy.localEngine(status.serverPort)}</p></div></div><div className="data-actions"><button type="button" className="secondary-button" onClick={() => void onExport("json")}><Download size={16} aria-hidden="true" />{copy.exportJson}</button><button type="button" className="secondary-button" onClick={() => void onExport("csv")}><Download size={16} aria-hidden="true" />{copy.exportCsv}</button><button type="button" className="secondary-button" onClick={() => void onExport("ocel")}><Download size={16} aria-hidden="true" />{copy.exportOcel}</button><button type="button" className="danger-button" onClick={() => void onDelete()}><Trash2 size={16} aria-hidden="true" />{copy.delete}</button></div></section>
     </>
   );
 }

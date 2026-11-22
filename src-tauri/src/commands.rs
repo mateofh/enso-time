@@ -19,7 +19,7 @@ use crate::models::{
 use crate::storage::{BlueprintStoreResult, LocalStore};
 use chrono::{Datelike, Duration, Timelike, Utc};
 use chrono_tz::Tz;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{OpenOptions, Permissions};
 use std::io::Write;
 use std::path::PathBuf;
@@ -510,6 +510,98 @@ pub fn apply_review_group(
         block_ids: overrides.into_iter().map(|item| item.block_id).collect(),
         rule_id: None,
     })
+}
+
+#[tauri::command]
+pub fn list_unlabeled_episodes(
+    state: State<'_, AppState>,
+    from: String,
+    to: String,
+) -> Result<Vec<crate::models::EpisodeSuggestionV1>, String> {
+    let blocks = timeline_for_review(&state, &from, &to)?;
+    Ok(episode_suggestions(&blocks))
+}
+
+fn episode_suggestions(blocks: &[TimelineBlockV1]) -> Vec<crate::models::EpisodeSuggestionV1> {
+    let episodes = crate::episodes::build_episodes(blocks);
+    crate::episodes::unlabeled_suggestions(&episodes)
+        .into_iter()
+        .map(|episode| crate::models::EpisodeSuggestionV1 {
+            id: format!(
+                "episode-{}",
+                episode.block_ids.first().cloned().unwrap_or_default()
+            ),
+            start: episode.start.to_rfc3339(),
+            end: episode.end.to_rfc3339(),
+            steps: episode.steps.clone(),
+            touch_seconds: episode.touch_seconds,
+            block_ids: episode.block_ids.clone(),
+        })
+        .collect()
+}
+
+#[tauri::command]
+pub fn label_episode(
+    state: State<'_, AppState>,
+    mut input: crate::models::LabelEpisodeInputV1,
+) -> Result<ReviewOperationV1, String> {
+    input.activity_label = input.activity_label.trim().to_string();
+    input.validate()?;
+    let operation = state.capture_gate.operation()?;
+    let blocks = timeline_for_review(&state, &input.from, &input.to)?;
+    operation.ensure_current()?;
+    label_episode_inner(&state.store, &blocks, &input, &iso_now())
+}
+
+fn label_episode_inner(
+    store: &LocalStore,
+    blocks: &[TimelineBlockV1],
+    input: &crate::models::LabelEpisodeInputV1,
+    now: &str,
+) -> Result<ReviewOperationV1, String> {
+    let overrides = episode_overrides(blocks, input, now)?;
+    store.save_classification_overrides(&overrides)?;
+    Ok(ReviewOperationV1 {
+        id: Uuid::new_v4().to_string(),
+        mode: "sessions".into(),
+        affected_sessions: overrides.len(),
+        block_ids: overrides.into_iter().map(|item| item.block_id).collect(),
+        rule_id: None,
+    })
+}
+
+/// Overrides for the episode's blocks that still exist, can be corrected and carry no
+/// confirmed classification yet. Already-confirmed blocks (a brief interruption the
+/// person classified) are left alone, so labeling and its undo never destroy them.
+fn episode_overrides(
+    blocks: &[TimelineBlockV1],
+    input: &crate::models::LabelEpisodeInputV1,
+    now: &str,
+) -> Result<Vec<ClassificationOverrideV1>, String> {
+    let wanted = input.block_ids.iter().collect::<HashSet<_>>();
+    let overrides = blocks
+        .iter()
+        .filter(|block| block.correctable && wanted.contains(&block.id))
+        .filter(|block| {
+            !matches!(
+                block.classification_source.as_str(),
+                "override" | "rule" | "checkin"
+            )
+        })
+        .map(|block| ClassificationOverrideV1 {
+            block_id: block.id.clone(),
+            event_start: block.start.clone(),
+            event_end: block.end.clone(),
+            category: input.category.clone(),
+            activity_label: Some(input.activity_label.clone()),
+            created_at: now.into(),
+            updated_at: now.into(),
+        })
+        .collect::<Vec<_>>();
+    if overrides.is_empty() {
+        return Err("Este episodio ya no está disponible".into());
+    }
+    Ok(overrides)
 }
 
 #[tauri::command]
@@ -1537,8 +1629,8 @@ pub(crate) fn resume_tracking_inner(state: &AppState) -> Result<TrackingStatus, 
 #[tauri::command]
 pub fn export_data(state: State<'_, AppState>, format: String) -> Result<String, String> {
     let operation = state.capture_gate.operation()?;
-    if !matches!(format.as_str(), "json" | "csv") {
-        return Err("El formato de exportación debe ser json o csv".into());
+    if !matches!(format.as_str(), "json" | "csv" | "ocel") {
+        return Err("El formato de exportación debe ser json, csv u ocel".into());
     }
     let settings = state.store.settings()?;
     let now = Utc::now();
@@ -1577,11 +1669,16 @@ pub fn export_data(state: State<'_, AppState>, format: String) -> Result<String,
     )?;
     let export_dir = state.app_data_dir.join("exports");
     create_private_directory(&export_dir)?;
+    let extension = if format == "ocel" {
+        "ocel.json"
+    } else {
+        format.as_str()
+    };
     let filename = format!(
         "enso-time-{}-{}.{}",
         now.format("%Y%m%d-%H%M%S"),
         Uuid::new_v4(),
-        format
+        extension
     );
     let path = export_dir.join(filename);
     operation.ensure_current()?;
@@ -1596,11 +1693,20 @@ pub fn export_data(state: State<'_, AppState>, format: String) -> Result<String,
             &classification_overrides,
             &now,
         )?
+    } else if format == "ocel" {
+        ocel_contents(&timeline)?
     } else {
         timeline_csv(&timeline)
     };
     write_private_new_file(&path, contents.as_bytes())?;
     Ok(path.to_string_lossy().into_owned())
+}
+
+fn ocel_contents(timeline: &[TimelineBlockV1]) -> Result<String, String> {
+    serde_json::to_string_pretty(&crate::ocel::ocel_export(&crate::episodes::build_episodes(
+        timeline,
+    )))
+    .map_err(|error| error.to_string())
 }
 
 fn json_export(
@@ -2266,6 +2372,144 @@ mod tests {
         gate.generation.fetch_add(1, Ordering::AcqRel);
         assert!(record_native_action_error(&store, &gate, original_generation).is_err());
         assert!(store.get_value("native_action_error").unwrap().is_none());
+    }
+
+    #[test]
+    fn labeling_an_episode_persists_overrides_keeps_confirmed_blocks_and_undoes_cleanly() {
+        let directory = TempDir::new().unwrap();
+        let store = LocalStore::open(&directory.path().join("label.sqlite")).unwrap();
+        let block = |id: &str, start: &str, end: &str, app: &str| TimelineBlockV1 {
+            id: id.into(),
+            start: start.into(),
+            end: end.into(),
+            duration_seconds: (parse_utc(end).unwrap() - parse_utc(start).unwrap()).num_seconds(),
+            app: app.into(),
+            title: None,
+            activity_label: None,
+            category: "admin".into(),
+            confidence: 0.7,
+            afk: false,
+            source: "window".into(),
+            check_in_id: None,
+            classification_source: "builtin".into(),
+            rule_id: None,
+            correctable: true,
+            context_domain: None,
+            context_project: None,
+        };
+        let prior = ClassificationOverrideV1 {
+            block_id: "w2".into(),
+            event_start: "2026-11-21T10:06:00Z".into(),
+            event_end: "2026-11-21T10:07:00Z".into(),
+            category: "communication".into(),
+            activity_label: None,
+            created_at: "2026-11-21T09:00:00Z".into(),
+            updated_at: "2026-11-21T09:00:00Z".into(),
+        };
+        store
+            .save_classification_overrides(std::slice::from_ref(&prior))
+            .unwrap();
+        let mut blocks = vec![
+            block(
+                "w1",
+                "2026-11-21T10:00:00Z",
+                "2026-11-21T10:06:00Z",
+                "Excel",
+            ),
+            // A brief interruption the person already classified, absorbed by the episode.
+            block(
+                "w2",
+                "2026-11-21T10:06:00Z",
+                "2026-11-21T10:07:00Z",
+                "Slack",
+            ),
+            block(
+                "w3",
+                "2026-11-21T10:07:00Z",
+                "2026-11-21T10:15:00Z",
+                "Excel",
+            ),
+        ];
+        blocks[1].category = "communication".into();
+        blocks[1].classification_source = "override".into();
+        let suggestions = episode_suggestions(&blocks);
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].block_ids, vec!["w1", "w2", "w3"]);
+
+        let input = crate::models::LabelEpisodeInputV1 {
+            from: "2026-11-21T00:00:00Z".into(),
+            to: "2026-11-22T00:00:00Z".into(),
+            block_ids: suggestions[0].block_ids.clone(),
+            category: "admin".into(),
+            activity_label: "Conciliar pagos".into(),
+        };
+        input.validate().unwrap();
+        let operation =
+            label_episode_inner(&store, &blocks, &input, "2026-11-21T18:00:00Z").unwrap();
+        assert_eq!(operation.block_ids, vec!["w1", "w3"]);
+        let stored = store.classification_overrides().unwrap();
+        let by_id = |id: &str| stored.iter().find(|item| item.block_id == id).cloned();
+        assert_eq!(
+            by_id("w1").unwrap().activity_label.as_deref(),
+            Some("Conciliar pagos")
+        );
+        assert_eq!(
+            by_id("w3").unwrap().activity_label.as_deref(),
+            Some("Conciliar pagos")
+        );
+        assert_eq!(
+            by_id("w2").unwrap(),
+            prior,
+            "a confirmed block must not be overwritten"
+        );
+
+        // Undo goes through the same store call as `undo_review_operation`.
+        store
+            .delete_classification_overrides(&operation.block_ids)
+            .unwrap();
+        assert_eq!(store.classification_overrides().unwrap(), vec![prior]);
+
+        let missing = crate::models::LabelEpisodeInputV1 {
+            block_ids: vec!["gone".into()],
+            ..input
+        };
+        assert!(episode_overrides(&blocks, &missing, "2026-11-21T18:00:00Z").is_err());
+        let unlabeled = crate::models::LabelEpisodeInputV1 {
+            activity_label: "  ".into(),
+            ..missing
+        };
+        assert!(unlabeled.validate().is_err());
+    }
+
+    #[test]
+    fn ocel_export_contents_parse_and_reference_known_objects() {
+        let block = TimelineBlockV1 {
+            id: "w1".into(),
+            start: "2026-11-21T10:00:00Z".into(),
+            end: "2026-11-21T10:10:00Z".into(),
+            duration_seconds: 600,
+            app: "Excel".into(),
+            title: Some("Nómina confidencial".into()),
+            activity_label: Some("Conciliar pagos".into()),
+            category: "admin".into(),
+            confidence: 1.0,
+            afk: false,
+            source: "window".into(),
+            check_in_id: None,
+            classification_source: "rule".into(),
+            rule_id: Some("r".into()),
+            correctable: true,
+            context_domain: None,
+            context_project: None,
+        };
+        let contents = ocel_contents(&[block]).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        assert_eq!(parsed["events"][0]["type"], "conciliar pagos");
+        assert_eq!(
+            parsed["events"][0]["relationships"][0]["objectId"],
+            "task:conciliar pagos"
+        );
+        assert!(!contents.contains("Nómina confidencial"));
     }
 
     #[test]

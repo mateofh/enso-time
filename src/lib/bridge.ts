@@ -28,6 +28,8 @@ import type {
   ApplyReviewGroupInputV1,
   ReviewOperationV1,
   UndoReviewOperationInputV1,
+  EpisodeSuggestionV1,
+  LabelEpisodeInputV1,
   AiConfigurationStatusV1,
   AiFeedbackInputV1,
   ConnectorClientV1,
@@ -322,6 +324,35 @@ export const bridge = {
     return { id: crypto.randomUUID(), mode: "sessions", affectedSessions: blocks.length, blockIds: blocks.map((block) => block.id) };
   },
 
+  async listUnlabeledEpisodes(from: string, to: string): Promise<EpisodeSuggestionV1[]> {
+    if (isTauri()) return invoke("list_unlabeled_episodes", { from, to });
+    // Preview approximation of the desktop episode builder: one block per episode.
+    const confirmed = new Set(["override", "rule", "checkin"]);
+    return (await bridge.getTimeline(from, to))
+      .filter((block) => !block.afk && block.correctable !== false && block.category !== "break"
+        && !(block.activityLabel && confirmed.has(block.classificationSource ?? "")) && block.durationSeconds >= 300)
+      .sort((left, right) => right.durationSeconds - left.durationSeconds)
+      .slice(0, 5)
+      .map((block) => ({ id: `episode-${block.id}`, start: block.start, end: block.end, steps: [block.contextDomain ?? block.app.toLowerCase()], touchSeconds: block.durationSeconds, blockIds: [block.id] }));
+  },
+
+  async labelEpisode(input: LabelEpisodeInputV1): Promise<ReviewOperationV1> {
+    if (isTauri()) return invoke("label_episode", { input });
+    if (!input.activityLabel.trim()) throw new Error("La etiqueta de actividad es obligatoria");
+    // Like the desktop command, never overwrite a block that is already confirmed.
+    const confirmed = new Set(["override", "rule", "checkin"]);
+    const wanted = new Set(input.blockIds);
+    const blockIds = (await bridge.getTimeline(input.from, input.to))
+      .filter((block) => wanted.has(block.id) && block.correctable !== false && !confirmed.has(block.classificationSource ?? ""))
+      .map((block) => block.id);
+    if (!blockIds.length) throw new Error("Este episodio ya no está disponible");
+    const state = loadWebState();
+    state.classificationOverrides = { ...(state.classificationOverrides ?? {}) };
+    for (const blockId of blockIds) state.classificationOverrides[blockId] = { category: input.category, activityLabel: input.activityLabel.trim() };
+    saveWebState(state);
+    return { id: crypto.randomUUID(), mode: "sessions", affectedSessions: blockIds.length, blockIds };
+  },
+
   async undoReviewOperation(input: UndoReviewOperationInputV1): Promise<void> {
     if (isTauri()) return invoke("undo_review_operation", { input });
     const state = loadWebState();
@@ -586,9 +617,9 @@ export const bridge = {
     return bridge.getTrackingStatus();
   },
 
-  async exportData(format: "json" | "csv"): Promise<string> {
+  async exportData(format: "json" | "csv" | "ocel"): Promise<string> {
     if (isTauri()) return invoke("export_data", { format });
-    return `preview://enso-time-export.${format}`;
+    return `preview://enso-time-export.${format === "ocel" ? "ocel.json" : format}`;
   },
 
   async deleteAllData(): Promise<void> {
