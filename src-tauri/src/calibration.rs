@@ -55,10 +55,20 @@ fn median(mut values: Vec<f64>) -> f64 {
         return 0.0;
     }
     values.sort_by(|left, right| left.total_cmp(right));
-    values[values.len() / 2]
+    let middle = values.len() / 2;
+    if values.len() % 2 == 0 {
+        (values[middle - 1] + values[middle]) / 2.0
+    } else {
+        values[middle]
+    }
 }
 
-fn summarize(blocks: &[TimelineBlockV1], items: &[Episode], days: usize) -> Summary {
+fn summarize(
+    blocks: &[TimelineBlockV1],
+    items: &[Episode],
+    days: usize,
+    params: &EpisodeParams,
+) -> Summary {
     let days = days.max(1) as f64;
     let touch: i64 = items.iter().map(|episode| episode.touch_seconds).sum();
     let touch_f = touch.max(1) as f64;
@@ -84,7 +94,7 @@ fn summarize(blocks: &[TimelineBlockV1], items: &[Episode], days: usize) -> Summ
         ),
         labeled_share: labeled as f64 / touch_f,
         categorized_share: categorized as f64 / touch_f,
-        switches_per_hour: episodes::task_switches(items) as f64 / (touch_f / 3600.0),
+        switches_per_hour: episodes::task_switches_with(items, params) as f64 / (touch_f / 3600.0),
         candidates_with_variants: episodes::observed_evidence(items)
             .values()
             .filter(|evidence| evidence.variants.is_some())
@@ -189,12 +199,25 @@ fn print_case_refs(blocks: &[TimelineBlockV1]) {
 }
 
 #[test]
+fn median_averages_the_two_middle_values() {
+    assert_eq!(median(vec![9.0, 1.0]), 5.0);
+    assert_eq!(median(vec![3.0, 1.0, 2.0]), 2.0);
+    assert_eq!(median(Vec::new()), 0.0);
+}
+
+#[test]
 #[ignore = "needs ENSO_CALIBRATION_DIR pointing at a copy of a real profile"]
 fn calibration_against_local_profile() {
-    let Some(dir) = std::env::var_os("ENSO_CALIBRATION_DIR").map(PathBuf::from) else {
-        eprintln!("ENSO_CALIBRATION_DIR not set; skipping");
-        return;
-    };
+    let dir = std::env::var_os("ENSO_CALIBRATION_DIR")
+        .map(PathBuf::from)
+        .expect("set ENSO_CALIBRATION_DIR to a copy of a real profile");
+    for required in ["enso-time.sqlite", "activitywatch/activitywatch.sqlite"] {
+        assert!(
+            dir.join(required).is_file(),
+            "{required} missing in {}",
+            dir.display()
+        );
+    }
     let store = crate::storage::LocalStore::open(&dir.join("enso-time.sqlite")).unwrap();
     let activity = crate::activitywatch::ActivityWatchRuntime::start(
         &dir.join("activitywatch"),
@@ -204,10 +227,8 @@ fn calibration_against_local_profile() {
     let to = Utc::now();
     let from = to - Duration::days(CALIBRATION_DAYS);
     let (from_s, to_s) = (from.to_rfc3339(), to.to_rfc3339());
-    let mut settings = store.settings().unwrap();
+    let settings = store.settings().unwrap();
     let titles_setting = settings.capture_window_titles;
-    // Titles are read only to count identifier patterns; they are never printed.
-    settings.capture_window_titles = true;
     let checkins = store.checkins_between(&from_s, &to_s).unwrap();
     let rules = store.classification_rules().unwrap();
     let overrides = store
@@ -217,6 +238,29 @@ fn calibration_against_local_profile() {
     let blocks = activity
         .timeline_with_context(from, to, &settings, &checkins, &rules, &overrides, &context)
         .unwrap();
+    assert!(
+        active_seconds(&blocks) > 0,
+        "no captured activity in the last {CALIBRATION_DAYS} days"
+    );
+    // Identifier patterns are counted on a separate titled read so the profile's own
+    // settings (and title-based rules) still drive classification and episodes.
+    let titled = if titles_setting {
+        blocks.clone()
+    } else {
+        let mut with_titles = settings.clone();
+        with_titles.capture_window_titles = true;
+        activity
+            .timeline_with_context(
+                from,
+                to,
+                &with_titles,
+                &checkins,
+                &rules,
+                &overrides,
+                &context,
+            )
+            .unwrap()
+    };
     let days = active_days(&blocks);
     println!(
         "# Calibration: {} blocks, {days} active days, {:.1} active h, {} rules, {} overrides, {} check-ins, {} context observations, titles setting {titles_setting}",
@@ -228,7 +272,7 @@ fn calibration_against_local_profile() {
         context.len(),
     );
     print_unknown(&blocks);
-    print_case_refs(&blocks);
+    print_case_refs(&titled);
 
     println!("\n## Sensitivity (one threshold at a time; default first)");
     println!("| params                     |   eps | eps/d | med m  | label | categ | sw/h  | var | drop   | sug/d |");
@@ -273,7 +317,7 @@ fn calibration_against_local_profile() {
     }
     for (label, params) in variants {
         let items = episodes::build_episodes_with(&blocks, &params);
-        print_row(&label, &summarize(&blocks, &items, days));
+        print_row(&label, &summarize(&blocks, &items, days, &params));
     }
 
     if let Some(path) = std::env::var_os("ENSO_CALIBRATION_OCEL").map(PathBuf::from) {

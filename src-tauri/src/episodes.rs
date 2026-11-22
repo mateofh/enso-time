@@ -342,11 +342,15 @@ fn absorb_short_excursions(drafts: Vec<Draft>, params: &EpisodeParams) -> Vec<Dr
 /// Moves from one task to a different one without a pause in between. Window changes
 /// inside a task (Gmail → Sheets for the same invoice) are not switches.
 pub fn task_switches(episodes: &[Episode]) -> usize {
+    task_switches_with(episodes, &EpisodeParams::default())
+}
+
+pub fn task_switches_with(episodes: &[Episode], params: &EpisodeParams) -> usize {
     episodes
         .windows(2)
         .filter(|pair| {
             let continuous = !pair[1].after_break
-                && (pair[1].start - pair[0].end).num_seconds() <= MAX_GAP_SECONDS;
+                && (pair[1].start - pair[0].end).num_seconds() <= params.max_gap_seconds;
             continuous
                 && pair[0].task_key.is_some()
                 && pair[1].task_key.is_some()
@@ -649,6 +653,24 @@ mod tests {
         items[1].classification_source = "checkin".into();
         // A short declared break is an interruption, not a task switch.
         assert_eq!(task_switches(&build_episodes(&items)), 0);
+    }
+
+    #[test]
+    fn task_switches_follow_the_gap_used_to_build_the_episodes() {
+        let items = blocks(&[
+            b("Excel", 0, 300).label("Facturar"),
+            b("Figma", 480, 900).label("Diseñar"),
+        ]);
+        // A 180 s gap is a pause by default and continuous with a 300 s threshold.
+        assert_eq!(task_switches(&build_episodes(&items)), 0);
+        let wide = EpisodeParams {
+            max_gap_seconds: 300,
+            ..EpisodeParams::default()
+        };
+        assert_eq!(
+            task_switches_with(&build_episodes_with(&items, &wide), &wide),
+            1
+        );
     }
 
     #[test]
