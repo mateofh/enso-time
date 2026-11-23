@@ -13,7 +13,6 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-import uuid
 from typing import Optional
 
 PORTS = range(5610, 5700)
@@ -77,8 +76,7 @@ def pair(code: str, preferred: Optional[int]) -> None:
         raise RuntimeError("El código debe tener ocho dígitos")
     current = load_config()
     port = find_port(preferred or current.get("port"))
-    client_id = current.get("clientId") or str(uuid.uuid4())
-    result = request(port, "/connectors/v1/pair", {"code": code, "clientId": client_id})
+    result = request(port, "/connectors/v1/pair", {"code": code})
     save_config({"port": port, "clientId": result["clientId"], "token": result["token"], "lastSentAt": 0, "lastCwd": None})
     print(f"Ensō Time emparejado en 127.0.0.1:{port}")
 
